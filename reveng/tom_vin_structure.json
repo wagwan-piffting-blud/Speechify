@@ -1,0 +1,501 @@
+{
+  "riff_tag": "RIFF",
+  "form_type": "svin",
+  "file_size": 34264978,
+  "riff_declared_size": 34264970,
+  "chunks": [
+    {
+      "tag": "LIST",
+      "offset": 12,
+      "data_offset": 20,
+      "size": 100,
+      "form_type": "INFO",
+      "sub_chunks": [
+        {
+          "tag": "ICOP",
+          "offset": 24,
+          "data_offset": 32,
+          "size": 68
+        },
+        {
+          "tag": "ICRD",
+          "offset": 100,
+          "data_offset": 108,
+          "size": 11
+        }
+      ]
+    },
+    {
+      "tag": "vers",
+      "offset": 120,
+      "data_offset": 128,
+      "size": 14
+    },
+    {
+      "tag": "cnts",
+      "offset": 142,
+      "data_offset": 150,
+      "size": 12
+    },
+    {
+      "tag": "feat",
+      "offset": 162,
+      "data_offset": 170,
+      "size": 134266
+    },
+    {
+      "tag": "mean",
+      "offset": 134436,
+      "data_offset": 134444,
+      "size": 2952
+    },
+    {
+      "tag": "hash",
+      "offset": 137396,
+      "data_offset": 137404,
+      "size": 22100640,
+      "sub_chunks": [
+        {
+          "tag": "head",
+          "offset": 137404,
+          "data_offset": 137412,
+          "size": 8
+        },
+        {
+          "tag": "rows",
+          "offset": 137420,
+          "data_offset": 137428,
+          "size": 2768760
+        },
+        {
+          "tag": "cell",
+          "offset": 2906188,
+          "data_offset": 2906196,
+          "size": 19331848
+        }
+      ]
+    },
+    {
+      "tag": "ckls",
+      "offset": 22238044,
+      "data_offset": 22238052,
+      "size": 394375
+    },
+    {
+      "tag": "cklx",
+      "offset": 22632428,
+      "data_offset": 22632436,
+      "size": 81042
+    },
+    {
+      "tag": "unit",
+      "offset": 22713478,
+      "data_offset": 22713486,
+      "size": 4917812,
+      "sub_chunks": [
+        {
+          "tag": "vers",
+          "offset": 22713486,
+          "data_offset": 22713494,
+          "size": 4
+        },
+        {
+          "tag": "data",
+          "offset": 22713498,
+          "data_offset": 22713506,
+          "size": 4917791
+        }
+      ]
+    },
+    {
+      "tag": "f0tr",
+      "offset": 27631298,
+      "data_offset": 27631306,
+      "size": 2430,
+      "sub_chunks": [
+        {
+          "tag": "trhd",
+          "offset": 27631306,
+          "data_offset": 27631314,
+          "size": 446,
+          "sub_chunks": [
+            {
+              "tag": "labl",
+              "offset": 27631314,
+              "data_offset": 27631322,
+              "size": 175
+            },
+            {
+              "tag": "ques",
+              "offset": 27631498,
+              "data_offset": 27631506,
+              "size": 254
+            }
+          ]
+        },
+        {
+          "tag": "tree",
+          "offset": 27631760,
+          "data_offset": 27631768,
+          "size": 1968
+        }
+      ]
+    },
+    {
+      "tag": "durt",
+      "offset": 27633736,
+      "data_offset": 27633744,
+      "size": 31906,
+      "sub_chunks": [
+        {
+          "tag": "trhd",
+          "offset": 27633744,
+          "data_offset": 27633752,
+          "size": 2386,
+          "sub_chunks": [
+            {
+              "tag": "labl",
+              "offset": 27633752,
+              "data_offset": 27633760,
+              "size": 175
+            },
+            {
+              "tag": "ques",
+              "offset": 27633936,
+              "data_offset": 27633944,
+              "size": 2194
+            }
+          ]
+        },
+        {
+          "tag": "tree",
+          "offset": 27636138,
+          "data_offset": 27636146,
+          "size": 672
+        },
+        {
+          "tag": "tree",
+          "offset": 27636818,
+          "data_offset": 27636826,
+          "size": 276
+        },
+        {
+          "tag": "tree",
+          "offset": 27637102,
+          "data_offset": 27637110,
+          "size": 384
+        },
+        {
+          "tag": "tree",
+          "offset": 27637494,
+          "data_offset": 27637502,
+          "size": 600
+        },
+        {
+          "tag": "tree",
+          "offset": 27638102,
+          "data_offset": 27638110,
+          "size": 168
+        },
+        {
+          "tag": "tree",
+          "offset": 27638278,
+          "data_offset": 27638286,
+          "size": 1104
+        },
+        {
+          "tag": "tree",
+          "offset": 27639390,
+          "data_offset": 27639398,
+          "size": 348
+        },
+        {
+          "tag": "tree",
+          "offset": 27639746,
+          "data_offset": 27639754,
+          "size": 348
+        },
+        {
+          "tag": "tree",
+          "offset": 27640102,
+          "data_offset": 27640110,
+          "size": 132
+        },
+        {
+          "tag": "tree",
+          "offset": 27640242,
+          "data_offset": 27640250,
+          "size": 132
+        },
+        {
+          "tag": "tree",
+          "offset": 27640382,
+          "data_offset": 27640390,
+          "size": 1140
+        },
+        {
+          "tag": "tree",
+          "offset": 27641530,
+          "data_offset": 27641538,
+          "size": 240
+        },
+        {
+          "tag": "tree",
+          "offset": 27641778,
+          "data_offset": 27641786,
+          "size": 564
+        },
+        {
+          "tag": "tree",
+          "offset": 27642350,
+          "data_offset": 27642358,
+          "size": 132
+        },
+        {
+          "tag": "tree",
+          "offset": 27642490,
+          "data_offset": 27642498,
+          "size": 816
+        },
+        {
+          "tag": "tree",
+          "offset": 27643314,
+          "data_offset": 27643322,
+          "size": 96
+        },
+        {
+          "tag": "tree",
+          "offset": 27643418,
+          "data_offset": 27643426,
+          "size": 456
+        },
+        {
+          "tag": "tree",
+          "offset": 27643882,
+          "data_offset": 27643890,
+          "size": 636
+        },
+        {
+          "tag": "tree",
+          "offset": 27644526,
+          "data_offset": 27644534,
+          "size": 204
+        },
+        {
+          "tag": "tree",
+          "offset": 27644738,
+          "data_offset": 27644746,
+          "size": 204
+        },
+        {
+          "tag": "tree",
+          "offset": 27644950,
+          "data_offset": 27644958,
+          "size": 564
+        },
+        {
+          "tag": "tree",
+          "offset": 27645522,
+          "data_offset": 27645530,
+          "size": 1032
+        },
+        {
+          "tag": "tree",
+          "offset": 27646562,
+          "data_offset": 27646570,
+          "size": 1212
+        },
+        {
+          "tag": "tree",
+          "offset": 27647782,
+          "data_offset": 27647790,
+          "size": 276
+        },
+        {
+          "tag": "tree",
+          "offset": 27648066,
+          "data_offset": 27648074,
+          "size": 1104
+        },
+        {
+          "tag": "tree",
+          "offset": 27649178,
+          "data_offset": 27649186,
+          "size": 1320
+        },
+        {
+          "tag": "tree",
+          "offset": 27650506,
+          "data_offset": 27650514,
+          "size": 924
+        },
+        {
+          "tag": "tree",
+          "offset": 27651438,
+          "data_offset": 27651446,
+          "size": 2040
+        },
+        {
+          "tag": "tree",
+          "offset": 27653486,
+          "data_offset": 27653494,
+          "size": 240
+        },
+        {
+          "tag": "tree",
+          "offset": 27653734,
+          "data_offset": 27653742,
+          "size": 528
+        },
+        {
+          "tag": "tree",
+          "offset": 27654270,
+          "data_offset": 27654278,
+          "size": 96
+        },
+        {
+          "tag": "tree",
+          "offset": 27654374,
+          "data_offset": 27654382,
+          "size": 672
+        },
+        {
+          "tag": "tree",
+          "offset": 27655054,
+          "data_offset": 27655062,
+          "size": 1032
+        },
+        {
+          "tag": "tree",
+          "offset": 27656094,
+          "data_offset": 27656102,
+          "size": 1824
+        },
+        {
+          "tag": "tree",
+          "offset": 27657926,
+          "data_offset": 27657934,
+          "size": 1392
+        },
+        {
+          "tag": "tree",
+          "offset": 27659326,
+          "data_offset": 27659334,
+          "size": 132
+        },
+        {
+          "tag": "tree",
+          "offset": 27659466,
+          "data_offset": 27659474,
+          "size": 2328
+        },
+        {
+          "tag": "tree",
+          "offset": 27661802,
+          "data_offset": 27661810,
+          "size": 528
+        },
+        {
+          "tag": "tree",
+          "offset": 27662338,
+          "data_offset": 27662346,
+          "size": 132
+        },
+        {
+          "tag": "tree",
+          "offset": 27662478,
+          "data_offset": 27662486,
+          "size": 600
+        },
+        {
+          "tag": "tree",
+          "offset": 27663086,
+          "data_offset": 27663094,
+          "size": 456
+        },
+        {
+          "tag": "tree",
+          "offset": 27663550,
+          "data_offset": 27663558,
+          "size": 672
+        },
+        {
+          "tag": "tree",
+          "offset": 27664230,
+          "data_offset": 27664238,
+          "size": 276
+        },
+        {
+          "tag": "tree",
+          "offset": 27664514,
+          "data_offset": 27664522,
+          "size": 528
+        },
+        {
+          "tag": "tree",
+          "offset": 27665050,
+          "data_offset": 27665058,
+          "size": 528
+        },
+        {
+          "tag": "tree",
+          "offset": 27665586,
+          "data_offset": 27665594,
+          "size": 24
+        },
+        {
+          "tag": "tree",
+          "offset": 27665618,
+          "data_offset": 27665626,
+          "size": 24
+        }
+      ]
+    },
+    {
+      "tag": "ccos",
+      "offset": 27665650,
+      "data_offset": 27665658,
+      "size": 1629024,
+      "sub_chunks": [
+        {
+          "tag": "labl",
+          "offset": 27665658,
+          "data_offset": 27665666,
+          "size": 175
+        },
+        {
+          "tag": "data",
+          "offset": 27665842,
+          "data_offset": 27665850,
+          "size": 1628832
+        }
+      ]
+    },
+    {
+      "tag": "prsl",
+      "offset": 29294682,
+      "data_offset": 29294690,
+      "size": 4969856
+    },
+    {
+      "tag": "hist",
+      "offset": 34264546,
+      "data_offset": 34264554,
+      "size": 424,
+      "sub_chunks": [
+        {
+          "tag": "head",
+          "offset": 34264554,
+          "data_offset": 34264562,
+          "size": 8
+        },
+        {
+          "tag": "data",
+          "offset": 34264570,
+          "data_offset": 34264578,
+          "size": 400
+        }
+      ]
+    }
+  ]
+}

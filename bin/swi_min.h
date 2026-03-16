@@ -35,10 +35,10 @@ typedef SWIttsResult (SWIAPI *SWIttsCallback)(
 );
 
 // Function pointer types
-typedef SWIttsResult (SWIAPI *PFN_SWIttsInit)(SWIttsCallback *cb, void *userData);
-typedef SWIttsResult (SWIAPI *PFN_SWIttsTerm)(SWIttsCallback *cb, void *userData);
+typedef SWIttsResult (SWIAPI *PFN_SWIttsInit)(SWIttsCallback cb, void *userData);
+typedef SWIttsResult (SWIAPI *PFN_SWIttsTerm)(SWIttsCallback cb, void *userData);
 typedef SWIttsResult (SWIAPI *PFN_SWIttsOpenPortEx)(SWIttsPort *outPort, const char *parameters,
-                                                    void *reserved, SWIttsCallback *cb, void *userData);
+                                                    void *reserved, SWIttsCallback cb, void *userData);
 typedef SWIttsResult (SWIAPI *PFN_SWIttsClosePort)(SWIttsPort port);
 typedef SWIttsResult (SWIAPI *PFN_SWIttsSpeak)(SWIttsPort port, const unsigned char *text,
                                                unsigned int lengthBytes, const char *content_type);

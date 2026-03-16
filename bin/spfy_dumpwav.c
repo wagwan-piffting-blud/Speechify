@@ -94,8 +94,8 @@ int wmain(int argc, wchar_t **wargv) {
     FILE *f = _wfopen(wargv[2], L"wb+");
     if (!f) { fprintf(stderr, "failed to open output\n"); return 3; }
 
-    // --- FIX: Write 8kHz WAV header ---
-    write_wav_header(f, 8000, 16, 1, 0);
+    // --- FIX: Write 16kHz WAV header ---
+    write_wav_header(f, 16000, 16, 1, 0);
 
     // Load the client DLL
     SWIttsAPI api;
@@ -124,8 +124,8 @@ int wmain(int argc, wchar_t **wargv) {
 
     fwprintf(stderr, L"INFO: Port opened: %d\n", (int)port);
 
-    // --- FIX: Request 8kHz, which the server supports ---
-    if (api.SetParameter(port, "tts.audioformat.mimetype", "audio/L16;rate=8000") != 0) {
+    // --- FIX: Request 16kHz, which the server supports ---
+    if (api.SetParameter(port, "tts.audioformat.mimetype", "audio/L16;rate=16000") != 0) {
         fprintf(stderr, "SetParameter(tts.audioformat.mimetype) failed\n");
     }
 
