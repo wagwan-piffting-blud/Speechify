@@ -1,7 +1,7 @@
 # SpeechWorks Speechify Voice Format: Reverse Engineering Summary
 
 > **Status:** Actively reversed. Most structures are confirmed; a handful of fields remain open questions.
-> This document is kept in sync with `README.md` (the technical living document). `README.md` has the raw
+> This document is kept in sync with `README_TECHNICAL.md` (the technical living document). `README_TECHNICAL.md` has the raw
 > binary-level detail; this file has the big-picture explanation in plain English.
 
 ---
