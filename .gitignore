@@ -21,3 +21,5 @@ wav*
 tom16.vdb
 en-US/tom/tom16.vdb
 diagnostics/
+!reveng/voice_cloning/tom_16k/*.wav
+!reveng/voice_cloning/rvc_input_flashsr/*.wav
