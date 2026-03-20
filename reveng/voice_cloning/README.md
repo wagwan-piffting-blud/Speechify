@@ -138,9 +138,15 @@ Test on a single file first:
 ```python
 from rvc_python.infer import RVCInference
 rvc = RVCInference(device="cuda:0")
-rvc.load_model("path/to/<voice>.pth")
-rvc.set_params(f0up_key=8, f0method="rmvpe", protect=0.33)
-rvc.infer_file("test_input.wav", "test_output.wav")
+rvc.load_model("rvc-no-gui/RVC/assets/weights/truest_mara_hq_e50_s4250.pth")
+rvc.set_params(
+    f0up_key=7,
+    f0method="crepe",
+    protect=0.2,
+    index_rate=0.3,
+    filter_radius=5
+)
+rvc.infer_file("tom_4am.wav", "truest_mara_4am.wav")
 ```
 
 Listen and adjust f0up_key until the pitch matches the reference.

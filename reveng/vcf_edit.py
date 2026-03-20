@@ -69,15 +69,15 @@ def patch_weight(xml: str, name: str, new_val: str) -> str:
 # Patches to apply.  Keys are full param names from the VCF.
 PATCHES = {
     'tts.voiceCfg.gender':                 'female',
-    'tts.voiceCfg.JOIN_COST_WEIGHT':       '0.7',    # Tom's original (weight*0=0 for misses, ineffective)
-    'tts.voiceCfg.JOIN_COST_OFFSET':       '0.2',    # Tom's original (was 0.15)
-    'tts.voiceCfg.ABS_F0_WEIGHT':         '0.2',     # Tom's original
-    'tts.voiceCfg.DUR_WEIGHT':            '0.3',     # Tom's original (was 0.2)
-    'tts.voiceCfg.CHUNK_BIAS_WEIGHT':     '0.25',    # Tom's original (was 0.5)
-    'tts.voiceCfg.UNIT_BIAS_WEIGHT':      '0.25',    # Tom's original (was 0.5)
-    'tts.voiceCfg.HALFPHONE_CAND_PRUNE_THRESH': '3.0',  # Engine default (2026-03-17: relaxed from 0.8 to let more candidates through without destroying quality)
-    'tts.voiceCfg.HALFPHONE_CAND_MAX_UNITS': '200',    # Raised to allow more candidates through (2026-03-17: was 50)
-    'tts.voiceCfg.CONTEXT_COST_WEIGHT':    '1.0',    # Tom's original
+    'tts.voiceCfg.JOIN_COST_WEIGHT':       '0.7',      # Tom's original (weight*0=0 for misses, ineffective)
+    'tts.voiceCfg.JOIN_COST_OFFSET':       '0.2',      # Tom's original (was 0.15)
+    'tts.voiceCfg.ABS_F0_WEIGHT':         '0.2',       # Tom's original
+    'tts.voiceCfg.DUR_WEIGHT':            '0.3',       # Tom's original (was 0.2)
+    'tts.voiceCfg.CHUNK_BIAS_WEIGHT':     '0.25',      # Tom's original (was 0.5)
+    'tts.voiceCfg.UNIT_BIAS_WEIGHT':      '0.25',      # Tom's original (was 0.5)
+    'tts.voiceCfg.HALFPHONE_CAND_PRUNE_THRESH': '0.8', # Tom's original
+    'tts.voiceCfg.HALFPHONE_CAND_MAX_UNITS': '50',     # Tom's original (was 200)
+    'tts.voiceCfg.CONTEXT_COST_WEIGHT':    '1.0',      # Tom's original
 }
 
 

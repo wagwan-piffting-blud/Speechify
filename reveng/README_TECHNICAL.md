@@ -613,6 +613,47 @@ Two traversal variants exist:
 For `f0tr` (Tom's pitch model):
 - Mean: 106.75..126.62 Hz (overall mean ~117 Hz, matching Tom's male speaking pitch)
 - Variance: 0.121..0.481
+- All 55 leaves clustered within 3 semitones -- a "prosodic straitjacket" that limits
+  intonation range regardless of sentence content
+
+### f0tr predictions and WSOLA pitch modification (CONFIRMED 2026-03-20)
+
+**f0tr leaf predictions feed DIRECTLY into the engine's WSOLA pitch modification
+parameters.** This means modifying f0tr leaf values changes the actual pitch contour
+of synthesized speech -- the only modification (out of 71+ experiments) that affects
+voice PERFORMANCE (prosody, cadence) rather than just timbre (voice identity).
+
+#### Double-correction issue with RVC voices
+
+When using RVC for voice conversion (e.g., Tom -> Mara), there are TWO independent
+pitch-shifting mechanisms:
+1. **RVC f0up_key**: shifts the fundamental frequency during voice conversion
+2. **WSOLA f0tr-based modification**: the engine applies pitch modification based on
+   f0tr tree predictions at synthesis time
+
+If f0tr leaf means are scaled (e.g., scale=1.58 to shift from Tom's 118 Hz toward
+Mara's 176 Hz), BOTH mechanisms apply their pitch shift independently, resulting in
+"double correction" -- the voice sounds "drunk" or over-modulated.
+
+#### Correct patching approach (patch_f0tr.py)
+
+The correct approach for RVC-converted voices:
+- **scale=1.0** -- keep leaf medians at Tom's original pitch (RVC handles the shift)
+- **expand=N** -- spread leaf values around the median to increase prosodic variation
+
+Formula in `patch_f0tr.py`:
+```
+median_hz = median of all leaf means (Tom: ~118 Hz)
+for each leaf:
+    semitones_from_median = 12 * log2(leaf.mean / median_hz)
+    expanded_semitones = semitones_from_median * expand
+    new_mean = median_hz * 2^(expanded_semitones / 12)
+    leaf.mean = scale * new_mean
+```
+
+With scale=1.0 and expand=6.0: the median stays at 118 Hz (Tom's pitch, which RVC
+will shift to Mara's range), but the variation around that median increases 6x,
+restoring natural prosodic contours (questions rise, statements fall, emphasis peaks).
 
 For `durt` (Tom's duration model, per-phone):
 - Mean: 57..193 (in local_pos units = 4 samples at 8 kHz = 0.5 ms)

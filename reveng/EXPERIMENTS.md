@@ -1371,6 +1371,198 @@ Tom's male voice leaked through.
 
 ---
 
+## Experiment 72: WSOLA Boundary Smoothing (2026-03-20)
+
+**Goal:** Reduce spectral discontinuities at unit boundaries in the WSOLA output
+by applying Gaussian smoothing at lp boundary points.
+
+**Method:**
+1. Created `wsola_boundary_smooth.py` -- applies Gaussian kernel crossfade at lp boundaries
+2. Tested strength values: 0.3, 0.5, 0.7, 1.0
+3. Compared 13 audio quality metrics (spectral flux, pitch stability, HNR, etc.)
+
+**Results:**
+- strength=0.5 won 10/13 metrics vs unsmoothed baseline
+- Spectral flux improvement: +21.3%
+- Pitch stability improvement: +8.5%
+- HNR improvement: +3.9%
+- strength=0.5 and 0.7 produce identical results through engine (8kHz u-law bottleneck
+  quantizes away the difference)
+
+**STATUS:** CONFIRMED IMPROVEMENT -- strength=0.5 adopted as default
+
+---
+
+## Experiment 73: f0tr CART Tree Patching (2026-03-20)
+
+**Goal:** Modify f0tr tree leaf predictions to improve Mara's prosodic range.
+
+**Background:** f0tr leaf predictions feed DIRECTLY into WSOLA pitch modification
+parameters. This is the first modification in 71+ experiments that changes voice
+PERFORMANCE (prosody, cadence) rather than just timbre (voice identity).
+
+**Method:**
+1. Created `patch_f0tr.py` -- modifies f0tr leaf mean values
+2. Tom's 55 leaves clustered tightly: 106.75-126.62 Hz (only 3 semitones of range)
+   This creates a "prosodic straitjacket" -- monotone delivery regardless of content
+3. Tested scale factor (multiply all leaf means) and expand factor (spread from median)
+4. Formula: convert mean to semitones from median, multiply by expand, convert back
+
+**Key discovery -- double correction bug:**
+- scale=1.58 caused "drunk" sounding voice
+- Root cause: BOTH RVC and WSOLA were shifting pitch independently
+  - RVC already shifts Tom->Mara pitch via f0up_key
+  - WSOLA then applies f0tr-based pitch modification ON TOP of RVC output
+  - Result: double correction (pitch shifted twice)
+
+**Correct approach:**
+- scale=1.0 (keep median at Tom's 118 Hz -- RVC handles the pitch shift)
+- expand=6.0 (spread leaf values around median to increase prosodic variation range)
+- This gives WSOLA more dynamic range for intonation without fighting RVC
+
+**Results:**
+- User assessment: "sounds like Mara's broadcast cadence"
+- Natural rising/falling intonation patterns restored
+- No more monotone delivery on questions, lists, emphasis
+
+**STATUS:** MAJOR BREAKTHROUGH -- first prosody-affecting modification
+
+---
+
+## Experiment 74: Spin-v2 Embedder for RVC (2026-03-20)
+
+**Goal:** Test Spin-v2 as alternative to ContentVec embedder in RVC pipeline.
+
+**Method:**
+1. Trained mara_spinv2 model: 500 epochs on 30-minute dataset
+2. Compared output quality metrics against ContentVec-based model
+
+**Results:**
+- e500: F0 doubled to 399 Hz (catastrophic pitch error)
+- HNR degraded by -19.2 dB
+- MFCC distance: ContentVec=48 vs Spin-v2=311 (6.5x worse)
+- Spin-v2 is categorically worse than ContentVec for this voice conversion task
+
+**STATUS:** FAILED -- ContentVec remains the correct embedder choice
+
+---
+
+## Experiment 75: Engine-Trained RVC Model (2026-03-20)
+
+**Goal:** Train RVC on engine-synthesized output (100 sentences through Speechify)
+to create a model that naturally handles engine audio characteristics.
+
+**Method:**
+1. Synthesized 100 sentences through the Speechify engine (6.2 min corpus)
+2. Trained RVC model on this corpus: 500 epochs
+
+**Results:**
+- Loss bottomed at epoch 181 (27.74), then overtrained to 36.7 at e500
+- Model learned "noisy low-bandwidth speech" characteristics, not Mara's voice
+- 6 minutes of 8kHz engine output is insufficient training data
+- Quality fundamentally limited by source audio bandwidth
+
+**STATUS:** FAILED -- engine output too degraded for RVC training source
+
+---
+
+## Experiment 76: Pure Source RVC Model (2026-03-20)
+
+**Goal:** Train RVC on ONLY confirmed direct Mara recordings (no weather-radio-
+through-speaker recordings) to test whether source purity matters more than quantity.
+
+**Method:**
+1. Curated ~4 minutes of confirmed direct Mara recordings (clean, no rebroadcast)
+2. Trained RVC model: 500 epochs
+3. Compared against 30-minute mixed-quality model
+
+**Results:**
+- Converged extremely fast: loss 20.858 at epoch 50 (vs much slower with mixed data)
+- e100 won 6/6 articulation metrics
+- e150 won 6/6 tonal quality metrics
+- MFCC distance 129 (worse on paper than ContentVec's 48) but user reports
+  perceptually closer to real Mara
+- Confirms key insight: source recording purity matters more than quantity
+- User perceptual evaluation beats aggregate metrics for voice identity assessment
+
+**STATUS:** PROMISING -- pure-source approach validated
+
+---
+
+## Experiment 77: FlashSR Evaluation (2026-03-20)
+
+**Goal:** Evaluate FlashSR as replacement for AudioSR in the upscaling pipeline.
+FlashSR uses one-step diffusion distillation, claimed 22x faster than AudioSR.
+
+**Method:**
+1. Tested ONNX version (too compressed, poor quality)
+2. Tested GPU version (better quality but "carbonated" artifacts)
+3. Tested lowpass_input parameter: False is better for 8kHz source material
+4. Input requirement: 16kHz minimum, so pipeline is 8kHz -> librosa 16kHz -> FlashSR -> 48kHz
+
+**Results:**
+- Speed: confirmed ~22x faster than AudioSR
+- Quality: promising but "carbonated" (fizzy) artifacts in some outputs
+- ONNX version too aggressively quantized for this use case
+- GPU version usable but needs further evaluation against AudioSR baseline
+
+**STATUS:** IN PROGRESS -- being evaluated as AudioSR replacement
+
+---
+
+## Current status (2026-03-20)
+
+### Recording switches progress
+| Configuration | Switches | Method |
+|--------------|----------|--------|
+| Baseline (no hooks) | 40 | -- |
+| Trim v1 (first-half only) | 42 | FAILED -- dl=1 artifacts |
+| Trim v2 (all halves) | 37 | Trim alone, no hooks |
+| Penalty hook (p=50) | 32 | Frida code cave at 0x8E8B854 |
+| + PRSL injection + prune=3.0 | 29 | build_mara_rest.py + VCF |
+| Full stack (trim v2 + all) | **29** | Best quality, user-approved |
+| Spectral join cost cave | **29** | No change (Exp 65) |
+| RVC + penalty (no trim) | 33 | Seamless transitions |
+| RVC + trim v2 + full stack | **31** | Seamless, some phantoms |
+| Voice skin (True Mara v2) | **28 / 24** | 28 raw, 24 with hook (Exp 69) |
+| + f0tr patch + WSOLA smooth | **28 / 24** | Enhanced prosody (Exp 72-73) |
+| Theoretical minimum | 2 | Dijkstra on recording graph |
+
+### Current best config (2026-03-20)
+- **Voice skin pipeline:** Tom 8kHz u-law -> AudioSR 48kHz -> RVC -> build_voice_skin.py
+- **Post-processing:** patch_f0tr.py (scale=1.0, expand=6.0) + wsola_boundary_smooth.py (strength=0.5)
+- **RVC settings:** pitch=7, protect=0.1, ContentVec embedder, Applio framework
+- **RVC model:** Pure-source (~4 min clean direct recordings, Exp 76) or mara_v2.pth
+- 6,606 recordings via AudioSR+RVC, 243 short via direct RVC fallback
+- VCF: HALFPHONE_CAND_PRUNE_THRESH=3.0, HALFPHONE_CAND_MAX_UNITS=200
+- Frida penalty hook: p=50 at 0x8E8B854
+
+### Key discoveries (2026-03-20)
+1. **f0tr predictions feed DIRECTLY into WSOLA pitch modification** -- first mod that changes
+   voice PERFORMANCE (prosody/cadence) not just timbre (Exp 73)
+2. **Double correction bug**: RVC shifts pitch via f0up_key, WSOLA shifts again via f0tr --
+   scale must be 1.0 to avoid compounding. expand=6.0 for prosodic range.
+3. **Source purity > quantity** for RVC training: 4 min clean beats 30 min mixed (Exp 76)
+4. **Spin-v2 categorically worse than ContentVec** for this task (Exp 74)
+5. **WSOLA boundary smoothing** improves spectral flux +21.3%, pitch stability +8.5% (Exp 72)
+6. **User perceptual evaluation beats aggregate metrics** for voice identity assessment
+7. **FlashSR** is 22x faster than AudioSR but has "carbonated" artifacts (Exp 77, in progress)
+
+### Build pipeline (2026-03-20)
+- `build_voice_skin.py` -- primary voice skin builder
+- `patch_f0tr.py` -- f0tr CART tree leaf patching (scale=1.0, expand=6.0)
+- `wsola_boundary_smooth.py` -- Gaussian smoothing at unit boundaries (strength=0.5)
+- `build_voice_pipeline.py` -- consolidated MFA pipeline (Qwen approach, superseded)
+- `batch_synth.py` -- batch synthesis for testing
+
+### Project status
+- Mara voice: COMPLETE + ENHANCED (prosody via f0tr, smoothing via WSOLA)
+- Craig voice: next (same pipeline, new RVC model)
+- All reverse engineering goals achieved: VIN/VDB/VCF formats fully understood
+- Build pipeline proven and repeatable for new voices
+
+---
+
 ## Current status (2026-03-18 FINAL)
 
 ### Recording switches progress
