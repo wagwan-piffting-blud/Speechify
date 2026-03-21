@@ -1,26 +1,17 @@
 # SpeechWorks Speechify Voice Format: Reverse Engineering Summary
 
-> **Status:** Actively reversed. Most structures are confirmed; a handful of fields remain open questions.
-> This document is kept in sync with `README_TECHNICAL.md` (the technical living document). `README_TECHNICAL.md` has the raw
-> binary-level detail; this file has the big-picture explanation in plain English.
+> **Status:** Concluded. Most structures are confirmed; a small amount remain open questions. These do not affect the core unit catalog or the ability to build a working voice. See `README_TECHNICAL.md` for the latest details on open questions and ongoing investigations.
+> This document is kept in sync with `README_TECHNICAL.md` (the technical living document). `README_TECHNICAL.md` has the raw binary-level detail; this file has the big-picture explanation in plain English.
 
 ---
 
 ## Background
 
-**SpeechWorks International** (acquired by Nuance in 2003, later folded into Microsoft) made a unit-selection
-text-to-speech engine called Speechify, used widely in IVR phone systems, GPS navigation units, and — most
-notably for our purposes — NOAA Weather Radio during the CRS era. The voice we're working with is "Tom",
-version 3.0.0.0alpha, dated May 2003.
+**SpeechWorks International** (acquired by Nuance in 2003, later folded into Microsoft) made a unit-selection text-to-speech engine called Speechify, used widely in IVR phone systems, GPS navigation units, and -- most notably for our purposes -- NOAA Weather Radio during the CRS era. The voice we're working with is "Tom", version 3.0.0.0alpha, dated May 2003.
 
-Unit-selection TTS works by recording a human speaker reading hundreds of carefully designed prompts, then
-slicing those recordings into phoneme-sized segments ("units") and storing them in a database. At synthesis
-time, the engine picks the best-matching sequence of units from the database and concatenates them, smoothing
-over the joins as best it can. The result sounds like the original speaker, because it *is* the original
-speaker — just cut up and reassembled.
+Unit-selection TTS works by recording a human speaker reading hundreds of carefully designed prompts, then slicing those recordings into phoneme-sized segments ("units") and storing them in a database. At synthesis time, the engine picks the best-matching sequence of units from the database and concatenates them, smoothing over the joins as best it can. The result sounds like the original speaker, because it *is* the original speaker -- just cut up and reassembled.
 
-**No public documentation of any SpeechWorks file format has ever existed.** This project is the first
-reverse engineering effort to fully document them.
+**No public documentation of any SpeechWorks file format has ever existed.** This project is the first reverse engineering effort to fully document them.
 
 ---
 
@@ -30,7 +21,7 @@ Every SpeechWorks voice ships as a triplet:
 
 | File | Full Name | Role |
 |------|-----------|------|
-| `tom.vin` | Voice INdex | The synthesis brain — unit catalog, decision trees, cost tables |
+| `tom.vin` | Voice INdex | The synthesis brain -- unit catalog, decision trees, cost tables |
 | `tom8.vdb` | Voice DataBase | The raw recorded audio |
 | `tom.vcf` | Voice ConFiguration | Runtime tuning parameters and cost weights |
 
@@ -76,7 +67,7 @@ To decrypt: read pairs of bytes, look each up in the table to get one nibble, co
 
 ---
 
-## VDB — Voice DataBase (`tom8.vdb`)
+## VDB -- Voice DataBase (`tom8.vdb`)
 
 The VDB is the simplest of the three files. After decryption it's a standard RIFF/WAVE file containing
 the raw audio for every recording session.
@@ -87,12 +78,12 @@ the raw audio for every recording session.
 |-------|------|---------|
 | `LIST INFO` | 100 B | Copyright notice and creation date |
 | `fmt ` | 16 B | Audio format descriptor |
-| `indx` | ~133 KB | Recording index — maps names to byte offsets in `data` |
+| `indx` | ~133 KB | Recording index -- maps names to byte offsets in `data` |
 | `data` | ~59.4 MB | Concatenated audio for all recording sessions |
 
 ### Audio Format
 
-The audio data is **G.711 μ-law, 8 kHz, mono — 1 byte per sample**.
+The audio data is **G.711 μ-law, 8 kHz, mono -- 1 byte per sample**.
 
 The `fmt ` chunk header is deliberately misleading: it declares `AudioFormat=7` (mu-law), `BitsPerSample=16`,
 `BlockAlign=2`, `ByteRate=16000`. The `BitsPerSample=16` field is wrong for the actual data (which is 8-bit
@@ -141,7 +132,7 @@ The duration of recording `i` is `offset[i+1] - offset[i]`.
 
 ---
 
-## VIN — Voice INdex (`tom.vin`)
+## VIN -- Voice INdex (`tom.vin`)
 
 The VIN is where all the intelligence lives. After decryption it's a RIFF file with form type `svin`
 containing 14 chunks. These fall into a few functional groups:
@@ -159,8 +150,8 @@ containing 14 chunks. These fall into a few functional groups:
 | `unit` | ~4.7 MB | VIN + VDB | Core unit catalog | Confirmed |
 | `ckls` | ~385 KB | VIN | Prompt annotations | Confirmed (partial semantics) |
 | `cklx` | ~79 KB | VIN | Checklist index | Confirmed |
-| `f0tr` | ~2.4 KB | VIN | Prosody model | **CONFIRMED** -- 1 CART tree (109 nodes), variable-size nodes |
-| `durt` | ~31 KB | VIN | Prosody model | **CONFIRMED** -- 47 CART trees (1 per phone), variable-size nodes |
+| `f0tr` | ~2.4 KB | VIN | Prosody model | Confirmed -- 1 CART tree (109 nodes), variable-size nodes |
+| `durt` | ~31 KB | VIN | Prosody model | Confirmed -- 47 CART trees (1 per phone), variable-size nodes |
 | `ccos` | ~1.6 MB | VIN | Join cost | Confirmed |
 | `prsl` | ~4.7 MB | VIN | Candidate selection | Confirmed |
 | `hash` | ~21.1 MB | VIN | Join cost cache | Confirmed |
@@ -193,10 +184,10 @@ Three 32-bit integers summarizing the database:
 
 ### Schema Chunks
 
-#### `feat` — Feature Registry
+#### `feat` -- Feature Registry
 
 A sequence of 16 named feature definitions. Each feature has a name and either a list of enumerated values
-(categorical) or zero values (continuous — actual values are computed at synthesis time).
+(categorical) or zero values (continuous -- actual values are computed at synthesis time).
 
 **Key features:**
 
@@ -221,7 +212,7 @@ The phone variants `aa1`/`aa2` (and so on) represent the two halves of each diph
 
 ### Acoustic Model Chunks
 
-#### `mean` — Per-Phone Feature Means
+#### `mean` -- Per-Phone Feature Means
 
 A 92 × 8 float32 matrix: one row per phone variant, eight acoustic feature columns.
 
@@ -249,7 +240,7 @@ Note: `power_mean` is in the scale of `ln(mean_abs_PCM16)`, typically 4–6 for 
 A new voice with different recording levels will have a different absolute power scale, which is
 fine as long as it is internally consistent within the voice.
 
-#### `hist` — Z-Score Histogram
+#### `hist` -- Z-Score Histogram
 
 100 float32 bins representing the negative log-probability of each Z-score bucket, used to compute how
 "unusual" an acoustic feature value is for a given phone. The histogram covers Z-scores from -50 to +50
@@ -270,7 +261,7 @@ the histogram is just a global Z-score prior.
 
 ### Core Unit Catalog
 
-#### `unit` — The Unit Database
+#### `unit` -- The Unit Database
 
 This is the heart of the VIN: 169,579 records at 29 bytes each, one for every half-phoneme unit in the
 voice database. A "unit" is one half of one phoneme instance in one specific recording.
@@ -280,7 +271,7 @@ voice database. A "unit" is one half of one phoneme instance in one specific rec
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | +0x00 | u32 | `unit_id` | Sequential 0..169,578 |
-| +0x04 | u16 | `file_idx` | Index into `indx`/`feat[filename]` — which recording this unit is from |
+| +0x04 | u16 | `file_idx` | Index into `indx`/`feat[filename]` -- which recording this unit is from |
 | +0x06 | u16 | `local_pos` | Position within that recording; **unit = 8 μ-law bytes at 8 kHz (= 1 ms)**. `byte_offset = local_pos × 8`. |
 | +0x08 | u16 | *(zero)* | Always 0 |
 | +0x0A | u16 | `dur_like` | Duration in the same unit as `local_pos` (8 bytes each). `segment_bytes = dur_like × 8`. `next.local_pos − local_pos ≈ dur_like` (92.7%) or `dur_like + 40` (gap region). |
@@ -299,7 +290,7 @@ voice database. A "unit" is one half of one phoneme instance in one specific rec
 | +0x1B | u8 | `flag_b` | 1 = valid utterance-internal unit (89%); 0 = recording boundary or context unavailable |
 | +0x1C | u8 | `context_cost` | {0, 100}; 100 = "forbidden/unknown" prosody tier (36% of units) |
 
-**How units relate to recordings:** `file_idx` indexes into the `feat.filename` list inside the VIN, giving the recording name. The engine then does a **name-based lookup** into the `indx` table in the VDB — it does NOT use `file_idx` as a direct positional index into `indx`.
+**How units relate to recordings:** `file_idx` indexes into the `feat.filename` list inside the VIN, giving the recording name. The engine then does a **name-based lookup** into the `indx` table in the VDB -- it does NOT use `file_idx` as a direct positional index into `indx`.
 
 > **CRITICAL (confirmed 2026-03-11):** The `indx` ordering in `tom8.vdb` does NOT match the `feat.filename` ordering in `tom.vin`. Of 8,118 entries, **7,444 are in different positions**. Anyone building a custom voice must look up recording sizes by **name** (via `filenames[file_idx]`), not by VDB position. Using positional indexing produces silently wrong cap values and causes the engine to crash with "File end is beyond the speech DB end" for most units.
 
@@ -322,7 +313,7 @@ ccos label index, so the value stored in the VIN file is just a loading artifact
 These two chunks encode what *words* and *syllables* appear in each recording, so the engine can look
 up which recordings contain the phonetic content it needs.
 
-#### `ckls` — Checklist
+#### `ckls` -- Checklist
 
 Stores token occurrence streams for two linguistic levels: words (`_WORD_`) and syllables (`_SYL_`).
 Each stream is an alternating sequence of token records and filename records:
@@ -347,7 +338,7 @@ Confirmed exhaustively (100% of word and syllable records cross-validate):
 
 For example, the word "thursday" (5 phones: th-er-z-d-ey) has span [9, 18], delta=9=2×5−1, covering 10 units.
 
-#### `cklx` — Checklist Index
+#### `cklx` -- Checklist Index
 
 The reverse lookup table: given a word or syllable string, find all its occurrence IDs in `ckls`.
 
@@ -490,7 +481,7 @@ final_cost = JOIN_COST_WEIGHT × raw_cost + JOIN_COST_OFFSET
            = 0.7 × raw_cost + 0.2
 ```
 
-#### `hash` — Precomputed Join Cost Table
+#### `hash` -- Precomputed Join Cost Table
 
 This is the largest chunk at ~21 MB. It maps `(uid_left, uid_right)` unit pairs to precomputed
 spectral distance costs (float32, range 0..~12, typical 0..3).
@@ -500,7 +491,7 @@ The internal structure is a hash table organized as three sub-chunks:
 | Sub-chunk | Size | Contents |
 |-----------|------|---------|
 | `head` | 8 B | `u32 n_rows = 692,190`, `u32 n_cells = 2,416,481` |
-| `rows` | 2.77 MB | `u32[692,190]` — chain start index for each `uid_right` |
+| `rows` | 2.77 MB | `u32[692,190]` -- chain start index for each `uid_right` |
 | `cell` | 19.3 MB | Two flat arrays: `u32[n_cells]` uid_left values + `f32[n_cells]` costs |
 
 **How to look up `(uid_left, uid_right)` (CORRECTED 2026-03-16):**
@@ -521,7 +512,7 @@ positions align in the cell array. Occupancy: 1,621,241 data entries / 2,416,481
 **Statistics:** 1,621,241 actual `(uid_left, uid_right)` pairs are precomputed, covering ~159,982
 distinct `uid_right` values.
 
-#### `ccos` — Concatenation Cost Spectral Vectors
+#### `ccos` -- Concatenation Cost Spectral Vectors
 
 Used in the alternative edge-frames mode (disabled for Tom, but still present). Contains the boundary
 spectral feature vectors used to compute join cost at runtime:
@@ -538,7 +529,7 @@ consistent with MFCC scale.
 At load time, the unit selector overwrites `unit[i].f0_context` with the phone's ccos label index
 (from `labl`), so the engine can quickly look up the right spectral vector for any unit's boundary.
 
-#### `prsl` — Preselection Cache
+#### `prsl` -- Preselection Cache
 
 Before running the Viterbi search, the engine narrows down candidates using this chunk. For each
 synthesis context, it provides a pre-filtered list of suitable units:
@@ -594,7 +585,7 @@ its `hp_base` = 84 by the `2*pc` formula.
 **Silence/boundary marker:** `hp_base = 92` is used for left or right context when there is no
 adjacent unit (i.e., word boundary or utterance start/end). This corresponds to the 47th entry in
 the sorted phone table (`jh1` base at sort_pos=46 → 2*46=92). The value 92 appears as A=0 is NOT
-the silence marker — A=0 means "silence as left context, ignoring halfphone".
+the silence marker -- A=0 means "silence as left context, ignoring halfphone".
 
 **Context encoding rules** (99.94% accuracy on all 76,676 groups):
 
@@ -615,7 +606,7 @@ field +4 holds the halfphone base. A and C come from a 3-element context array p
 
 ---
 
-## VCF — Voice Configuration (`tom.vcf`)
+## VCF -- Voice Configuration (`tom.vcf`)
 
 After decryption, the VCF is an **ISO-8859-1 XML file** following the `SWIttsConfig` DTD. It contains
 all the tuning parameters and cost weights the engine uses at synthesis time.
@@ -637,7 +628,7 @@ all the tuning parameters and cost weights the engine uses at synthesis time.
 | `tts.voiceCfg.index` | `${xml:base}/${tts.voice.name}.vin` | `tom.vin` |
 | `tts.voiceCfg.speechdb` | `${xml:base}/${tts.voice.name}${tts.voice.format}.vdb` | `tom8.vdb` |
 
-The `${tts.voice.format}` variable is why the VDB is called `tom8.vdb` — the engine substitutes the
+The `${tts.voice.format}` variable is why the VDB is called `tom8.vdb` -- the engine substitutes the
 format tag (8 for 8 kHz) at runtime. A 16 kHz voice would load `tom16.vdb`.
 
 ### Cost Function Weights
@@ -694,7 +685,7 @@ matrices where rows are the target context and columns are the candidate context
 - **`wordInPhraseCosts`** (7×7): Word position in phrase.
 
 The `context_cost=100` value in `unit +0x1C` maps directly to the "ContextUnknown=100" column/row
-in these matrices — marking units where prosodic context is unknown or forbidden.
+in these matrices -- marking units where prosodic context is unknown or forbidden.
 
 ---
 
@@ -727,115 +718,7 @@ At synthesis time:
 
 ## Making a New Voice
 
-This section documents the **proven workflow** used to create Mara (female speaker) as a drop-in
-replacement for Tom. Mara uses Tom's phone inventory, trees, and corpus structure, substituting
-only the audio recordings and derived acoustic statistics.
-
-### Prerequisites
-
-- Python 3.12 with: `numpy`, `scipy`, `librosa`, `wave`, `audioop`, `struct`
-- Montreal Forced Aligner (MFA) for phoneme-level audio alignment
-- A TTS synthesizer (e.g. Qwen3-TTS) to generate audio from transcripts, or your own recordings
-- Engine binary: `bin\spfy_dumpwav32_8khz.exe` (use the 8 kHz variant, NOT the 16 kHz one)
-
-### Step 1 -- Prepare Audio Recordings
-
-The engine expects one WAV per utterance, matching Tom's utterance names
-(`feat.filename` list in `tom.vin`). All utterances that Mara does not already have
-must be synthesized or recorded and placed in `en-US/mara/output/mara_voice_wavs/<name>.wav`.
-
-1. Run `gen_mara_gap_transcripts.py` to find which Tom utterances Mara does not yet have, and
-   generate a synthesis CSV with transcripts recovered from the `ckls` stream and any manual
-   transcription CSVs.
-2. Synthesize missing utterances with `08a_batch_synthesize_transcripts.py` (Qwen3-TTS), producing
-   24 kHz WAVs stored flat in `en-US/mara/output/mara_voice_wavs/`.
-3. For utterances whose transcripts are not in `ckls` (common for phonetically controlled TTS training
-   material like numbers, letters, addresses), use `extract_tom_audio_for_transcription.py` to pull
-   Tom's own audio clips, then transcribe them manually with
-   `reveng/~__WORKDIR__.~/transcribe_session.py`.
-
-### Step 2 -- Run MFA (Forced Alignment)
-
-Forced alignment maps each recording to phone-level time boundaries, which `build_mara_voice.py`
-uses to compute `unit.local_pos` and `unit.dur_like`.
-
-```
-# Prepare: one WAV + one .lab (transcript text) per file in mfa_guided_input/
-# Output: TextGrid files in mfa_guided_output/
-mfa align mfa_guided_input/ english_us_arpa mfa_guided_output/ --clean
-```
-
-**MFA must run before the build pipeline.** The build script reads TextGrid files to compute
-unit positions. Units outside an aligned region default to Tom's proportionally-scaled positions.
-
-### Step 3 -- Build the Voice Files (4-Script Pipeline)
-
-Run these four scripts in order. Each patches the VIN/VDB incrementally.
-
-#### Script 1: `build_mara_voice.py`
-
-Builds `mara8.vdb` and `mara.vin` from scratch.
-
-- Reads all WAVs in `en-US/mara/output/mara_voice_wavs/`
-- Downsamples from 24 kHz to 8 kHz (3:1), converts to u-law with `audioop.lin2ulaw`
-- Writes `mara8.vdb`: RIFF/WAVE with `fmt ` (AudioFormat=7, BitsPerSample=16, BlockAlign=2),
-  `indx` (name -> byte offset), and `data` (raw u-law bytes)
-- Clones Tom's `unit`, `mean`, `hash`, `prsl`, `hist`, and tree chunks, scaling `local_pos` and
-  `dur_like` from TextGrid times: `lp = round(start_sec * 1000)`, `dl = round(dur_sec * 1000)`
-- Cap enforced: `lp + dl <= mara_n // 8 - 1` where `mara_n` = total u-law bytes in that recording
-
-**Critical bug to avoid:** `feat.filename` entries each have a `u32 stored_id` field that is NOT
-the positional index (29% of entries are out of order). Always use
-`filenames = {stored_id: name}` (dict keyed by stored_id), never a positional list.
-
-#### Script 2: `build_mara_hash.py`
-
-Patches the `hash` chunk with Mara-specific join costs computed from Mara's MFCC boundary vectors.
-
-- Computes MFCC boundary vectors per unit from the aligned WAVs
-- Calculates spectral distances between candidate unit pairs
-- Writes updated hash chunk in SoA format: `u32[n_cells] cells_A` then `f32[n_cells] cells_B`
-
-#### Script 3: `build_mara_prsl.py`
-
-Patches the `prsl` chunk so synthesis contexts prefer Mara's units.
-
-- Iterates all (left, center, right) unit trigrams from Mara's aligned recordings
-- Computes `context_key = left_hp * 10000 + center_hp * 100 + right_hp`
-  (see prsl section for hp_base table and anomalies at aw/ax/b)
-- Groups candidate unit IDs by context_key
-- Falls back to Tom's prsl entries for any keys Mara does not cover
-
-Mara result: 12,413 native keys + 73,657 Tom fallback = 86,070 total (Tom has 76,676).
-
-#### Script 4: `build_mara_mean.py`
-
-Patches the `mean` chunk with Mara-specific per-halfphone acoustic statistics.
-
-- Computes per-halfphone `(mean, std)` for: duration, pitch (F0), voicing, power
-- `power_mean` is in `ln(mean_abs_PCM16)` scale -- will differ from Tom's for different recording levels
-- Writes 92x8 f32 row-major matrix
-- Leaves `hist` unchanged (keep Tom's empirical histogram)
-
-### Step 4 -- Test with the Engine
-
-```
-bin\spfy_dumpwav32_8khz.exe "Hello world." mara en-US bin\out.wav
-```
-
-Listen to `bin/out.wav`. If the engine prints "File end is beyond speech DB end":
-- A `local_pos + dur_like` value exceeds the VDB byte limit for that recording
-- Check the cap formula in `build_mara_voice.py`: `cap = mara_n // 8 - 1`
-- Also verify the `feat.filename` stored_id dict (not a positional list)
-
-### Step 5 -- Test with Long Text
-
-**Short texts are not sufficient for validation.** The most dangerous crash only manifests after
-roughly 100+ synthesis units (a few sentences). Always test with something like:
-
-```
-bin\spfy_dumpwav32_8khz.exe "The following message is transmitted at the request of the Wisconsin Emergency Management Agency Milwaukee Sullivan Wisconsin. Driving is extremely hazardous tonight on all roads in southern Wisconsin. If you become stranded, emergency vehicles may not be able to reach you. If you are stranded, do not leave your vehicle. Run your vehicle 10 minutes per hour, and crack a downwind window for ventilation." mara en-US bin\out.wav
-```
+See ./voice_cloning for the updated build script and instructions. This new process works by taking Tom's data and running it through a speech-to-speech engine like Applio and using RFA to scale up Tom's audio to match the new speaker's prosody. This is a much more efficient process than doing MFA alignment, Qwen synthesis, and unit position calculation from scratch, but it does require access to a high-quality GPU for the Applio step. The resulting unit positions are almost identical, so the crashes are much less likely to be due to the WSOLA monotonicity issue described below. However, if you modify the unit position calculation logic in any way, you MUST enforce the monotonicity invariant to avoid that crash.
 
 If the engine crashes with `EXCEPTION_ACCESS_VIOLATION` (no error message, just a crash), see
 "The WSOLA Crash" section below.
@@ -875,7 +758,7 @@ into unmapped memory.
 **Why it only happens on long texts:** Each `configure` call handles one unit (and its silence
 boundary neighbors). The cursor carries over between units. A single backwards lp jump will
 cause the cursor to go deeply negative, but this only becomes fatal once that particular unit
-is reached — which can take dozens of prior units to accumulate to call #140 or so.
+is reached -- which can take dozens of prior units to accumulate to call #140 or so.
 
 **How to trigger this in build_mara_voice.py:** The MFA path scales speech units
 (non-silence) with per-phoneme MFA time intervals, but silence units with whole-recording
@@ -1132,72 +1015,9 @@ for finer control over voiced, unvoiced, and mixed boundary costs.
 
 ---
 
-## Mara Voice: Current Status (2026-03-16)
+## Mara Voice: Current Status (2026-03-20)
 
-Mara is the first custom voice built for the Speechify engine. She is a female speaker
-synthesized with Qwen3-TTS and aligned with Montreal Forced Aligner.
-
-### Output Quality
-
-- **Comprehensible output** with mild residual stutter from recording fragmentation
-- Weather test sentence: **33 recording switches** (down from 42 earlier, and 66.7% baseline)
-- Phone number test: "Please call us at five ive ive 01...3" -- clearer than previous builds
-- First half of weather sentence sounds good; "with a high" section still stuttery
-- 95% MFA phone coverage after english_mfa dictionary fix and re-synthesis of 270 recordings
-
-### Build Pipeline (STATE_VERSION 70)
-
-Four scripts run in order:
-1. `build_mara_voice.py` -- builds mara8.vdb + mara.vin from scratch
-2. `build_mara_rest.py` -- patches hash/prsl/mean with Mara-specific data
-3. `build_mara_hash.py` -- patches hash cells_B with spectral clustering + run-potential penalty
-4. `build_mara_trees.py` -- patches f0tr/durt trees
-
-### Hash Structure Breakthrough (2026-03-16)
-
-The hash was previously thought to use chain-walking (sequential scan). Disassembly and
-Frida Stalker tracing revealed it is actually a **compressed perfect hash** with direct
-indexed access: `cell[rows[uid_right] + uid_left]`. This explains why naive appending
-crashed -- uid_left is used as a direct index, so appended regions were accessed out of
-bounds by large uid_left values.
-
-**Shared-offset extension technique** resolves the immutability problem: all extra
-uid_rights share one base offset at `n_cells_original`, with an appended extension region
-containing `{uid_left, 0.0}` pairs for same-recording neighbors. Confirmed working: extra
-unit UID 176310 was selected by the engine.
-
-Remaining constraints:
-- `use_edgeframes` (runtime join cost) requires an unknown chunk and is non-functional
-- ~33 recording switches per 100 halfphones still the baseline to beat
-
-### Join Cost Non-Functionality (2026-03-16)
-
-VCF weight tuning experiments (Exp 52-54) revealed that **join cost is effectively
-non-functional for Mara**. Tom's hash has only 1.6M entries out of ~29 billion possible
-`(uid_left, uid_right)` pairs -- only 0.006% of transitions produce hash HITs. For the
-vast majority of transitions:
-
-1. Hash lookup returns MISS
-2. Miss fallback at `0x8E8B7F5` loads constant 0.0 as raw cost (when `[ecx+0x6c] <= 20`)
-3. Final join cost = `0.7 * 0.0 + 0.2 = 0.2` regardless of `JOIN_COST_WEIGHT` value
-
-This means:
-- Changing `JOIN_COST_WEIGHT` (0.7 -> 1.0): no effect (33 switches, identical UIDs)
-- Reducing `CONTEXT_COST_WEIGHT` (1.0 -> 0.5): worse (36 switches -- less discrimination)
-- Increasing run penalty parameters: no effect (remaining switches are between high-run units)
-
-The only effective hash-based mechanism is the **run-potential penalty** in `build_mara_hash.py`,
-which creates HIGH-cost hash HITs for penalized low-run units (reduced switches 42 -> 33).
-All other join cost tuning is inert. The `[ecx+0x6c]` field that gates ccos distance
-computation remains unidentified -- understanding it could unlock real join costs for misses.
-
-### Next Steps
-
-1. Investigate `[ecx+0x6c]` to understand when ccos distance is actually computed
-2. Replace low-value main-pool recordings with targeted phrases for problematic sequences
-3. Per-phone spectral clustering for finer timbral consistency
-4. Profile which recordings the engine selects most to focus quality improvement
-5. Test with additional sentences for generalization
+See ./voice_cloning/README.md for the latest updates on the Mara voice cloning project, which uses the insights from this reverse engineering effort to build a new voice with a much more efficient process than starting from scratch. The AI Mara voice is available in `en-US/aimara/`. Make sure you switch your config to use her if you decide to do so!
 
 ---
 
@@ -1224,4 +1044,4 @@ computation remains unidentified -- understanding it could unlock real join cost
 
 ---
 
-*This document is generated from analysis of the Tom voice files (`tom.vin`, `tom8.vdb`, `tom.vcf`) and `dll/SWIttsEngineUtil.dll` / `dll/SWIttsUSel.dll`. All technical details have been verified against the original binary data. This file, and the README.md file, are both entirely generated with Claude Code and are updated periodically as new insights are discovered.*
+*This document is generated from analysis of the Tom voice files (`tom.vin`, `tom8.vdb`, `tom.vcf`) and `dll/SWIttsEngineUtil.dll` / `dll/SWIttsUSel.dll`. All technical details have been verified against the original binary data. This file, and the `README_TECHNICAL.md` file, are both entirely generated with Claude Code and are updated periodically as new insights are discovered. Human review has taken place to ensure maximum accuracy.*

@@ -4,7 +4,7 @@ A female voice clone for the SpeechWorks Speechify 3.0.5 TTS engine, built by
 replacing Tom's original audio with voice-converted recordings while preserving
 his entire unit selection infrastructure.
 
-**Voice:** AI Mara (based on the real NWR CRS voice "Mara" used 2003-2016)
+**Voice:** AI Mara (based on the real NWR CRS voice "Mara", used 2003-2016)
 **Pitch:** ~176 Hz median (matched to real Mara's 175.7 Hz)
 **Recording switches:** 28 raw / 24 with Frida penalty hook
 
@@ -16,8 +16,7 @@ trees, checklist indexes. We keep ALL of that intact. We only replace the
 audio bytes in the VDB with voice-converted versions of Tom's own recordings.
 
 The engine doesn't know the difference. It selects units, computes join costs,
-and reads audio at the same byte offsets as always. It just hears a different
-voice when it reads those bytes.
+and reads audio at the same byte offsets as always. You just hear a different voice. The engine has no concept of "Tom" or "Mara" -- it's just playing audio from the VDB based on the VIN's unit table and the VCF's weights.
 
 ## Pipeline Overview
 
@@ -58,13 +57,13 @@ Tom's VDB (8kHz u-law)
 - Python 3.10+ (3.12 recommended)
 - No conda required for the build pipeline itself
 
-### Pip packages (build pipeline)
-```
+### Pip packages (build pipeline, required if building yourself)
+```bash
 pip install numpy scipy pyworld tqdm psutil
 ```
 
 ### Pip packages (Frida diagnostics, optional)
-```
+```bash
 pip install frida frida-tools
 ```
 
@@ -74,29 +73,23 @@ pip install frida frida-tools
 - https://applio.org/
 - Used for: training RVC models and batch voice conversion
 - Alternative: rvc-python (pip install rvc-python) for CLI-only workflows
-- Key params: f0up_key=7-8, f0method=rmvpe, protect=0.1, index_rate=0.5
-
-**AudioSR** (audio super-resolution):
-- https://github.com/haoheliu/versatile_audio_super_resolution
-- pip install audiosr
-- Requires CUDA-enabled PyTorch:
-  `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121`
-- Upscales 8kHz to 48kHz using diffusion model
-- Settings: model_name="speech", ddim_steps=20, guidance_scale=3.5
+- Key params: f0up_key=7-8, f0method=rmvpe, protect=0.172, index_rate=1
 
 **FlashSR** (faster alternative to AudioSR, 22x speed):
 - https://github.com/jakeoneijk/FlashSR_Inference
 - One-step diffusion distillation
-- Use GPU version (student_ldm + sr_vocoder + vae), NOT ONNX
+- Use GPU version (student_ldm + sr_vocoder + vae), NOT ONNX (CPU-only, low quality)
 - Set lowpass_input=False for 8kHz source
-- Requires 16kHz min input: resample 8kHz -> 16kHz with librosa first
+- Requires 16kHz min input: resample 8kHz -> 16kHz with librosa or ffmpeg first
 - Normalize output to -1dB headroom (clips at peak=1.0)
 
 **Speechify engine** (for testing):
-- bin/Speechify.exe (server) + bin/spfy_dumpwav32_8khz.exe (client)
+- `bin/Speechify.exe` (server) + `bin/spfy_dumpwav32_8khz.exe` (client)
 - Must be running for synthesis tests
 
 ## Step-by-Step Guide
+
+Most of these steps have already been completed by me personally, but if you want to make a totally custom voice, they're all here for you to follow. The key insight is that you don't need to start from scratch with Qwen3 synthesis or anything of the sort -- you can leverage the existing VIN structure and just replace the audio in the VDB, which is what this pipeline does.
 
 ### Step 1: Extract Tom's audio from VDB
 
@@ -109,12 +102,7 @@ Output: `en-US/mara/output/tom_all_for_rvc/` (~6,849 WAV files)
 
 ### Step 2: Upscale to 48kHz
 
-Using AudioSR:
-```
-python reveng/voice_cloning/audiosr_batch.py mara
-```
-
-Or using FlashSR (faster):
+Using FlashSR:
 ```
 python <flashsr_dir>/inference.py --input en-US/mara/output/tom_all_for_rvc --output en-US/mara/output/tom_all_upscaled
 ```
@@ -127,8 +115,8 @@ Processing time: ~2-3 sec/file with AudioSR (ddim=20), much faster with FlashSR
 
 Option A -- Clone from existing reference recordings (recommended):
 - Collect 3-10 minutes of clean reference audio of the target voice
-- For Mara: real NWR CRS recordings, cleaned via mara_extract.py + mara_2nd_pass.py
-- Key: source purity matters MORE than quantity (4 min clean > 30 min mixed)
+- For Mara: used 4 minutes of direct source recordings from the NWR CRS website (archived at [https://web.archive.org/web/*/http://weather.gov/ops2/](https://web.archive.org/web/*/http://weather.gov/ops2/))
+- Key: source purity matters MORE than quantity (4 min clean is infinitely better than 30 min mixed quality)
 
 Option B -- Clone from TTS output:
 - Use find_best_training_wavs.py to select the best synthetic WAVs
@@ -247,18 +235,14 @@ The engine looks for files at:
 - `en-US/<voice>/<voice>8.vdb`
 - `en-US/<voice>/<voice>.vcf`
 
-## RVC Models
-
-| Model | Training Data | Epochs | Best For |
-|-------|--------------|--------|----------|
-| mara.pth | 106 Qwen TTS outputs (8 min) | 500 | Clean, natural sound |
-| mara_v2.pth | Real NWR recordings (5 min) | 500 | Authentic "radio" character |
-| pure_source.pth | 4 min confirmed direct recordings | 100-150 | Best perceptual match |
+## Applio files
+> `aimara.pth` -- Applio HiFi-GAN model checkpoint (epoch 150, version 4, sounds most accurate to True Mara)
+> `aimara.index` -- FAISS index for RVC retrieval (built from training data)
 
 Key findings:
 - Source recording purity matters more than quantity
 - ContentVec embedder is far superior to Spin-v2 for this task
-- Pure-source model (4 min clean) converges faster than mixed-quality (30 min)
+- Pure-source model (4 min clean) converges faster than mixed-quality (30 min), convergence score ~19 vs ~30, sounds more accurate to the real Mara voice
 
 ## Current Best Configuration
 
@@ -300,25 +284,16 @@ Key findings:
 ## Files in This Directory
 
 - `aimara.vin` -- Voice index (Tom's structure + Mara metadata)
+- `orig_aimara.vin` -- Backup of original VIN before F0 patching
 - `aimara8.vdb` -- Voice database (Mara's audio, XOR-encrypted RIFF WAVE)
 - `aimara.vcf` -- Voice config (nibble-cipher encrypted XML)
 - `aimara8.xml` -- Alternate voice config for testing
-- `100_epoch.pth` -- RVC model checkpoint (epoch 100)
-- `150_epoch.pth` -- RVC model checkpoint (epoch 150)
-- `aimara_orig.vin` -- Backup of original, not as accurate Mara VIN (V1 build)
-- `aimara8_orig.vdb` -- Backup of original, not as accurate Mara VDB (V1 build)
-
-## Credits
-
-- SpeechWorks (2003) -- Original Speechify 3.0.5 engine and Tom voice
-- Mara -- Original NWR CRS voice (2003-2016)
-- RVC Project -- Retrieval-based Voice Conversion
-- AudioSR / FlashSR -- Audio super-resolution
-- Applio -- RVC training and inference frontend
+- `aimara.pth` -- RVC model checkpoint (ContentVec, epoch 150, version 4)
+- `aimara.index` -- FAISS index for RVC retrieval (built from training data)
+- `OLD/` -- Previous iteration of the voice files (for reference)
 
 ## Links
 
 - Applio: https://applio.org/
 - FlashSR: https://github.com/jakeoneijk/FlashSR_Inference
-- AudioSR: https://github.com/haoheliu/versatile_audio_super_resolution
 - RVC Project: https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI

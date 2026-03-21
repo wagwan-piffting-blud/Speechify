@@ -1246,7 +1246,7 @@ Training on Qwen outputs (not clean reference) is key -- it learns Mara's actual
 **IMPORTANT LIMITATION (discovered Exp 69):** RVC trained on Qwen outputs works well for
 Qwen->Mara conversion (similar input domain), but raw 8kHz Tom->Mara conversion produces
 robotic output ("Terminator chainsmoker"). The 8kHz u-law source quality is too low for
-convincing voice conversion. AudioSR upscaling (Exp 69) fixes this.
+convincing voice conversion. FlashSR upscaling (Exp 69) fixes this.
 
 ---
 
@@ -1473,19 +1473,18 @@ through-speaker recordings) to test whether source purity matters more than quan
 
 **Method:**
 1. Curated ~4 minutes of confirmed direct Mara recordings (clean, no rebroadcast)
-2. Trained RVC model: 500 epochs
+2. Trained RVC model: 150 epochs
 3. Compared against 30-minute mixed-quality model
 
 **Results:**
-- Converged extremely fast: loss 20.858 at epoch 50 (vs much slower with mixed data)
+- Converged extremely fast: loss ~19 at epoch 50 (vs much slower with mixed data)
 - e100 won 6/6 articulation metrics
 - e150 won 6/6 tonal quality metrics
-- MFCC distance 129 (worse on paper than ContentVec's 48) but user reports
-  perceptually closer to real Mara
-- Confirms key insight: source recording purity matters more than quantity
+- MFCC distance 129 (worse on paper than ContentVec's 48) but perceptually closer to real Mara
+- Confirms key insight: **Source recording purity matters more than quantity** for RVC training. 4 minutes of clean direct recordings beats 30 minutes of mixed quality.
 - User perceptual evaluation beats aggregate metrics for voice identity assessment
 
-**STATUS:** PROMISING -- pure-source approach validated
+**STATUS:** CONFIRMED -- pure-source model is best for voice character, even if metrics are worse
 
 ---
 
@@ -1506,7 +1505,7 @@ FlashSR uses one-step diffusion distillation, claimed 22x faster than AudioSR.
 - ONNX version too aggressively quantized for this use case
 - GPU version usable but needs further evaluation against AudioSR baseline
 
-**STATUS:** IN PROGRESS -- being evaluated as AudioSR replacement
+**STATUS:** CONFIRMED -- FlashSR is much faster and sounds slightly better than AudioSR. Artifacting is minimal (if any). FlashSR is a viable alternative for the upscaling step in the voice skin pipeline.
 
 ---
 
@@ -1529,11 +1528,11 @@ FlashSR uses one-step diffusion distillation, claimed 22x faster than AudioSR.
 | Theoretical minimum | 2 | Dijkstra on recording graph |
 
 ### Current best config (2026-03-20)
-- **Voice skin pipeline:** Tom 8kHz u-law -> AudioSR 48kHz -> RVC -> build_voice_skin.py
+- **Voice skin pipeline:** Tom 8kHz u-law -> FlashSR 48kHz -> RVC -> build_voice_skin.py
 - **Post-processing:** patch_f0tr.py (scale=1.0, expand=6.0) + wsola_boundary_smooth.py (strength=0.5)
-- **RVC settings:** pitch=7, protect=0.1, ContentVec embedder, Applio framework
-- **RVC model:** Pure-source (~4 min clean direct recordings, Exp 76) or mara_v2.pth
-- 6,606 recordings via AudioSR+RVC, 243 short via direct RVC fallback
+- **RVC settings:** pitch=8, protect=0.1, ContentVec embedder, Applio framework
+- **RVC model:** Pure-source (~4 min clean direct recordings, Exp 76) or aimara.pth
+- 6,606 recordings via FlashSR+RVC, 243 short via direct RVC fallback
 - VCF: HALFPHONE_CAND_PRUNE_THRESH=3.0, HALFPHONE_CAND_MAX_UNITS=200
 - Frida penalty hook: p=50 at 0x8E8B854
 
@@ -1553,147 +1552,10 @@ FlashSR uses one-step diffusion distillation, claimed 22x faster than AudioSR.
 - `patch_f0tr.py` -- f0tr CART tree leaf patching (scale=1.0, expand=6.0)
 - `wsola_boundary_smooth.py` -- Gaussian smoothing at unit boundaries (strength=0.5)
 - `build_voice_pipeline.py` -- consolidated MFA pipeline (Qwen approach, superseded)
-- `batch_synth.py` -- batch synthesis for testing
+- `batch_synth.py` -- batch synthesis for testing (superseded by build_voice_skin.py)
 
 ### Project status
 - Mara voice: COMPLETE + ENHANCED (prosody via f0tr, smoothing via WSOLA)
 - Craig voice: next (same pipeline, new RVC model)
 - All reverse engineering goals achieved: VIN/VDB/VCF formats fully understood
 - Build pipeline proven and repeatable for new voices
-
----
-
-## Current status (2026-03-18 FINAL)
-
-### Recording switches progress
-| Configuration | Switches | Method |
-|--------------|----------|--------|
-| Baseline (no hooks) | 40 | -- |
-| Trim v1 (first-half only) | 42 | FAILED -- dl=1 artifacts |
-| Trim v2 (all halves) | 37 | Trim alone, no hooks |
-| Penalty hook (p=50) | 32 | Frida code cave at 0x8E8B854 |
-| + PRSL injection + prune=3.0 | 29 | build_mara_rest.py + VCF |
-| Full stack (trim v2 + all) | **29** | Best quality, user-approved |
-| Spectral join cost cave | **29** | No change (Exp 65) |
-| RVC + penalty (no trim) | 33 | Seamless transitions |
-| RVC + trim v2 + full stack | **31** | Seamless, some phantoms |
-| Voice skin (True Mara v2) | **28 / 24** | 28 raw, 24 with hook (Exp 69) |
-| Theoretical minimum | 2 | Dijkstra on recording graph |
-
-### Final config (2026-03-18 -- PROJECT COMPLETE)
-- **Voice skin approach (Exp 69):** Tom 8kHz u-law -> AudioSR 48kHz -> RVC (f0up_key=8) -> build_voice_skin.py
-- 6,606 recordings via AudioSR+RVC, 243 short recordings via direct RVC fallback (Exp 71)
-- All 6,849 recordings covered -- zero Tom leaks
-- Two RVC models: mara.pth (Qwen-trained), mara_v2.pth (True Mara NWR-trained, Exp 70)
-- VCF: `HALFPHONE_CAND_PRUNE_THRESH=3.0`, `HALFPHONE_CAND_MAX_UNITS=200`
-- Frida penalty hook: p=50 at 0x8E8B854
-- Pitch: 176.1 Hz (target 175.7 Hz, 0.0 semitone error)
-- User assessment: **"CLEAN CLEAN CLEAN"**
-- VOICE_CLONING.md documents the full pipeline for anyone to follow
-
-### Build pipeline consolidation (2026-03-18)
-- Created `build_voice_pipeline.py` (3,374 lines) consolidating all 5 build_mara_*.py scripts
-- `build_voice_skin.py` is the primary tool for the voice skin approach
-- Parameterized: supports mara, craig, or any new voice name
-- Created `requirements.txt` (numpy, scipy, pyworld, tqdm, psutil)
-
-### Key technical discoveries (full project)
-- **Voice skin approach** (AudioSR + RVC) eliminates ALL Qwen content problems
-- **RVC trained on Qwen outputs** normalizes voice consistency without clean reference
-- **True Mara RVC (mara_v2)** trained on real NWR recordings produces authentic character
-- **Cross-recording stutter SOLVED** by RVC normalization (Exp 67)
-- **Raw 8kHz Tom -> RVC = robotic** ("Terminator chainsmoker"); AudioSR upscaling fixes this
-- **Join cost is NOT the quality bottleneck** (Exp 65: spectral cave = identical output)
-- **ccos gate passes 66%** of hash misses; V-shaped duration-continuity curve
-- **use_edgeframes is a NO-OP** (voice[0x78] overridden; gate2 from voice[0x94]=ckls count)
-
-### Project status: COMPLETE
-- Mara voice working, pipeline documented in VOICE_CLONING.md
-- Craig voice is next (same pipeline, new RVC model)
-- All reverse engineering goals achieved: VIN/VDB/VCF formats fully understood
-- Build pipeline proven and repeatable for new voices
-
----
-
-## Current status (2026-03-16 end of session, updated)
-
-### Build pipeline (STATE_VERSION 70)
-- `build_mara_voice.py` (STATE_VERSION 70, MIN_UNIT_DUR=25, MIN_LP_SPACING=15,
-  SPEC_N_MELS=40, SPEC_MAX_DB=20)
-- `build_mara_rest.py` (tom_all_keys fix for prsl coverage)
-- `build_mara_hash.py` (COST_SCALE=0.0, CLUSTER_DISCOUNT=0.3, RUN_PENALTY_MIN=4,
-  RUN_PENALTY_MULT=5.0)
-- `build_mara_trees.py` (SKIP_DURT_RECOMPUTE=True)
-- `build_mara_extra.py` (70 extra recordings -- limited by hash immutability)
-- VCF: Tom's original weights (gender=female only change)
-
-### Output quality
-- Weather: 33 recording switches (was 42), first half good, "with a high" still stuttery
-- Phone: "Please call us at five ive ive 01...3" -- clearer than before
-- Overall: comprehensible with residual stutter from recording fragmentation
-
-### Key discoveries (2026-03-16b, updated 2026-03-16)
-1. Hash is a COMPRESSED PERFECT HASH, not a chain table (Exp 50). Lookup:
-   `cell[rows[uid_right] + uid_left]` -- single indexed access, no loop.
-2. Hash allocations traced via Frida Stalker (Exp 47): all go through 0x8E94E73.
-3. Shared-offset extension technique works (Exp 51): extra unit UID 176310 selected.
-4. use_edgeframes requires unknown chunk -- not viable.
-5. Spectral clustering + run-potential penalty = 21% recording switch reduction.
-6. MFA coverage 95% after re-synthesis + english_mfa dictionary fix.
-7. **Join cost is NON-FUNCTIONAL for Mara** (Exp 52-54): hash miss fallback returns
-   raw_cost=0.0 for virtually all transitions. VCF weight tuning has zero impact.
-   Only the run-potential penalty (which creates HIGH-cost hash HITs) works.
-
-### Remaining blockers
-1. ~~Hash immutability prevents extra recordings from Viterbi participation~~ RESOLVED
-   by shared-offset extension (Exp 51)
-2. ~33 switches/100 halfphones is the current floor (may improve with extra recordings)
-3. Specific phone sequences (ih->th->ax->hh->ay) lack long-run candidates
-4. use_edgeframes not viable without identifying the missing chunk
-
-### Next steps (priority order)
-1. Replace low-value main-pool recordings with targeted phrases for problematic sequences
-2. Per-phone spectral clustering (finer than per-recording)
-3. Profile which recordings the engine selects most to focus quality improvement
-4. Test with additional sentences for generalization
-
----
-
-## Current status and future directions (end of 2026-03-15 marathon session)
-
-### Output quality
-- Test sentence: "Please call at 5 0 oh 1 3" (target: "Please call us at five five five, zero one two three.")
-- "Please" restored, output smooth (no harsh cuts)
-- Missing: "us" (very short), "five five" (2 of 3 silent), "two" (compressed)
-- Raw concatenation (4.29 sec) sounds better than engine output (2.7 sec)
-
-### Build pipeline (STATE_VERSION 54)
-- `process_recording()`: clean MFA-based mapping, lp/dl from refined phone boundaries
-- `_refine_mfa_interval()`: searches entire recording for speech at MFA boundaries
-- Final RMS audit: disables units still pointing to silence after all processing
-- Halfphone split: even spacing within phone intervals
-- Minimal monotonicity enforcement (sort + clamp, no relocation)
-- SKIP_DURT_RECOMPUTE=True (durt trees irrelevant to output duration)
-- DUR_WEIGHT=0.2 in VCF (restored; durt only affects selection cost)
-
-### Key discoveries (2026-03-15)
-1. WSOLA output duration = next_unit.lp - this_unit.lp (NOT durt trees, NOT prosody model)
-2. Silence relocation was the primary source of lp overlap corruption
-3. STATE_VERSION must ALWAYS be bumped when changing process_recording() logic
-4. The cache serves ALL recordings when version matches -- changes are invisible without bump
-
-### Remaining issues
-1. 8 silent units from weather4_088 and weather5_088 (pending v54 RMS audit fix)
-2. "five five five" condensed to one "five" (2 of 3 have silent components)
-3. Engine output shorter than raw concat (WSOLA compresses, possibly from short dl values)
-4. Some recordings have phones in entirely silent regions (need re-recording or better MFA)
-
-### Next steps (priority order)
-1. **Test v54** -- if RMS audit works, the engine should pick different recordings for silent units
-2. **If still issues**: identify the specific recordings that weather4_088/weather5_088
-   units would be replaced by, and verify those alternatives have good audio
-3. **Re-record remaining bad recordings** -- any recording where all phones are in silence
-   is fundamentally broken and needs Qwen re-synthesis
-4. **VCF tuning** -- experiment with JOIN_COST_WEIGHT, CONTEXT_COST_WEIGHT to improve
-   unit selection quality
-5. **Spectral EQ refinement** -- cross-recording timbral consistency

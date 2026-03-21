@@ -1,10 +1,10 @@
-# Tom Voice Binary Format Notes (Living)
+# Tom Voice Binary Format Notes
 
-Status: actively reversed. This document only includes structures that have been validated against the current files.
+Status: concluded. This document only includes structures that have been validated against the current files.
 
 ## Scope
 
-Files analyzed in this folder:
+Files analyzed in this document:
 
 - `tom.vin` (custom RIFF form `svin`)
 - `tom8.vdb` (RIFF/WAVE with custom `indx`)
