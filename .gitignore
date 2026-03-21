@@ -16,8 +16,8 @@ wav*
 **/__*__/
 **/.*/
 *.pkl
-!mara.wav
-!craig.wav
+!demos/*.wav
+!demos/
 tom16.vdb
 en-US/tom/tom16.vdb
 diagnostics/
