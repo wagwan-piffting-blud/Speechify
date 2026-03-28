@@ -1,12 +1,25 @@
 // cl spfy_dumpwav.c /Fe:spfy_dumpwav.exe
-// usage: spfy_dumpwav.exe "text to speak" out.wav
+// usage: spfy_dumpwav.exe [options] "text to speak" out.wav
+//
+// Synthesis:
+//   --phonemes    Enable phoneme/word mark output (.phn file alongside WAV)
+//   --pron "..."  Synthesize raw SPR phonemes (see --help for symbol table)
+//   --g2p         Print phoneme sequence for text (no audio output)
+//   --16k         Use 16kHz output (default: 8kHz)
+//
+// Conversion (no server needed... just kidding, still needs server):
+//   --bal2spr "..." Convert Balabolka/ARPAbet phonemes to SPR format
+//   --spr2bal "..." Convert SPR phonemes to Balabolka/ARPAbet format
+//
+// Diagnostic:
+//   --rawdump     Dump raw callback bytes to stderr
 
 #define _CRT_SECURE_NO_WARNINGS
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include "swi_min.h" // Assumed to contain SWIttsPort, SWITTS_INVALID_PORT, etc.
+#include "swi_min.h"
 
 // crude wave helper
 static void write_wav_header(FILE *f, uint32_t sampleRate, uint16_t bits, uint16_t chans, uint32_t dataBytes) {
@@ -22,29 +35,212 @@ static void write_wav_header(FILE *f, uint32_t sampleRate, uint16_t bits, uint16
     fwrite("data",1,4,f); fwrite(&dataBytes,4,1,f);
 }
 
+// ARPAbet -> SPR conversion table
+static const struct { const char *arpabet; const char *spr; } ARPA_TO_SPR[] = {
+    {"aa","a"}, {"ae","A"}, {"ah","H"}, {"ao","c"}, {"aw","W"}, {"ax","x"},
+    {"ay","Y"}, {"b","b"}, {"ch","C"}, {"d","d"}, {"dh","D"}, {"dx","F"},
+    {"eh","E"}, {"el","l"}, {"en","N"}, {"er","R"}, {"ey","e"}, {"f","f"},
+    {"g","g"}, {"hh","h"}, {"ih","I"}, {"ix","X"}, {"iy","i"}, {"jh","J"},
+    {"k","k"}, {"l","l"}, {"m","m"}, {"n","n"}, {"ng","G"}, {"ow","o"},
+    {"oy","O"}, {"p","p"}, {"pau","_"}, {"r","r"}, {"s","s"}, {"sh","S"},
+    {"t","t"}, {"th","T"}, {"uh","U"}, {"uw","u"}, {"v","v"}, {"w","w"},
+    {"xx","x"}, {"y","y"}, {"z","z"}, {"zh","Z"}, {NULL,NULL}
+};
+
+static const char *arpabet_to_spr(const char *arpa) {
+    for (int i = 0; ARPA_TO_SPR[i].arpabet; i++) {
+        if (strcmp(arpa, ARPA_TO_SPR[i].arpabet) == 0)
+            return ARPA_TO_SPR[i].spr;
+    }
+    return "?";
+}
+
+// Check if an ARPAbet code is a vowel
+static int is_vowel_arpabet(const char *arpa) {
+    static const char *vowels[] = {
+        "aa","ae","ah","ao","aw","ax","ay","eh","el","en","er","ey",
+        "ih","ix","iy","ow","oy","uh","uw","xx",NULL
+    };
+    for (int i = 0; vowels[i]; i++)
+        if (strcmp(arpa, vowels[i]) == 0) return 1;
+    return 0;
+}
+
+// Check if an SPR symbol is a vowel
+static int is_vowel_spr(char c) {
+    return (c=='a'||c=='A'||c=='H'||c=='c'||c=='W'||c=='x'||c=='X'||
+            c=='Y'||c=='O'||c=='i'||c=='I'||c=='e'||c=='E'||c=='R'||
+            c=='u'||c=='U'||c=='o');
+}
+
+// Convert Balabolka/Balcon phoneme string to SPR format
+// Balabolka format: stress marker (1/2) comes AFTER the vowel it modifies
+// Input:  "p aa 1 t ax w aa t uw m iy" (Pottawattamie)
+// Output: ".1pa.0tAx.0wa.0tu.0mi"
+static void bal_to_spr(const char *input, char *output, int maxlen) {
+    char buf[4096];
+    strncpy(buf, input, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    // First pass: tokenize and collect into an array
+    #define MAX_TOKS 256
+    char *toks[MAX_TOKS];
+    int ntoks = 0;
+    char *t = strtok(buf, " ");
+    while (t && ntoks < MAX_TOKS) {
+        toks[ntoks++] = t;
+        t = strtok(NULL, " ");
+    }
+
+    // Build syllable groups: each syllable = optional consonants + vowel
+    // Stress in Balabolka follows the vowel: "p aa 1" = stressed "paa"
+    char *out = output;
+    char *end = output + maxlen - 1;
+    int i = 0;
+
+    while (i < ntoks && out < end) {
+        // Skip special markers at this level
+        if (strcmp(toks[i], "-") == 0 || strcmp(toks[i], "&") == 0 ||
+            strcmp(toks[i], ".") == 0 || strcmp(toks[i], ",") == 0 ||
+            strcmp(toks[i], "!") == 0 || strcmp(toks[i], "?") == 0 ||
+            strcmp(toks[i], "_") == 0) {
+            i++;
+            continue;
+        }
+        // Skip bare stress markers (already consumed by lookahead below)
+        if (strcmp(toks[i], "0") == 0 || strcmp(toks[i], "1") == 0 ||
+            strcmp(toks[i], "2") == 0) {
+            i++;
+            continue;
+        }
+
+        // Collect consonants until we hit a vowel
+        int syl_start = i;
+        while (i < ntoks) {
+            const char *lookup = toks[i];
+            if (strcmp(lookup, "h") == 0) lookup = "hh";
+
+            if (strcmp(toks[i],"0")==0 || strcmp(toks[i],"1")==0 ||
+                strcmp(toks[i],"2")==0 || strcmp(toks[i],"-")==0 ||
+                strcmp(toks[i],"&")==0 || strcmp(toks[i],".")==0 ||
+                strcmp(toks[i],",")==0 || strcmp(toks[i],"!")==0 ||
+                strcmp(toks[i],"?")==0 || strcmp(toks[i],"_")==0) {
+                break;
+            }
+
+            i++;
+
+            // If this was a vowel, check for following stress marker
+            if (is_vowel_arpabet(lookup)) {
+                break;
+            }
+        }
+
+        // Check if next token is a stress marker (applies to this syllable)
+        int stress = 0;
+        if (i < ntoks && (strcmp(toks[i],"1")==0 || strcmp(toks[i],"2")==0)) {
+            stress = toks[i][0] - '0';
+            i++;
+        }
+
+        // Write syllable: .{stress}{consonants}{vowel}
+        out += _snprintf(out, end - out, ".%d", stress);
+        for (int j = syl_start; j < i; j++) {
+            if (strcmp(toks[j],"0")==0 || strcmp(toks[j],"1")==0 ||
+                strcmp(toks[j],"2")==0) continue;
+            const char *lookup = toks[j];
+            if (strcmp(lookup, "h") == 0) lookup = "hh";
+            const char *spr = arpabet_to_spr(lookup);
+            if (strcmp(spr, "?") != 0 && strcmp(spr, "_") != 0)
+                out += _snprintf(out, end - out, "%s", spr);
+        }
+    }
+
+    *out = '\0';
+    #undef MAX_TOKS
+}
+
+#define MAX_G2P_PHONES 256
+
 typedef struct {
     FILE *out;
-    volatile LONG gotAudio;   // becomes 1 after first audio packet
-    volatile LONG done;       // becomes 1 when we think speak is finished
+    FILE *phonemeOut;           // .phn file (NULL if disabled)
+    volatile LONG gotAudio;
+    volatile LONG done;
     uint32_t bytesWritten;
+    int enablePhonemes;
+    int rawDump;
+    int g2pMode;
+    uint32_t sampleRate;
+    // G2P collection
+    struct { char name[8]; uint32_t stress; } g2pPhones[MAX_G2P_PHONES];
+    int g2pCount;
 } Ctx;
 
 static SWIttsResult SWIAPI cb(SWIttsPort port, int status, void *data, void *user) {
     Ctx *ctx = (Ctx*)user;
 
-    // Check for log/diag message
+    // Debug/log message from engine
     if (port == (SWIttsPort)-1) {
         if (data) {
-            fwprintf(stderr, L"DEBUG (status=%d, data_as_str): %hs\n", status, (char*)data);
+            fwprintf(stderr, L"DEBUG (status=%d): %hs\n", status, (char*)data);
         }
-        return 0; // Acknowledge log message
+        return 0;
     }
 
-    // Original audio/status handling
-    if (data) {
-        // Heuristic: assume this is audio if it looks like a packet and numBytes is sane.
-        SWIttsAudioPacket *p = (SWIttsAudioPacket*)data;
+    // Raw byte dump for diagnostics
+    if (ctx->rawDump && data && (status == SWITTS_CB_PHONEMEMARK || status == SWITTS_CB_WORDMARK)) {
+        uint8_t *bytes = (uint8_t*)data;
+        fprintf(stderr, "MARK status=%d data=%p\n", status, data);
+        fprintf(stderr, "  hex: ");
+        for (int i = 0; i < 48; i++) fprintf(stderr, "%02x ", bytes[i]);
+        fprintf(stderr, "\n");
+        // Also try interpreting as u32 + string
+        fprintf(stderr, "  u32[0]=%u u32[1]=%u\n",
+            *(uint32_t*)(bytes), *(uint32_t*)(bytes+4));
+        // Try to print as string starting at various offsets
+        for (int off = 4; off <= 12; off += 4) {
+            fprintf(stderr, "  str@%d: \"%.8s\"\n", off, bytes+off);
+        }
+    }
 
+    // Phoneme mark callback (official struct: SWIttsPhonemeMark from SWItts.h)
+    if (status == SWITTS_CB_PHONEMEMARK && data) {
+        SWIttsPhonemeMark *pm = (SWIttsPhonemeMark*)data;
+
+        // Collect for G2P mode
+        if (ctx->g2pMode && ctx->g2pCount < MAX_G2P_PHONES) {
+            strncpy(ctx->g2pPhones[ctx->g2pCount].name, pm->name, 7);
+            ctx->g2pPhones[ctx->g2pCount].name[7] = '\0';
+            ctx->g2pPhones[ctx->g2pCount].stress = pm->stress;
+            ctx->g2pCount++;
+        }
+
+        // Write to .phn file
+        if (ctx->phonemeOut) {
+            uint32_t endSample = pm->sampleNumber + pm->duration;
+            fprintf(ctx->phonemeOut, "%u\t%u\t%s\t%u\n",
+                    pm->sampleNumber, endSample, pm->name, pm->stress);
+            fflush(ctx->phonemeOut);
+        }
+        return 0;
+    }
+
+    // Word mark callback (official struct: SWIttsWordMark from SWItts.h)
+    if (status == SWITTS_CB_WORDMARK && data) {
+        if (ctx->phonemeOut) {
+            SWIttsWordMark *wm = (SWIttsWordMark*)data;
+
+            fprintf(ctx->phonemeOut, "# word\t%u\ttext_off=%u\ttext_len=%u\n",
+                    wm->sampleNumber, wm->offset, wm->length);
+            fflush(ctx->phonemeOut);
+        }
+        return 0;
+    }
+
+    // Audio packet
+    if (data) {
+        SWIttsAudioPacket *p = (SWIttsAudioPacket*)data;
         if (p->samples && p->numBytes && p->numBytes < (1u<<26)) {
             // network byte order -> little endian for 16-bit PCM
             uint8_t *buf = (uint8_t*)p->samples;
@@ -56,21 +252,16 @@ static SWIttsResult SWIAPI cb(SWIttsPort port, int status, void *data, void *use
             InterlockedExchange(&ctx->gotAudio, 1);
             return 0;
         } else {
-            // This is a non-audio status packet. We can just log and ignore it.
-            fwprintf(stderr, L"INFO: Received non-audio/non-log packet on port %d (status=%d).\n", (int)port, status);
+            fwprintf(stderr, L"INFO: Non-audio packet on port %d (status=%d)\n", (int)port, status);
         }
-
     } else {
-        // NULL data cases include start/end/stopped/portclosed/errors.
-        // Treat a NULL after we’ve seen audio as “probably end”.
+        // NULL data: start/end/stopped/portclosed/errors
         if (ctx->gotAudio) {
             InterlockedExchange(&ctx->done, 1);
         } else {
-            fwprintf(stderr, L"INFO: Received NULL data on port %d (status=%d) before audio. Done=%d\n",
+            fwprintf(stderr, L"INFO: NULL data on port %d (status=%d) done=%d\n",
                 (int)port, status, (int)ctx->done);
-
-            if (status != 0) { // Assuming non-zero status is an error
-                fwprintf(stderr, L"  -> Non-zero status (%d) with NULL data. Assuming ERROR, setting done=1.\n", status);
+            if (status != 0) {
                 InterlockedExchange(&ctx->done, 1);
             }
         }
@@ -78,24 +269,193 @@ static SWIttsResult SWIAPI cb(SWIttsPort port, int status, void *data, void *use
     return 0;
 }
 
+static void print_usage(const wchar_t *exe) {
+    fwprintf(stderr,
+        L"usage: %ls [options] \"text to speak\" out.wav\n"
+        L"\n"
+        L"Options:\n"
+        L"  --phonemes      Write phoneme timing to .phn file alongside WAV\n"
+        L"  --pron \"...\"    Synthesize raw SPR phonemes (see symbol table below)\n"
+        L"  --g2p           Print phoneme sequence for text (ARPAbet + SPR)\n"
+        L"  --bal2spr \"...\" Convert Balabolka phonemes to SPR format\n"
+        L"  --spr2bal \"...\" Convert SPR phonemes to Balabolka/ARPAbet format\n"
+        L"  --rawdump       Dump raw callback bytes to stderr (diagnostic)\n"
+        L"  --16k           Use 16kHz output (default: 8kHz)\n"
+        L"\n"
+        L"\n"
+        L"SPR phoneme symbols (case-sensitive):\n"
+        L"  Vowels:  a=aa A=ae H=ah c=ao W=aw x=ax Y=ay i=iy I=ih\n"
+        L"           e=ey E=eh R=er u=uw U=uh o=ow X=ix O=oy\n"
+        L"  Cons:    p b t d k g f v s z h m n l r w y (same as ARPAbet)\n"
+        L"           C=ch J=jh T=th D=dh S=sh Z=zh G=ng N=en F=dx\n"
+        L"  Stress:  1=primary 2=secondary 0=none  Syllable: . (period)\n"
+        L"\n"
+        L"Example: --pron \".0Dx.1wE.0DR\" synthesizes \"the weather\"\n",
+        exe);
+}
+
 int wmain(int argc, wchar_t **wargv) {
-    if (argc < 3) {
-        fwprintf(stderr, L"usage: %ls \"text to speak\" out.wav\n", wargv[0]);
+    // Parse options
+    int enablePhonemes = 0;
+    int rawDump = 0;
+    int g2pMode = 0;
+    uint32_t sampleRate = 8000;
+    const wchar_t *pronPhonemes = NULL;
+    const wchar_t *wtext = NULL;
+    const wchar_t *woutPath = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (wcscmp(wargv[i], L"--phonemes") == 0) {
+            enablePhonemes = 1;
+        } else if (wcscmp(wargv[i], L"--g2p") == 0) {
+            g2pMode = 1;
+            enablePhonemes = 1;
+        } else if (wcscmp(wargv[i], L"--bal2spr") == 0) {
+            if (i + 1 < argc) {
+                // Convert Balabolka phonemes to SPR and print
+                char balUtf8[4096];
+                WideCharToMultiByte(CP_UTF8, 0, wargv[++i], -1, balUtf8, sizeof(balUtf8), NULL, NULL);
+                char sprOut[4096];
+                bal_to_spr(balUtf8, sprOut, sizeof(sprOut));
+                printf("SPR: %s\n", sprOut);
+                printf("Use: spfy_dumpwav.exe --pron \"%s\" output.wav\n", sprOut);
+                return 0;
+            } else {
+                fwprintf(stderr, L"ERROR: --bal2spr requires a phoneme string argument\n");
+                return 2;
+            }
+        } else if (wcscmp(wargv[i], L"--spr2bal") == 0) {
+            if (i + 1 < argc) {
+                // Convert SPR to Balabolka/ARPAbet phonemes
+                // Stress in Balabolka goes AFTER the vowel, not before syllable
+                char sprUtf8[4096];
+                WideCharToMultiByte(CP_UTF8, 0, wargv[++i], -1, sprUtf8, sizeof(sprUtf8), NULL, NULL);
+                printf("BAL: ");
+                int first = 1;
+                int pending_stress = 0;
+                for (const char *p = sprUtf8; *p; ) {
+                    if (*p == '.') { p++; continue; }
+                    if (*p == '0' || *p == '1' || *p == '2') {
+                        pending_stress = *p - '0';
+                        p++;
+                        continue;
+                    }
+                    // Find matching SPR symbol
+                    int found = 0;
+                    for (int j = 0; ARPA_TO_SPR[j].arpabet; j++) {
+                        int slen = (int)strlen(ARPA_TO_SPR[j].spr);
+                        if (slen > 0 && strncmp(p, ARPA_TO_SPR[j].spr, slen) == 0 &&
+                            strcmp(ARPA_TO_SPR[j].spr, "_") != 0 &&
+                            strcmp(ARPA_TO_SPR[j].spr, "?") != 0) {
+                            if (!first) printf(" ");
+                            // Balabolka uses "h" not "hh"
+                            if (strcmp(ARPA_TO_SPR[j].arpabet, "hh") == 0)
+                                printf("h");
+                            else
+                                printf("%s", ARPA_TO_SPR[j].arpabet);
+                            first = 0;
+                            // If this is a vowel, output pending stress AFTER it
+                            if (is_vowel_spr(*p) && pending_stress > 0) {
+                                printf(" %d", pending_stress);
+                            }
+                            pending_stress = 0;
+                            p += slen;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found) p++;
+                }
+                printf("\n");
+                return 0;
+            } else {
+                fwprintf(stderr, L"ERROR: --spr2bal requires an SPR string argument\n");
+                return 2;
+            }
+        } else if (wcscmp(wargv[i], L"--pron") == 0) {
+            if (i + 1 < argc) {
+                pronPhonemes = wargv[++i];
+            } else {
+                fwprintf(stderr, L"ERROR: --pron requires a phoneme string argument\n");
+                return 2;
+            }
+        } else if (wcscmp(wargv[i], L"--rawdump") == 0) {
+            rawDump = 1;
+            enablePhonemes = 1;  // need to enable marks to get callbacks
+        } else if (wcscmp(wargv[i], L"--16k") == 0) {
+            sampleRate = 16000;
+        } else if (wcscmp(wargv[i], L"--help") == 0 || wcscmp(wargv[i], L"-h") == 0) {
+            print_usage(wargv[0]);
+            return 0;
+        } else if (!wtext) {
+            wtext = wargv[i];
+        } else if (!woutPath) {
+            woutPath = wargv[i];
+        }
+    }
+
+    // --pron doesn't need separate text argument; first positional arg is the output file
+    if (pronPhonemes && !woutPath) {
+        if (wtext) {
+            woutPath = wtext;  // the positional arg is actually the output path
+            wtext = L"";
+        }
+    }
+    if (pronPhonemes && !wtext) {
+        wtext = L"";
+    }
+    if (!wtext || (!woutPath && !g2pMode)) {
+        print_usage(wargv[0]);
         return 2;
     }
 
-    // Convert wide text to UTF-8
-    const wchar_t *wtext = wargv[1];
-    int need = WideCharToMultiByte(CP_UTF8,0,wtext,-1,NULL,0,NULL,NULL);
-    char *utf8 = (char*)malloc(need);
-    WideCharToMultiByte(CP_UTF8,0,wtext,-1,utf8,need,NULL,NULL);
+    // Build the text to send
+    char utf8buf[8192];
+    if (pronPhonemes) {
+        // Wrap phonemes in SPR inline tag: \![phonemes]
+        // SPR uses single-char symbols (not ARPAbet), see Language Supplement
+        // Syllable boundaries: period (.), stress: 1=primary 0=unstressed
+        // Example: \![.1Sa.0kIG] = "shocking"
+        char pronUtf8[4096];
+        WideCharToMultiByte(CP_UTF8, 0, pronPhonemes, -1, pronUtf8, sizeof(pronUtf8), NULL, NULL);
+        _snprintf(utf8buf, sizeof(utf8buf), "\\![%s]", pronUtf8);
+    } else {
+        WideCharToMultiByte(CP_UTF8, 0, wtext, -1, utf8buf, sizeof(utf8buf), NULL, NULL);
+    }
 
-    // Open output
-    FILE *f = _wfopen(wargv[2], L"wb+");
-    if (!f) { fprintf(stderr, "failed to open output\n"); return 3; }
+    // Open output WAV (skip for g2p-only mode)
+    FILE *f = NULL;
+    if (woutPath) {
+        f = _wfopen(woutPath, L"wb+");
+        if (!f) { fprintf(stderr, "failed to open output\n"); return 3; }
+        write_wav_header(f, sampleRate, 16, 1, 0);
+    } else if (g2pMode) {
+        // G2P mode with no output file -- use NUL to discard audio
+        f = fopen("NUL", "wb+");
+    }
 
-    // --- FIX: Write 16kHz WAV header ---
-    write_wav_header(f, 16000, 16, 1, 0);
+    // Open .phn file if phonemes enabled (skip for g2p-only mode)
+    FILE *phnFile = NULL;
+    if (enablePhonemes && woutPath) {
+        // Replace .wav extension with .phn
+        wchar_t phnPath[MAX_PATH];
+        wcscpy(phnPath, woutPath);
+        size_t len = wcslen(phnPath);
+        if (len > 4 && _wcsicmp(phnPath + len - 4, L".wav") == 0) {
+            wcscpy(phnPath + len - 4, L".phn");
+        } else {
+            wcscat(phnPath, L".phn");
+        }
+        phnFile = _wfopen(phnPath, L"w");
+        if (!phnFile) {
+            fwprintf(stderr, L"WARNING: Could not open %ls for phoneme output\n", phnPath);
+        } else {
+            fprintf(phnFile, "# Phoneme timing for: %s\n", utf8buf);
+            fprintf(phnFile, "# Format: start_sample\\tend_sample\\tphoneme\\tstress\n");
+            fprintf(phnFile, "# Sample rate: %u Hz  (values are in samples, not bytes)\n", sampleRate);
+            fwprintf(stderr, L"Phoneme output: %ls\n", phnPath);
+        }
+    }
 
     // Load the client DLL
     SWIttsAPI api;
@@ -106,64 +466,101 @@ int wmain(int argc, wchar_t **wargv) {
 
     Ctx ctx = {0};
     ctx.out = f;
+    ctx.phonemeOut = phnFile;
+    ctx.enablePhonemes = enablePhonemes;
+    ctx.rawDump = rawDump;
+    ctx.g2pMode = g2pMode;
+    ctx.sampleRate = sampleRate;
+    ctx.g2pCount = 0;
 
-    // --- FIX: Pass 'cb' directly, not '&cb' ---
     if (api.Init(cb, &ctx) != 0) { fprintf(stderr, "SWIttsInit failed\n"); return 5; }
 
-    // Open a port
     SWIttsPort port = SWITTS_INVALID_PORT;
-    const char *params = "hostname=127.0.0.1;hostport=5555"; // adjust if your server differs
+    const char *params = "hostname=127.0.0.1;hostport=5555";
 
-    // --- FIX: Pass 'cb' directly, not '&cb' ---
     if (api.OpenPortEx(&port, params, NULL, cb, &ctx) != 0 || port == SWITTS_INVALID_PORT) {
         fprintf(stderr, "SWIttsOpenPortEx failed\n");
-        // --- FIX: Pass 'cb' directly, not '&cb' ---
         api.Term(cb, &ctx);
         return 6;
     }
 
     fwprintf(stderr, L"INFO: Port opened: %d\n", (int)port);
 
-    // --- FIX: Request 16kHz, which the server supports ---
-    if (api.SetParameter(port, "tts.audioformat.mimetype", "audio/L16;rate=16000") != 0) {
-        fprintf(stderr, "SetParameter(tts.audioformat.mimetype) failed\n");
+    // Set audio format
+    char mimetype[64];
+    _snprintf(mimetype, sizeof(mimetype), "audio/L16;rate=%u", sampleRate);
+    if (api.SetParameter(port, "tts.audioformat.mimetype", mimetype) != 0) {
+        fprintf(stderr, "SetParameter(mimetype) failed\n");
     }
 
-    // --- Removed the noisy log level parameters ---
+    // Enable phoneme/word marks if requested
+    if (enablePhonemes) {
+        api.SetParameter(port, "tts.marks.phoneme", "true");
+        api.SetParameter(port, "tts.marks.word", "true");
+    }
 
-    // Speak (UTF-8 text) – content type indicates charset
-    const unsigned char *bytes = (const unsigned char*)utf8;
-    unsigned len = (unsigned)strlen(utf8);
-    fwprintf(stderr, L"INFO: Calling Speak...\n");
-    // --- FIX: Use 'utf-8' ---
-    if (api.Speak(port, bytes, len, "text/plain;charset=utf-8") != 0) {
+
+    // Speak
+    const unsigned char *bytes = (const unsigned char*)utf8buf;
+    unsigned len = (unsigned)strlen(utf8buf);
+    // SPR tags are inline in plain text, not a separate content type
+    const char *contentType = "text/plain;charset=utf-8";
+
+    fwprintf(stderr, L"INFO: Speaking (%hs)...\n", contentType);
+
+    if (api.Speak(port, bytes, len, contentType) != 0) {
         fprintf(stderr, "SWIttsSpeak failed\n");
     }
 
-    // Pump messages while callback writes audio; trivial sleep loop
+    // Wait for completion
     while (!ctx.done) Sleep(10);
 
-    // --- FIX: Add 'stderr,' to fwprintf ---
-    fwprintf(stderr, L"INFO: Loop finished. Closing port.\n");
+    fwprintf(stderr, L"INFO: Done. Closing port.\n");
 
-    // Close port and term
     api.ClosePort(port);
-    // --- FIX: Pass 'cb' directly, not '&cb' ---
     api.Term(cb, &ctx);
 
-    // --- FIX for cut-off audio ---
-    // Explicitly flush all buffered I/O to disk *before*
-    // we start patching the header. This wins the race.
+    // Finalize WAV
     fflush(f);
-
-    // Patch WAV sizes
     long end = ftell(f);
     uint32_t dataBytes = ctx.bytesWritten;
     fseek(f, 4, SEEK_SET);  uint32_t riffSize = 36 + dataBytes; fwrite(&riffSize,4,1,f);
     fseek(f, 40, SEEK_SET); fwrite(&dataBytes,4,1,f);
     fclose(f);
 
-    free(utf8);
-    fprintf(stderr, "Wrote %u bytes of audio to output\n", dataBytes);
+    // Close phoneme file
+    if (phnFile) {
+        fclose(phnFile);
+    }
+
+    if (!g2pMode) {
+        fprintf(stderr, "Wrote %u bytes of audio (%u samples at %u Hz)\n",
+                dataBytes, dataBytes / 2, sampleRate);
+    }
+
+    // G2P output: print phoneme sequences
+    if (g2pMode && ctx.g2pCount > 0) {
+        // ARPAbet output (space-separated)
+        printf("ARPAbet: ");
+        for (int i = 0; i < ctx.g2pCount; i++) {
+            if (i > 0) printf(" ");
+            printf("%s", ctx.g2pPhones[i].name);
+            if (ctx.g2pPhones[i].stress) printf("(%u)", ctx.g2pPhones[i].stress);
+        }
+        printf("\n");
+
+        // SPR output (ready to paste into --pron)
+        printf("SPR:     ");
+        for (int i = 0; i < ctx.g2pCount; i++) {
+            const char *spr = arpabet_to_spr(ctx.g2pPhones[i].name);
+            if (strcmp(spr, "_") == 0) continue;  // skip pau for SPR
+            if (ctx.g2pPhones[i].stress)
+                printf(".%u%s", ctx.g2pPhones[i].stress, spr);
+            else
+                printf(".0%s", spr);
+        }
+        printf("\n");
+    }
+
     return 0;
 }

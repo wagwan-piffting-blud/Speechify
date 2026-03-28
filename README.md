@@ -26,9 +26,117 @@ Demos of what each voice sounds like are available in the "demos" folder in this
 
 ---
 
+## The spfy_dumpwav.exe Command Line Tool
+
+`spfy_dumpwav.exe` is a lightweight command-line synthesis tool that talks directly to the Speechify server. It does not require Balabolka, SAPI, or any GUI, just the running `Speechify.exe` backend. It supports text-to-speech, phoneme input/output, and format conversion.
+
+**Note:** The Speechify server (`bin/Speechify.exe`) must be running before using this tool.
+
+### Basic Synthesis
+
+```
+spfy_dumpwav.exe "Hello, world!" output.wav
+spfy_dumpwav.exe --16k "Hello, world!" output_16k.wav
+```
+
+The default output is 8kHz 16-bit PCM WAV. Use `--16k` for 16kHz output.
+
+### Phoneme Timing Output
+
+```
+spfy_dumpwav.exe --phonemes "The weather today." output.wav
+```
+
+Creates `output.wav` plus `output.phn` with per-phoneme timing:
+
+```
+0       192     pau     0
+192     368     dh      0
+368     776     ix      0
+776     1256    w       1
+1256    2040    eh      1
+...
+```
+
+Format: `start_sample  end_sample  phoneme  stress` (tab-separated).
+
+### Phoneme Input (SPR Format)
+
+Synthesize directly from phoneme codes using Speechify's SPR (Symbolic Phonetic Representation) format:
+
+```
+spfy_dumpwav.exe --pron ".1hE.0lo" output.wav
+```
+
+SPR codes are case-sensitive single characters. You can also mix text and inline phonemes:
+
+```
+spfy_dumpwav.exe "I went to \![.1pa.0tx.0wa.0tu.0mi] county." output.wav
+```
+
+### Text-to-Phoneme (G2P)
+
+Get the engine's phoneme breakdown for any text without producing audio:
+
+```
+spfy_dumpwav.exe --g2p "Pottawattamie"
+```
+
+Outputs both ARPAbet and SPR representations.
+
+### Phoneme Format Conversion
+
+Convert between Balabolka/Balcon phoneme format and SPR format (no server needed):
+
+```
+spfy_dumpwav.exe --bal2spr "p aa 1 t ax w aa t uw m iy"
+spfy_dumpwav.exe --spr2bal ".1pa.0tx.0wa.0tu.0mi"
+```
+
+Balabolka format uses space-separated ARPAbet codes with stress markers after vowels. SPR format uses single-character symbols with syllable/stress markers.
+
+### SPR Symbol Reference
+
+| Type | SPR Symbol = ARPAbet |
+|------|---------------------|
+| Vowels | `a`=aa `A`=ae `H`=ah `c`=ao `W`=aw `x`=ax `Y`=ay `i`=iy `I`=ih `e`=ey `E`=eh `R`=er `u`=uw `U`=uh `o`=ow `X`=ix `O`=oy |
+| Consonants | `p b t d k g f v s z m n l r w y` (same as ARPAbet) |
+| Consonants | `C`=ch `J`=jh `T`=th `D`=dh `S`=sh `Z`=zh `G`=ng `N`=en `F`=dx `h`=hh |
+| Stress | `1`=primary `2`=secondary `0`=none |
+| Syllable | `.` (period marks syllable start) |
+
+### All Options
+
+| Flag | Description |
+|------|-------------|
+| `--phonemes` | Write `.phn` phoneme timing file alongside WAV |
+| `--pron "..."` | Synthesize from SPR phoneme string (no text needed) |
+| `--g2p` | Print phoneme sequence for text (no audio output) |
+| `--bal2spr "..."` | Convert Balabolka phonemes to SPR format |
+| `--spr2bal "..."` | Convert SPR phonemes to Balabolka format |
+| `--16k` | Use 16kHz output (default: 8kHz) |
+| `--rawdump` | Dump raw callback bytes to stderr (diagnostic) |
+
+### Building from Source
+
+Requires Microsoft Visual C++ (any version with `cl.exe`):
+
+```
+cd bin
+cl spfy_dumpwav.c /Fe:spfy_dumpwav.exe
+```
+
+The only dependency is `swi_min.h` (included) and `SWItts.dll` (in the bin folder).
+
+This step should not be required for most users, however, as I have included a precompiled binary in the `bin` folder, but it's here if you want to build it yourself or make your own modifications to it. The source code is also included in the `bin` folder as "spfy_dumpwav.c". This tool is open-source and licensed under the GNU GPL 3 (see [LICENSE](./LICENSE)), so feel free to modify and use it as you see fit.
+
+---
+
 ## Note on "AI Mara"
 
-"AI Mara" is a fully custom voice created by me using Claude Code and uses the Speechify TTS engine, which has been fully reverse-engineered (see `reveng/`). It is not an official SpeechWorks voice, but it is included in this Speechify 3.0 package. The voice is based on the original "Mara" voice that was available in older versions of Speechify that are now presumed lost media, but it has been generated to work with this version of the Speechify TTS engine. If you know where the True Mara voice is located (usually on Speech Server 2004 Beta 1/2), please [contact me](https://wagspuzzle.space/mara) as I would love to add it to this package and not use the AI Mara at all.
+"AI Mara" is a fully custom voice created by me using Claude Code and uses the Speechify TTS engine, which has been fully reverse-engineered (see the `reveng/` folder). It is not an official SpeechWorks voice, but it is included in this Speechify 3.0 package. The voice is based on the original "Mara" voice that was available in older versions of Speechify that are now presumed lost media, but it has been generated to work with this version of the Speechify TTS engine. If you know where the True Mara voice is located (usually on Speech Server 2004 Beta 1/2), please [contact me](https://wagspuzzle.space/mara) as I would love to add it to this package and not use the AI Mara at all.
 
 ## Credits
-DLL patching work done by Wags (@wags2piffting on Discord, or visit my website at https://wagspuzzle.space/). Original voice data and technology by SpeechWorks International. Credits to SpeechWorks International for creating the TTS engine, and the original creator of the Speechify VM (previously the only way to run Speechify Tom/Jill). Now we can _all_ enjoy not only Tom, but other Speechify voices on modern Windows systems. As well, credits to the Balabolka team for making a great TTS frontend that works well with various TTS engines.
+DLL patching work code done by Wags (@wags2piffting on Discord, or visit my website at https://wagspuzzle.space/), and spfy_dumpwav.exe code made with the help of Claude Code. Original voice data and technology by SpeechWorks International. Credits to SpeechWorks International for creating the TTS engine, and whoever the original creator of the Speechify VM is (previously the only way to run Speechify Tom/Jill). Now we can _all_ enjoy not only Tom, but other Speechify voices on modern Windows systems. As well, credits to the Balabolka team for making a great TTS frontend that works well with various TTS engines.
+
+## GenAI Disclosure Notice: Portions of this repository have been generated using Generative AI tools (Claude Code, GitHub Copilot, Google Gemini).

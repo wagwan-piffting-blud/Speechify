@@ -85,8 +85,7 @@
   </param>
 
   <param name="tts.voice.format">
-     <value> 8 </value>
-     <!-- <value> 16 </value> --> <!-- ONLY UNCOMMENT if you have a 16 kHz vdb available -->
+     <value> 8 </value> <!-- ONLY CHANGE to 16 if you have a 16 kHz vdb available -->
   </param>
 
   <param name="tts.voice.language">
