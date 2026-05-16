@@ -26,10 +26,24 @@
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #include <windows.h>
+#else
+  /* __stdcall is a calling-convention attribute that mingw / MSVC
+   * provide as a keyword. Linux gcc requires it as an attribute on
+   * i386; on amd64 it has no semantic meaning so we just make it
+   * empty. */
+#  if defined(__i386__)
+#    define __stdcall __attribute__((stdcall))
+#    define __cdecl   __attribute__((cdecl))
+#  else
+#    define __stdcall
+#    define __cdecl
+#  endif
 #endif
 
-/* getObject prototype matching the DLL's single export. */
-typedef int32_t (__stdcall *getObject_fn)(int32_t kind, void **out);
+/* getObject is __cdecl despite the typical Win32 DLL convention —
+ * verified by disassembly: epilogue is a plain `ret` (no callee
+ * cleanup). The vtable methods are __stdcall as usual. */
+typedef int32_t (__cdecl *getObject_fn)(int32_t kind, void **out);
 
 /* IObject vtable signatures we care about — just the first three for
  * COM lifecycle. */
@@ -54,7 +68,37 @@ static int load_file(const char *path, uint8_t **out, size_t *out_size) {
     return 0;
 }
 
+static void probe_getobject(void *getObject_void) {
+    getObject_fn go = (getObject_fn)getObject_void;
+    for (int kind = 0; kind < 6; ++kind) {
+        void *o = NULL;
+        int32_t r = go(kind, &o);
+        fprintf(stderr, "[probe] getObject(%d) -> rc=%d obj=%p", kind, r, o);
+        if (o) {
+            uint32_t *p = (uint32_t *)o;
+            fprintf(stderr, "  [0]=0x%08x [1]=0x%08x [2]=0x%08x", p[0], p[1], p[2]);
+        }
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
+}
+
 int main(int argc, char **argv) {
+    if (getenv("PROBE_KINDS")) {
+        /* Diagnostic probe: load DLL and call getObject(0..5) to verify
+         * that the loader + TIB + import surface produce valid objects.
+         * Used during the Linux port to isolate the FE init path from
+         * the heavier spfy_synth pipeline. */
+        const char *path = argc > 1 ? argv[1] : "bin/SWIttsFe-en-US.dll";
+        uint8_t *bytes; size_t size;
+        if (load_file(path, &bytes, &size) != 0) return 1;
+        host_dll_t *dll = host_dll_load(bytes, size, host_default_resolver, NULL);
+        if (!dll) { fprintf(stderr, "load failed: %s\n", host_dll_last_error()); return 2; }
+        void *go = host_dll_get_proc(dll, "getObject");
+        if (!go) { fprintf(stderr, "no getObject\n"); return 3; }
+        probe_getobject(go);
+        return 0;
+    }
     const char *path = argc > 1 ? argv[1] : "bin/SWIttsFe-en-US.dll";
     uint8_t *bytes; size_t size;
     if (load_file(path, &bytes, &size) != 0) {

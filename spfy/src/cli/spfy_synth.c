@@ -628,7 +628,7 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n)
             && (q[1] - '0') > max_stress) max_stress = q[1] - '0';
     char *o = out;
     char *eo = out + out_n - 1;
-    int n = _snprintf(o, (size_t)(eo - o),
+    int n = snprintf(o, (size_t)(eo - o),
         "#{. pau(p25) <SPR (0,%d) undef,%d [",
         (int)(end_br - p), max_stress);
     if (n < 0) return 0;
@@ -640,7 +640,7 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n)
             && q[1] >= '0' && q[1] <= '9') {
             int stress = q[1] - '0';
             q += 2;
-            n = _snprintf(o, (size_t)(eo - o),
+            n = snprintf(o, (size_t)(eo - o),
                 "%s.%d%s ",
                 first_syl ? "" : " ",
                 stress,
@@ -653,11 +653,11 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n)
         const char *arpa = spr_to_arpabet(*q);
         ++q;
         if (!arpa) continue;
-        n = _snprintf(o, (size_t)(eo - o), "%s(p100) ", arpa);
+        n = snprintf(o, (size_t)(eo - o), "%s(p100) ", arpa);
         if (n < 0) break;
         o += n;
     }
-    n = _snprintf(o, (size_t)(eo - o), "] > pau(p50) } %%%%");
+    n = snprintf(o, (size_t)(eo - o), "] > pau(p50) } %%%%");
     if (n < 0) return 0;
     o += n;
     *o = '\0';
@@ -1140,8 +1140,15 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             if (v->f0tr_cart.n_trees > 0) {
                 cfc.is_f0tr = 1;
                 if (spfy_cart_traverse(&v->f0tr_cart, 0, cart_feat, &cfc,
-                                       &cart.f0tr_mean, &cart.f0tr_var) == SPFY_OK)
+                                       &cart.f0tr_mean, &cart.f0tr_var) == SPFY_OK) {
                     cart.f0tr_valid = 1;
+                    /* Pitch shift via unit-selection bias — see
+                     * spfy_synth_set_pitch_semitones(). f0tr_mean is Hz;
+                     * multiplying by 2^(semitones/12) shifts the target
+                     * Viterbi matches against. scale == 1.0 is exact
+                     * IEEE identity → audit-invariant. */
+                    cart.f0tr_mean *= v->pitch_scale;
+                }
                 cfc.is_f0tr = 0;
             }
         }
@@ -1526,8 +1533,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     if (v->f0tr_cart.n_trees > 0) {
                         cfc.is_f0tr = 1;
                         if (spfy_cart_traverse(&v->f0tr_cart, 0, cart_feat, &cfc,
-                              &cart_per[k].f0tr_mean, &cart_per[k].f0tr_var) == SPFY_OK)
+                              &cart_per[k].f0tr_mean, &cart_per[k].f0tr_var) == SPFY_OK) {
                             cart_per[k].f0tr_valid = 1;
+                            cart_per[k].f0tr_mean *= v->pitch_scale;
+                        }
                         cfc.is_f0tr = 0;
                     }
                 }
@@ -1810,8 +1819,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     if (v->f0tr_cart.n_trees > 0) {
                         cfc.is_f0tr = 1;
                         if (spfy_cart_traverse(&v->f0tr_cart, 0, cart_feat, &cfc,
-                              &cart_per[k].f0tr_mean, &cart_per[k].f0tr_var) == SPFY_OK)
+                              &cart_per[k].f0tr_mean, &cart_per[k].f0tr_var) == SPFY_OK) {
                             cart_per[k].f0tr_valid = 1;
+                            cart_per[k].f0tr_mean *= v->pitch_scale;
+                        }
                         cfc.is_f0tr = 0;
                     }
                 }
@@ -2288,6 +2299,17 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             prev_have = 0;     /* break alignment chain after silence */
             prev_f0_end = 0;   /* unvoiced gap — disable PSOLA on next push */
         }
+        /* Fire the SAPI/CLI word-event callback at every non-silence
+         * slot whose parent word differs from the previous one. The
+         * callback receives the current PCM sample offset (post-WSOLA),
+         * so word/sentence boundaries land at the audible word start.
+         * Used by both the CLI (writes SPFY_WORD_EVENTS_FILE sidecar)
+         * and the SAPI shim (emits SPEI_WORD_BOUNDARY for Balabolka /
+         * Narrator / etc. word highlighting). */
+        if (cb && cb->word_cb && !this_is_silence
+            && this_word_idx != prev_word_idx) {
+            cb->word_cb(cb->ctx, sink->n_samples_written);
+        }
         if (!this_is_silence) prev_word_idx = this_word_idx;
         /* Engine-faithful batching: SWIttsWsolaConcat receives a pre-
          * batched WsolaUnit array where each entry groups a run of
@@ -2615,6 +2637,17 @@ int main(int argc, char **argv)
         cb.word_cb = spfy_cli_word_cb;
         cb.ctx     = &wev_ctx;
         cbp = &cb;
+    }
+
+    /* SPFY_PITCH_SEMITONES — shift target F0 via unit-selection bias.
+     * The synth picks naturally higher/lower-pitched units from the
+     * corpus; useful range is roughly +-3 st for Tom-family voices. */
+    {
+        const char *pe = getenv("SPFY_PITCH_SEMITONES");
+        if (pe && *pe) {
+            float st = (float)atof(pe);
+            spfy_synth_set_pitch_semitones(&voice, st);
+        }
     }
 
     spfy_synth_stats_t stats = {0};

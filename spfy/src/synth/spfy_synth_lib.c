@@ -10,9 +10,44 @@
 
 #include "../fe/phoneset.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+void spfy_synth_set_pitch_semitones(spfy_voice_t *v, float semitones)
+{
+    if (!v) return;
+    if (semitones == 0.0f) {
+        /* Exact 1.0 — pitch path becomes a true no-op. */
+        v->pitch_scale = 1.0f;
+        return;
+    }
+    /* Clamp to a sane octave around baseline; useful range is much
+     * smaller (Tom's recorded corpus has roughly +-3 st of natural
+     * variation). */
+    if (semitones >  12.0f) semitones =  12.0f;
+    if (semitones < -12.0f) semitones = -12.0f;
+    v->pitch_scale = powf(2.0f, semitones / 12.0f);
+}
+
+/* Tom's corpus 1-99% f0_mid range probed via spfy_dump_f0:
+ *   median = 118 Hz, p1 = 101 Hz (-2.69 st), p99 = 130 Hz (+1.68 st).
+ * We use slightly tighter limits so selection stays within a healthy
+ * pool density (not at the corpus tails). */
+#define SPFY_PITCH_SEL_UP     1.5f
+#define SPFY_PITCH_SEL_DOWN  -2.0f
+
+void spfy_synth_split_pitch(float target_st,
+                            float *out_selection_st,
+                            float *out_psola_st)
+{
+    float sel = target_st;
+    if (sel > SPFY_PITCH_SEL_UP)   sel = SPFY_PITCH_SEL_UP;
+    if (sel < SPFY_PITCH_SEL_DOWN) sel = SPFY_PITCH_SEL_DOWN;
+    if (out_selection_st) *out_selection_st = sel;
+    if (out_psola_st)     *out_psola_st     = target_st - sel;
+}
 
 int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
 {
@@ -24,6 +59,7 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
 
     memset(v, 0, sizeof *v);
     v->hpc_buckets = 256u;
+    v->pitch_scale = 1.0f;
 
     if ((rc = spfy_vin_load(paths->vin, &v->vin))                   != SPFY_OK) goto fail;
     if ((rc = spfy_vdb_load(paths->vdb, &v->vdb))                   != SPFY_OK) goto fail;

@@ -405,6 +405,14 @@ static int apply_section_protection(host_dll_t *dll) {
 
 host_dll_t *host_dll_load(const void *bytes, size_t size,
                           host_import_resolver resolve, void *user) {
+    /* Linux: install fake Thread Information Block once. No-op on
+     * Windows. The hosted DLL's MSVC prologue reads fs:[0x00] for SEH
+     * setup; without a TIB Linux processes have FS=0 and segfault. */
+    extern int host_tib_setup_if_needed(void);
+    if (host_tib_setup_if_needed() != 0) {
+        seterr("fake TIB setup failed");
+        return NULL;
+    }
     /* Host-architecture guard: the DLL is 32-bit x86 PE; the host
      * process must also be 32-bit. A 64-bit host would copy 32-bit
      * code into virtual memory and then jump into it — the CPU would
@@ -446,6 +454,12 @@ host_dll_t *host_dll_load(const void *bytes, size_t size,
     if (!dll->base) {
         seterr("vm_reserve failed for %zu bytes", dll->image_size);
         free(dll); return NULL;
+    }
+    if (getenv("SPFY_HOST_TRACE")) {
+        fprintf(stderr,
+                "[host] preferred ImageBase=0x%08x  got base=%p  size=%zu\n",
+                (unsigned)nt->OptionalHeader.ImageBase,
+                dll->base, dll->image_size);
     }
 
     if (copy_headers_and_sections(dll, src, size) != 0) goto fail;

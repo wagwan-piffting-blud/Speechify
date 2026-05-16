@@ -30,6 +30,18 @@
  * per static analysis).
  */
 
+/* Feature macros — exposed before any standard header include so glibc's
+ * <time.h> emits CLOCK_MONOTONIC and <stdio.h> emits fileno() on Linux.
+ * Harmless on MinGW (these defines are no-ops there). */
+#ifndef _WIN32
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200809L
+#  endif
+#  ifndef _DEFAULT_SOURCE
+#    define _DEFAULT_SOURCE 1
+#  endif
+#endif
+
 #include "imports.h"
 
 #include <stdarg.h>
@@ -377,8 +389,13 @@ static int g_adjust_fdiv_val = 0;
  * errno-pointer. */
 static int *HCDECL imp__errno(void) { return &errno; }
 
+#ifdef _WIN32
+
 /* _iob: pointer to stdio FILE * table — MSVCR71 has `_iob[]` of length
- * 20+; we synthesize a tiny one mapping 0/1/2 to stdin/stdout/stderr. */
+ * 20+; we synthesize a tiny one mapping 0/1/2 to stdin/stdout/stderr.
+ * Windows mingw uses its own FILE layout and the DLL's calls go through
+ * our stubs which forward to mingw stdio — the FILE struct pointed at
+ * by &_iob[N] is mingw-FILE-shaped, consistent end-to-end. */
 typedef struct { void *p; } iob_entry_t;
 static FILE *imp__iob_storage[3];
 static void imp__iob_init(void) {
@@ -386,6 +403,72 @@ static void imp__iob_init(void) {
     imp__iob_storage[1] = stdout;
     imp__iob_storage[2] = stderr;
 }
+
+#else
+
+/* MSVCRT exports `_iob` as an array of FILE STRUCTS (~32 B inline),
+ * NOT an array of pointers. The macros
+ *   #define stdin   (&_iob[0])
+ *   #define stdout  (&_iob[1])
+ *   #define stderr  (&_iob[2])
+ * yield POINTERS into that struct array. Anything calling fread/fwrite
+ * /etc on stdin therefore passes the address of `_iob[0]` — a FILE-
+ * shaped 32-byte struct, not a glibc FILE * (which is ~200 B + magic).
+ *
+ * On Linux we replicate the MSVCRT layout and stash the backing glibc
+ * FILE * in the `_tmpfname` slot (last 4 bytes). Every stdio stub below
+ * unwraps before forwarding. fopen/fclose round-trip through wrap_file
+ * /unwrap_file so the DLL only ever sees msvcrt_FILE * pointers.
+ *
+ * Without this fix, the DLL's `&_iob[N]` indexed into our short
+ * `FILE*[3]` array, ran off the end into BSS, and getObject(2) ended
+ * up returning glibc stderr's pointer as the "engine object". */
+typedef struct msvcrt_FILE {
+    char *_ptr;        /* +0x00 — opaque, never used */
+    int   _cnt;        /* +0x04 */
+    char *_base;       /* +0x08 */
+    int   _flag;       /* +0x0c */
+    int   _file;       /* +0x10 — fd; 0/1/2 for stdin/stdout/stderr */
+    int   _charbuf;    /* +0x14 */
+    int   _bufsiz;     /* +0x18 */
+    char *_tmpfname;   /* +0x1c — we hijack as glibc FILE * backref */
+} msvcrt_FILE;
+
+_Static_assert(sizeof(msvcrt_FILE) == 32,
+               "msvcrt_FILE must match MSVCR71's 32-byte layout");
+
+/* 20 slots — same as MSVCR71. Only 0/1/2 are populated. */
+static msvcrt_FILE imp__iob_storage[20];
+
+static void imp__iob_init(void) {
+    imp__iob_storage[0]._file = 0;
+    imp__iob_storage[0]._tmpfname = (char *)stdin;
+    imp__iob_storage[1]._file = 1;
+    imp__iob_storage[1]._tmpfname = (char *)stdout;
+    imp__iob_storage[2]._file = 2;
+    imp__iob_storage[2]._tmpfname = (char *)stderr;
+}
+
+/* Unwrap msvcrt_FILE * to its backing glibc FILE *. Called by every
+ * stdio stub. NULL is passed through (matches glibc behaviour, where
+ * passing NULL to e.g. fread is documented UB). */
+static FILE *unwrap_file(void *mf) {
+    if (!mf) return NULL;
+    return (FILE *)((msvcrt_FILE *)mf)->_tmpfname;
+}
+
+/* Wrap a glibc FILE * into a freshly allocated msvcrt_FILE so the DLL
+ * sees the correct ABI layout. Freed by imp_fclose. */
+static msvcrt_FILE *wrap_file(FILE *real) {
+    if (!real) return NULL;
+    msvcrt_FILE *m = (msvcrt_FILE *)calloc(1, sizeof(msvcrt_FILE));
+    if (!m) { fclose(real); return NULL; }
+    m->_file = fileno(real);
+    m->_tmpfname = (char *)real;
+    return m;
+}
+
+#endif
 
 /* For the libc functions we have direct equivalents we just expose
  * a fixed-convention wrapper symbol. */
@@ -399,6 +482,9 @@ static void *HCDECL imp_malloc(size_t n) { return calloc(1, n); }
 static void  HCDECL imp_free(void *p)                           { free(p); }
 static void *HCDECL imp_calloc(size_t n, size_t s)              { return calloc(n, s); }
 static void *HCDECL imp_realloc(void *p, size_t n)              { return realloc(p, n); }
+#ifdef _WIN32
+/* Windows: DLL's stdio handles ARE mingw FILE * (everything goes through
+ * mingw stdio consistently). Pass through. */
 static FILE *HCDECL imp_fopen(const char *p, const char *m)     { return fopen(p, m); }
 static int   HCDECL imp_fclose(FILE *f)                         { return fclose(f); }
 static size_t HCDECL imp_fread(void *p, size_t s, size_t n, FILE *f){ return fread(p, s, n, f); }
@@ -409,6 +495,33 @@ static void  HCDECL imp_rewind(FILE *f)                         { rewind(f); }
 static int   HCDECL imp_fflush(FILE *f)                         { return fflush(f); }
 static int   HCDECL imp_fputs(const char *s, FILE *f)           { return fputs(s, f); }
 static char *HCDECL imp_fgets(char *s, int n, FILE *f)          { return fgets(s, n, f); }
+#else
+/* Linux: wrap glibc FILE * in MSVCRT-shaped msvcrt_FILE so the DLL's
+ * `&_iob[N]` reads land on the right layout. Every stub unwraps before
+ * forwarding to glibc; fopen/fclose round-trip through wrap/unwrap. */
+static void *HCDECL imp_fopen(const char *p, const char *m) {
+    return wrap_file(fopen(p, m));
+}
+static int HCDECL imp_fclose(void *mf) {
+    if (!mf) return EOF;
+    FILE *real = unwrap_file(mf);
+    int rc = real ? fclose(real) : 0;
+    free(mf);
+    return rc;
+}
+static size_t HCDECL imp_fread(void *p, size_t s, size_t n, void *f) {
+    return fread(p, s, n, unwrap_file(f));
+}
+static size_t HCDECL imp_fwrite(const void *p, size_t s, size_t n, void *f) {
+    return fwrite(p, s, n, unwrap_file(f));
+}
+static int   HCDECL imp_fseek(void *f, long o, int w)   { return fseek(unwrap_file(f), o, w); }
+static long  HCDECL imp_ftell(void *f)                  { return ftell(unwrap_file(f)); }
+static void  HCDECL imp_rewind(void *f)                 { rewind(unwrap_file(f)); }
+static int   HCDECL imp_fflush(void *f)                 { return fflush(unwrap_file(f)); }
+static int   HCDECL imp_fputs(const char *s, void *f)   { return fputs(s, unwrap_file(f)); }
+static char *HCDECL imp_fgets(char *s, int n, void *f)  { return fgets(s, n, unwrap_file(f)); }
+#endif
 static int   HCDECL imp_getchar(void)                           { return getchar(); }
 static char *HCDECL imp_strncpy(char *d, const char *s, size_t n){ return strncpy(d, s, n); }
 static int   HCDECL imp_strncmp(const char *a, const char *b, size_t n){ return strncmp(a, b, n); }
@@ -431,12 +544,24 @@ static int    HCDECL imp_sprintf(char *buf, const char *fmt, ...) {
 static int    HCDECL imp_vsprintf(char *buf, const char *fmt, va_list ap) {
     return vsprintf(buf, fmt, ap);
 }
+#ifdef _WIN32
 static int    HCDECL imp_fprintf(FILE *f, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); int r = vfprintf(f, fmt, ap); va_end(ap); return r;
 }
 static int    HCDECL imp_vfprintf(FILE *f, const char *fmt, va_list ap) {
     return vfprintf(f, fmt, ap);
 }
+#else
+static int HCDECL imp_fprintf(void *mf, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    int r = vfprintf(unwrap_file(mf), fmt, ap);
+    va_end(ap);
+    return r;
+}
+static int HCDECL imp_vfprintf(void *mf, const char *fmt, va_list ap) {
+    return vfprintf(unwrap_file(mf), fmt, ap);
+}
+#endif
 static int    HCDECL imp_sscanf(const char *s, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); int r = vsscanf(s, fmt, ap); va_end(ap); return r;
 }
@@ -451,7 +576,7 @@ static int HCDECL imp__fileno_w(FILE *f)                        { return _fileno
 #else
 static int HCDECL imp__stat_w(const char *p, struct stat *st)   { return stat(p, st); }
 static int HCDECL imp__fstat_w(int fd, struct stat *st)         { return fstat(fd, st); }
-static int HCDECL imp__fileno_w(FILE *f)                        { return fileno(f); }
+static int HCDECL imp__fileno_w(void *mf)                       { return fileno(unwrap_file(mf)); }
 #endif
 
 /* ============================================================

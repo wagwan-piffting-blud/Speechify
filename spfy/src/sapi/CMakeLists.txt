@@ -29,8 +29,10 @@ target_include_directories(spfy_sapi
 )
 target_link_libraries(spfy_sapi
     PRIVATE spfy_synth_lib spfy_fe spfy_usel spfy_cart
-            spfy_voice spfy_wsola spfy_common
+            spfy_voice spfy_wsola spfy_dsp spfy_common
             ole32 oleaut32 advapi32 shell32 uuid)
+target_include_directories(spfy_sapi
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
 # Strip stdcall '@N' decoration from exported symbols so SAPI/regsvr32
 # resolves Dll* by their plain names.
 set_target_properties(spfy_sapi PROPERTIES

@@ -21,6 +21,12 @@ void *host_default_resolver(const char *dll,
                             uint16_t ordinal,
                             void *user);
 
+/* Linux-only: install a fake Thread Information Block and point FS at
+ * it via set_thread_area(2). MSVC-compiled DLLs read fs:[0x00] (SEH
+ * chain head) during function prologues — without a valid TIB, those
+ * reads segfault. No-op on Windows. Returns 0 on success. */
+int host_tib_setup_if_needed(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -87,12 +87,43 @@ typedef struct {
 
     /* FE host (loaded SWIttsFe-en-US.dll + parsed vocab + fe_tables). */
     spfy_fe_t              *fe;
+
+    /* Pitch shift via unit-selection bias. Default 1.0 (no shift). When
+     * non-1, f0tr_cart predictions are multiplied by this factor before
+     * unit cost is computed — so the Viterbi prefers naturally higher-
+     * or lower-pitched units. Range is limited by the recorded corpus:
+     * Tom spans about an octave of natural F0, so beyond +-3 semitones
+     * the available unit pool starts thinning and the perceived shift
+     * saturates. Set via spfy_synth_set_pitch_semitones(). */
+    float                   pitch_scale;
 } spfy_voice_t;
 
 /* Load everything in `paths`. On failure returns SPFY_E_*; `out` is
  * partially initialised (call spfy_voice_free to clean up). */
 int  spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *out);
 void spfy_voice_free(spfy_voice_t *v);
+
+/* Set the pitch shift for subsequent synth calls. `semitones` of 0 is a
+ * pure no-op (pitch_scale = 1.0 exactly). Useful range is roughly +-3
+ * semitones for Tom-family voices; larger shifts saturate at the corpus
+ * F0 range. */
+void spfy_synth_set_pitch_semitones(spfy_voice_t *v, float semitones);
+
+/* Split a user-facing pitch target into the natural-corpus part
+ * (handled via spfy_synth_set_pitch_semitones) and the residual that
+ * needs post-process PSOLA. Tom's unit corpus (median 118 Hz, 1-99%
+ * range 102-130 Hz) can comfortably select up to ~+1.5 / -2.0 st before
+ * the available pool thins out. Anything past that becomes a TD-PSOLA
+ * shift applied to the sink output.
+ *
+ *   target_st         user target (e.g. SPVSTATE.PitchAdj.MiddleAdj)
+ *   out_selection_st  semitones to apply via unit selection
+ *   out_psola_st      semitones to apply post-process via PSOLA
+ *
+ * The two outputs always sum to target_st. */
+void spfy_synth_split_pitch(float target_st,
+                            float *out_selection_st,
+                            float *out_psola_st);
 
 /* Per-call synth stats — filled by do_synth/spfy_synth_to_sink. CLI prints
  * them, SAPI ignores. */

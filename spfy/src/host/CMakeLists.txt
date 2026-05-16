@@ -21,11 +21,16 @@ endif()
 add_library(spfy_host STATIC
     loader.c
     imports.c
+    tib_linux.c
 )
 target_include_directories(spfy_host PUBLIC .)
 
 if(WIN32)
     target_link_libraries(spfy_host PUBLIC winmm)
+else()
+    # libm: imports.c provides MSVCR71 math forwards (exp/log/pow/sin/...).
+    # Linux gcc keeps these out of libc so we must link explicitly.
+    target_link_libraries(spfy_host PUBLIC m)
 endif()
 
 # PE loader inherently casts function pointers <-> object pointers

@@ -45,11 +45,20 @@ endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
+# Linux: many TUs (anchor_score, wsola, dsp, dump_f0, ...) call libm.
+# On MinGW these come from libgcc; on glibc they live in libm and must
+# be explicit. Adding to link_libraries() applies to all subsequent
+# targets which is what we want.
+if(NOT WIN32)
+    link_libraries(m)
+endif()
+
 add_subdirectory(src/common)
 add_subdirectory(src/voice)
 add_subdirectory(src/cart)
 add_subdirectory(src/usel)
 add_subdirectory(src/wsola)
+add_subdirectory(src/dsp)
 if(SPFY_FE_HOSTED)
     add_subdirectory(src/fe_host)
 else()

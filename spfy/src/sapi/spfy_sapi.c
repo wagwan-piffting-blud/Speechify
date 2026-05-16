@@ -21,6 +21,10 @@
 #include "sapiddk_min.h"
 #include "sapi_phone_table.h"
 #include "spfy_synth_lib.h"
+#include "pitch_shift.h"
+#include "time_stretch.h"
+
+#include <math.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,7 +150,22 @@ typedef struct {
     uint64_t          next_phoneme_evt_samples;
     FILE             *dbg_fp;           /* nullable; SPFY_SAPI_DEBUG */
     DWORD             last_acts;        /* tracks GetActions transitions */
+    /* PSOLA buffer for the residual portion of <prosody pitch> that
+     * exceeds the corpus selection-natural range. When psola_residual_st
+     * is non-zero OR rate_factor != 1.0, sapi_sink_write accumulates
+     * into psola_buf instead of writing through; the frag-end flush
+     * runs TD-PSOLA then WSOLA time-stretch and forwards. */
+    float             psola_residual_st;
+    float             rate_factor;       /* 1.0 = no time-stretch */
+    int16_t          *psola_buf;
+    size_t            psola_n;
+    size_t            psola_cap;
+    int               psola_sr;
 } sapi_sink_ctx_t;
+
+/* Either DSP pass needs the per-frag buffer. */
+#define SAPI_NEED_BUFFER(s) ((s)->psola_residual_st != 0.0f \
+                             || (s)->rate_factor   != 1.0f)
 
 #define SAPI_PHONEME_HEARTBEAT_SAMPLES  800u   /* 100 ms @ 8 kHz */
 
@@ -170,10 +189,36 @@ typedef struct {
     uint64_t          frag_audio_base;    /* added to sample_offset */
 } sapi_word_ctx_t;
 
+/* Append `samples` to the PSOLA accumulator. Word/sentence events have
+ * already been emitted by the synth-time callback at the correct
+ * sample_offset; SAPI's event delivery is byte-offset-based so events
+ * sit in the consumer queue until the eventually-written audio reaches
+ * their ullAudioStreamOffset (TD-PSOLA preserves duration so offsets
+ * stay accurate). */
+static int sapi_psola_buffer(sapi_sink_ctx_t *s, const int16_t *samples,
+                             size_t n)
+{
+    if (s->psola_n + n > s->psola_cap) {
+        size_t cap = s->psola_cap ? s->psola_cap * 2 : 16384;
+        while (cap < s->psola_n + n) cap *= 2;
+        int16_t *nb = (int16_t *)realloc(s->psola_buf, cap * sizeof(int16_t));
+        if (!nb) { s->abort = 1; s->last_hr = E_OUTOFMEMORY; return SPFY_E_NOMEM; }
+        s->psola_buf = nb;
+        s->psola_cap = cap;
+    }
+    memcpy(s->psola_buf + s->psola_n, samples, n * sizeof(int16_t));
+    s->psola_n += n;
+    s->cum_samples += n;
+    return SPFY_OK;
+}
+
 static int sapi_sink_write(void *ctx, const int16_t *samples, size_t n)
 {
     sapi_sink_ctx_t *s = (sapi_sink_ctx_t *)ctx;
     if (s->abort) return SPFY_E_IO;
+    /* DSP path: buffer raw samples; the frag-end flush does the
+     * pitch-shift and/or time-stretch then forwards to the site. */
+    if (SAPI_NEED_BUFFER(s)) return sapi_psola_buffer(s, samples, n);
     DWORD acts = ISpTTSEngineSite_GetActions(s->site);
     if (s->dbg_fp && acts != s->last_acts) {
         fprintf(s->dbg_fp,
@@ -234,6 +279,54 @@ static int sapi_sink_write(void *ctx, const int16_t *samples, size_t n)
         s->next_phoneme_evt_samples += SAPI_PHONEME_HEARTBEAT_SAMPLES;
     }
     return SPFY_OK;
+}
+
+/* Apply pitch shift and/or time-stretch to the buffered samples and
+ * stream the result to the SAPI site. Pitch first (preserves duration),
+ * then rate (scales duration). Re-uses the volume/heartbeat machinery
+ * by temporarily disabling the DSP gate around the recursive write. */
+static int sapi_psola_flush(sapi_sink_ctx_t *s)
+{
+    if (s->psola_n == 0) return SPFY_OK;
+    int16_t *cur = s->psola_buf;
+    size_t   cur_n = s->psola_n;
+    int16_t *owned = NULL;     /* tracks malloc'd buffer to free later */
+
+    /* Pitch pass — same length out. */
+    if (s->psola_residual_st != 0.0f) {
+        int16_t *shifted = (int16_t *)malloc(cur_n * sizeof(int16_t));
+        if (!shifted) return SPFY_E_NOMEM;
+        int rc = spfy_pitch_shift_block(cur, cur_n, shifted,
+                                         s->psola_residual_st, s->psola_sr);
+        if (rc != 0) { free(shifted); return SPFY_E_IO; }
+        cur = shifted; owned = shifted;
+    }
+    /* Rate pass — variable length out. */
+    if (s->rate_factor != 1.0f) {
+        int16_t *stretched = NULL;
+        size_t   stretched_n = 0;
+        int rc = spfy_time_stretch_block(cur, cur_n, &stretched, &stretched_n,
+                                          s->rate_factor, s->psola_sr);
+        if (rc != 0) { free(owned); return SPFY_E_IO; }
+        if (owned) free(owned);
+        cur = stretched; owned = stretched; cur_n = stretched_n;
+    }
+
+    /* Temporarily switch DSP off so sapi_sink_write writes through to
+     * the site instead of re-buffering. Drop the pre-DSP sample count
+     * from cum_samples so the write path's bookkeeping doesn't double-
+     * count; the post-DSP write re-increments by cur_n. */
+    float saved_res  = s->psola_residual_st;
+    float saved_rate = s->rate_factor;
+    s->psola_residual_st = 0.0f;
+    s->rate_factor       = 1.0f;
+    s->cum_samples      -= s->psola_n;
+    int wr = sapi_sink_write(s, cur, cur_n);
+    s->psola_residual_st = saved_res;
+    s->rate_factor       = saved_rate;
+    s->psola_n = 0;
+    free(owned);
+    return wr;
 }
 
 /* Emit `n` zero samples — used for SSML <break>/SPVA_Silence and per-
@@ -448,6 +541,12 @@ static int speak_one_frag_text(SpfyEngineImpl *impl,
         rc = spfy_synth_to_sink(&impl->voice, u8, &sink, &cb, &stats);
     }
     spfy_wav_close(&sink);
+    /* If this frag was synthesised with any DSP pass active, drain the
+     * accumulator now. Done per-frag so each frag's pitch/rate is
+     * honoured independently. */
+    if (SAPI_NEED_BUFFER(sink_ctx) && sink_ctx->psola_n > 0) {
+        sapi_psola_flush(sink_ctx);
+    }
     free(u8);
     free(off); free(len); free(ss);
     return rc;
@@ -469,6 +568,16 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     sink_ctx.site        = pOutputSite;
     sink_ctx.volume_gain = 1.0f;
     sink_ctx.next_phoneme_evt_samples = SAPI_PHONEME_HEARTBEAT_SAMPLES;
+    sink_ctx.rate_factor              = 1.0f;
+
+    /* Pull the SAPI-level baseline rate set via ISpVoice::SetRate(). The
+     * per-fragment SPVSTATE.RateAdj is only the SSML <rate> adjustment
+     * ON TOP of this baseline, so a host like Balabolka that uses its
+     * rate slider (-> SetRate) would otherwise pass us frags with
+     * RateAdj=0 and the slider would silently no-op. Range is the same
+     * as RateAdj ([-10, +10]); we sum the two below. */
+    long site_base_rate = 0;
+    ISpTTSEngineSite_GetRate(pOutputSite, &site_base_rate);
 
     /* Diagnostic: when SPFY_SAPI_DEBUG is set, log Speak entry context
      * + GetEventInterest bitmask + each fragment we receive to
@@ -509,11 +618,14 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
                  f = f->pNext, ++fi) {
                 fprintf(dbg, "frag[%d] eAction=%d ulTextLen=%lu "
                             "ulTextSrcOffset=%lu Volume=%lu "
+                            "RateAdj=%ld PitchMid=%ld "
                             "SilenceMSecs=%ld pPhoneIds=%s",
                         fi, (int)f->State.eAction,
                         (unsigned long)f->ulTextLen,
                         (unsigned long)f->ulTextSrcOffset,
                         (unsigned long)f->State.Volume,
+                        (long)f->State.RateAdj,
+                        (long)f->State.PitchAdj.MiddleAdj,
                         (long)f->State.SilenceMSecs,
                         f->State.pPhoneIds ? "yes" : "no");
                 if (f->pTextStart && f->ulTextLen > 0) {
@@ -551,6 +663,31 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         ULONG vol = f->State.Volume;
         if (vol > 100u) vol = 100u;
         sink_ctx.volume_gain = (float)vol / 100.0f;
+
+        /* Per-fragment pitch — SPVSTATE.PitchAdj.MiddleAdj is the SAPI
+         * convention "approximately one semitone per unit", range [-10,
+         * +10]. Split into a corpus-natural selection portion
+         * (spfy_synth_set_pitch_semitones) and a residual that goes
+         * through TD-PSOLA at sink flush. */
+        {
+            float target_st = (float)f->State.PitchAdj.MiddleAdj;
+            float sel_st = 0.0f, psola_st = 0.0f;
+            spfy_synth_split_pitch(target_st, &sel_st, &psola_st);
+            spfy_synth_set_pitch_semitones(&impl->voice, sel_st);
+            sink_ctx.psola_residual_st = psola_st;
+            sink_ctx.psola_sr = (int)sr;
+        }
+        /* Per-fragment rate — SPVSTATE.RateAdj in [-10, +10]. Common
+         * SAPI mapping: factor = pow(1.2, RateAdj/2), which gives a
+         * roughly 2.5x range at the extremes. Applied as a post-process
+         * WSOLA time-stretch in the same sink flush pass that handles
+         * the PSOLA residual. */
+        {
+            long ra = f->State.RateAdj + site_base_rate;
+            if (ra > 10) ra = 10;
+            if (ra < -10) ra = -10;
+            sink_ctx.rate_factor = powf(1.2f, (float)ra / 2.0f);
+        }
 
         /* SilenceMSecs: a hard prefix-pause before the fragment's audio
          * (SSML <break time="..."/> emits this on the following frag's
@@ -627,6 +764,10 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
                 (unsigned long)sink_ctx.last_hr);
         fclose(dbg);
     }
+    free(sink_ctx.psola_buf);
+    /* Reset pitch on the voice handle so the next Speak with no
+     * <prosody pitch> doesn't inherit this Speak's bias. */
+    spfy_synth_set_pitch_semitones(&impl->voice, 0.0f);
     return hr;
 }
 

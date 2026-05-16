@@ -103,6 +103,8 @@ struct ISpTTSEngineSite {
 #define ISpTTSEngineSite_Write(This,b,cb,pcb)  (This)->lpVtbl->Write(This,b,cb,pcb)
 #define ISpTTSEngineSite_GetActions(This)      (This)->lpVtbl->GetActions(This)
 #define ISpTTSEngineSite_AddEvents(This,p,n)   (This)->lpVtbl->AddEvents(This,p,n)
+#define ISpTTSEngineSite_GetRate(This,p)       (This)->lpVtbl->GetRate(This,p)
+#define ISpTTSEngineSite_GetVolume(This,p)     (This)->lpVtbl->GetVolume(This,p)
 
 /* ------------------------------------------------------------------ */
 /* ISpTTSEngine                                                        */

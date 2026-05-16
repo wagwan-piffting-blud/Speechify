@@ -100,6 +100,27 @@ target_include_directories(spfy_synth
 target_link_libraries(spfy_synth
     PRIVATE spfy_synth_lib spfy_fe spfy_usel spfy_cart spfy_voice spfy_wsola spfy_common)
 
+# A/B test tool for the TD-PSOLA pitch shifter (used to tune quality
+# before wiring into the SAPI shim's <prosody pitch=...> path).
+add_executable(spfy_pitch_shift spfy_pitch_shift.c)
+target_include_directories(spfy_pitch_shift
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
+target_link_libraries(spfy_pitch_shift PRIVATE spfy_dsp)
+
+add_executable(spfy_time_stretch spfy_time_stretch.c)
+target_include_directories(spfy_time_stretch
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
+target_link_libraries(spfy_time_stretch PRIVATE spfy_dsp)
+
+# One-shot diagnostic: print Tom's unit corpus F0 byte distribution to
+# size the selection-only pitch range before falling back to PSOLA.
+add_executable(spfy_dump_f0 spfy_dump_f0.c)
+target_include_directories(spfy_dump_f0 PRIVATE ${CMAKE_SOURCE_DIR}/src/voice)
+target_link_libraries(spfy_dump_f0 PRIVATE spfy_voice spfy_common)
+if(NOT WIN32)
+    target_link_libraries(spfy_dump_f0 PRIVATE m)
+endif()
+
 # Phase C: end-to-end synth via FE traces (no FE port required). Per-cand
 # scoring uses the validated spfy_hp_innerscorer (99% bit-exact); chosen
 # UIDs run through the same pair-aware concat as spfy_concat to produce WAV.

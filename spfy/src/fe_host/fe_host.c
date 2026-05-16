@@ -57,6 +57,17 @@
 #include <windows.h>
 #else
 #include <time.h>
+/* __stdcall is a calling-convention attribute. mingw/MSVC make it a
+ * keyword; on Linux gcc i386 we expose it as the matching attribute so
+ * the typedef'd vfnN signatures below have the right ABI. On amd64
+ * stdcall has no semantic meaning so we leave it empty. */
+#  if defined(__i386__)
+#    define __stdcall __attribute__((stdcall))
+#    define __cdecl   __attribute__((cdecl))
+#  else
+#    define __stdcall
+#    define __cdecl
+#  endif
 #endif
 
 extern const unsigned char swittsfe_dll_data[];
@@ -79,7 +90,15 @@ typedef struct spfy_fe_s {
     int               last_parsed_valid;
 } hosted_fe_t;
 
-typedef int32_t  (__stdcall *getObject_fn)(int32_t kind, void **out);
+/* getObject is exported as __cdecl despite the typical Win32 DLL
+ * convention — verified via disassembly: epilogue is a plain `ret`,
+ * not `ret 8`. The mismatch matters only on Linux where our caller
+ * compiles with __stdcall and assumes callee-cleans-up; mingw's
+ * Win32 ABI nominally tolerates the difference at call sites that use
+ * EBP-relative addressing for locals, but our gcc-Linux build uses
+ * ESP-relative addressing so the post-call ESP slop corrupts every
+ * subsequent local access. */
+typedef int32_t  (__cdecl *getObject_fn)(int32_t kind, void **out);
 typedef uint32_t (__stdcall *vfn0)(void *self);
 typedef uint32_t (__stdcall *vfn1)(void *self, uint32_t a);
 typedef uint32_t (__stdcall *vfn3)(void *self, uint32_t a, uint32_t b, uint32_t c);
@@ -132,6 +151,9 @@ int spfy_fe_open(const char *vocab_json,
     void *raw = NULL;
     /* kind=2 matches what Speechify.exe uses (per Frida capture). */
     int32_t rc = getObject(2, &raw);
+    if (getenv("SPFY_HOST_TRACE")) {
+        fprintf(stderr, "[fe_host] getObject(2) -> rc=%d  raw=%p\n", rc, raw);
+    }
     if (!rc || !raw) {
         fprintf(stderr, "[fe_host] getObject(2, ...) -> %d, obj=%p\n",
                 rc, raw);

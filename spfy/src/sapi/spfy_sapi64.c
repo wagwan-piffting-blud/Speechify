@@ -37,6 +37,10 @@
 
 #include "sapiddk_min.h"
 #include "sapi_phone_table.h"
+#include "pitch_shift.h"
+#include "time_stretch.h"
+
+#include <math.h>
 
 /* Module handle (set in DllMain) — used to derive paths. */
 static HMODULE g_hModule = NULL;
@@ -193,11 +197,16 @@ static int locate_synth_exe(WCHAR *out, size_t out_n)
     return 0;
 }
 
-/* Run spfy_synth.exe synchronously. Returns 0 on success. */
+/* Run spfy_synth.exe synchronously. Returns 0 on success.
+ *
+ *   selection_st  semitones to pass to the subprocess as
+ *                 SPFY_PITCH_SEMITONES (already clamped to the corpus-
+ *                 natural range by spfy_synth_split_pitch). */
 static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
                                 const char  *utf8_text,
                                 const WCHAR *out_wav,
-                                const WCHAR *out_events)
+                                const WCHAR *out_events,
+                                float        selection_st)
 {
     WCHAR project[MAX_PATH];
     if (!get_documents_speechify(project, MAX_PATH)) return -1;
@@ -239,7 +248,14 @@ static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
     WCHAR wev_var[MAX_PATH + 64];
     int wev_len = _snwprintf(wev_var, MAX_PATH + 64,
                               L"SPFY_WORD_EVENTS_FILE=%ls", out_events);
-    size_t total = base_n + (size_t)wev_len + 1 + 1;
+    WCHAR pit_var[64];
+    int pit_len = 0;
+    if (selection_st != 0.0f) {
+        pit_len = _snwprintf(pit_var, 64, L"SPFY_PITCH_SEMITONES=%.3f",
+                             (double)selection_st);
+    }
+    size_t total = base_n + (size_t)wev_len + 1
+                 + (size_t)(pit_len ? pit_len + 1 : 0) + 1;
     WCHAR *env = (WCHAR *)malloc(total * sizeof(WCHAR));
     if (!env) { FreeEnvironmentStringsW(base_env); free(cmd); return -1; }
     {
@@ -252,6 +268,10 @@ static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
         }
         memcpy(dst, wev_var, ((size_t)wev_len + 1) * sizeof(WCHAR));
         dst += wev_len + 1;
+        if (pit_len) {
+            memcpy(dst, pit_var, ((size_t)pit_len + 1) * sizeof(WCHAR));
+            dst += pit_len + 1;
+        }
         *dst = 0;
     }
     FreeEnvironmentStringsW(base_env);
@@ -299,6 +319,7 @@ static HRESULT stream_wav_with_events(ISpTTSEngineSite *site,
                                       uint64_t audio_base,
                                       ULONG    text_base,
                                       float    volume_gain,
+                                      float    rate_factor,
                                       uint64_t *cum_samples_out)
 {
     HANDLE eh = CreateFileW(evt_path, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -321,6 +342,10 @@ static HRESULT stream_wav_with_events(ISpTTSEngineSite *site,
                     if (!eol) eol = p + strlen(p);
                     char save = *eol; *eol = 0;
                     ULONG s = (ULONG)strtoul(p, NULL, 10);
+                    /* Scale offsets to match the time-stretched audio. */
+                    if (rate_factor != 1.0f && rate_factor > 0.0f) {
+                        s = (ULONG)((double)s / (double)rate_factor + 0.5);
+                    }
                     evt_sample_off[evt_n++] = s;
                     *eol = save;
                     if (!*eol) break;
@@ -499,13 +524,123 @@ static char *frags_to_utf8(const SPVTEXTFRAG *frag, WCHAR **out_w, int *out_wlen
     return u8;
 }
 
+/* Read the WAV at `path`, pitch-shift its int16 data section by
+ * `semitones` (TD-PSOLA, duration-preserving), and write it back over
+ * the same file. Leaves the header bytes untouched. Best-effort: any
+ * read/write failure leaves the file as-is. */
+static void psola_shift_wav_inplace(const WCHAR *path, float semitones)
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                            0, NULL, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD sz = GetFileSize(h, NULL);
+    if (sz <= 44) { CloseHandle(h); return; }
+    /* WAV header is 44 bytes for our PCM mono format; sample rate sits
+     * at offset 24 (uint32 LE). */
+    BYTE hdr[44];
+    DWORD got = 0;
+    if (!ReadFile(h, hdr, 44, &got, NULL) || got != 44) {
+        CloseHandle(h); return;
+    }
+    uint32_t sr = (uint32_t)hdr[24]
+                | ((uint32_t)hdr[25] << 8)
+                | ((uint32_t)hdr[26] << 16)
+                | ((uint32_t)hdr[27] << 24);
+    size_t n_samples = (sz - 44) / 2;
+    int16_t *buf = (int16_t *)malloc(n_samples * sizeof(int16_t));
+    if (!buf) { CloseHandle(h); return; }
+    if (!ReadFile(h, buf, (DWORD)(n_samples * 2), &got, NULL)
+        || got != n_samples * 2) {
+        free(buf); CloseHandle(h); return;
+    }
+    int16_t *shifted = (int16_t *)malloc(n_samples * sizeof(int16_t));
+    if (!shifted) { free(buf); CloseHandle(h); return; }
+    int rc = spfy_pitch_shift_block(buf, n_samples, shifted,
+                                     semitones, (int)sr);
+    free(buf);
+    if (rc != 0) { free(shifted); CloseHandle(h); return; }
+    SetFilePointer(h, 44, NULL, FILE_BEGIN);
+    DWORD wrote = 0;
+    WriteFile(h, shifted, (DWORD)(n_samples * 2), &wrote, NULL);
+    free(shifted);
+    CloseHandle(h);
+}
+
+/* WSOLA time-stretch the WAV at `path` by `factor` (in-place). Output
+ * is longer/shorter than input so we rewrite both the header (RIFF +
+ * data chunk sizes) and the data section. Best-effort: returns silently
+ * on any IO error and leaves the file unchanged. */
+static void rate_stretch_wav_inplace(const WCHAR *path, float factor)
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD sz = GetFileSize(h, NULL);
+    if (sz <= 44) { CloseHandle(h); return; }
+    BYTE hdr[44];
+    DWORD got = 0;
+    if (!ReadFile(h, hdr, 44, &got, NULL) || got != 44) {
+        CloseHandle(h); return;
+    }
+    uint32_t sr = (uint32_t)hdr[24] | ((uint32_t)hdr[25] << 8)
+                | ((uint32_t)hdr[26] << 16) | ((uint32_t)hdr[27] << 24);
+    size_t n_in = (sz - 44) / 2;
+    int16_t *buf = (int16_t *)malloc(n_in * sizeof(int16_t));
+    if (!buf) { CloseHandle(h); return; }
+    if (!ReadFile(h, buf, (DWORD)(n_in * 2), &got, NULL)
+        || got != n_in * 2) {
+        free(buf); CloseHandle(h); return;
+    }
+    CloseHandle(h);
+
+    int16_t *out = NULL;
+    size_t   n_out = 0;
+    int rc = spfy_time_stretch_block(buf, n_in, &out, &n_out,
+                                      factor, (int)sr);
+    free(buf);
+    if (rc != 0) { free(out); return; }
+
+    /* Rewrite the file from scratch with the new lengths. */
+    h = CreateFileW(path, GENERIC_WRITE, 0, NULL,
+                    CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { free(out); return; }
+    uint32_t data_sz = (uint32_t)(n_out * 2u);
+    uint32_t riff_sz = 36u + data_sz;
+    hdr[4]  = (BYTE)(riff_sz & 0xFF);
+    hdr[5]  = (BYTE)((riff_sz >> 8)  & 0xFF);
+    hdr[6]  = (BYTE)((riff_sz >> 16) & 0xFF);
+    hdr[7]  = (BYTE)((riff_sz >> 24) & 0xFF);
+    hdr[40] = (BYTE)(data_sz & 0xFF);
+    hdr[41] = (BYTE)((data_sz >> 8)  & 0xFF);
+    hdr[42] = (BYTE)((data_sz >> 16) & 0xFF);
+    hdr[43] = (BYTE)((data_sz >> 24) & 0xFF);
+    DWORD wrote = 0;
+    WriteFile(h, hdr, 44, &wrote, NULL);
+    WriteFile(h, out, (DWORD)(n_out * 2), &wrote, NULL);
+    CloseHandle(h);
+    free(out);
+}
+
 /* Synth one fragment's text via the 32-bit spfy_synth.exe subprocess,
  * then stream its WAV (with volume gain + boundary events) to the SAPI
- * site. Advances *cum_samples by the streamed sample count. */
+ * site. Advances *cum_samples by the streamed sample count.
+ *
+ *   selection_st   pitch shift handled at subprocess level (clamped to
+ *                  Tom's corpus-natural range, ~-2..+1.5 st).
+ *   psola_st       residual pitch shift applied to the returned WAV via
+ *                  TD-PSOLA post-process. selection_st + psola_st
+ *                  equals the user's target.
+ *   rate_factor    WSOLA time-stretch factor applied AFTER pitch
+ *                  shift. > 1.0 = speed up. 1.0 = no-op.
+ */
 static HRESULT speak_one_frag_text64(SpfyEngine64 *impl,
                                      const SPVTEXTFRAG *f,
                                      ISpTTSEngineSite *site,
                                      float volume_gain,
+                                     float selection_st,
+                                     float psola_st,
+                                     float rate_factor,
                                      uint64_t *cum_samples)
 {
     if ((!f->pTextStart || f->ulTextLen == 0)
@@ -563,13 +698,31 @@ static HRESULT speak_one_frag_text64(SpfyEngine64 *impl,
     HRESULT hr = E_FAIL;
     if (locate_synth_exe(exe, MAX_PATH)) {
         int rc = run_synth_subprocess(exe, impl->voice_name,
-                                      u8, wav_path, evt_path);
+                                      u8, wav_path, evt_path,
+                                      selection_st);
         if (rc == 0) {
+            /* If PSOLA residual is non-zero, pitch-shift the rendered
+             * WAV in place before streaming to the site. Rewrites only
+             * the data section (header dimensions don't change since
+             * TD-PSOLA preserves duration). */
+            if (psola_st != 0.0f) {
+                psola_shift_wav_inplace(wav_path, psola_st);
+            }
+            /* If rate_factor != 1, WSOLA time-stretch the WAV next.
+             * Changes file length so we rewrite the whole file (header
+             * + data). Word-event sample offsets in the TSV are NOT
+             * scaled here — see the streaming loop below where we
+             * scale them by 1/rate_factor to keep events aligned with
+             * the stretched audio. */
+            if (rate_factor != 1.0f) {
+                rate_stretch_wav_inplace(wav_path, rate_factor);
+            }
             hr = stream_wav_with_events(site, wav_path, evt_path,
                                         words, word_n,
                                         *cum_samples,
                                         f->ulTextSrcOffset,
                                         volume_gain,
+                                        rate_factor,
                                         cum_samples);
         }
     }
@@ -595,6 +748,12 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     uint64_t cum_samples = 0;
     HRESULT hr = S_OK;
     int abort_flag = 0;
+
+    /* See spfy_sapi.c::tts_Speak for the rationale — host rate sliders
+     * call ISpVoice::SetRate which surfaces here only via
+     * ISpTTSEngineSite::GetRate (NOT in SPVSTATE.RateAdj). */
+    long site_base_rate = 0;
+    ISpTTSEngineSite_GetRate(pOutputSite, &site_base_rate);
 
     /* SPFY_SAPI_DEBUG diagnostic — see spfy_sapi.c::tts_Speak for the
      * full description. Logs GetEventInterest, frag list, and per-frag
@@ -668,6 +827,25 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         if (vol > 100u) vol = 100u;
         float gain = (float)vol / 100.0f;
 
+        /* Pitch split — see spfy_synth_split_pitch in
+         * spfy/src/synth/spfy_synth_lib.c. Selection-portion is passed
+         * to the 32-bit subprocess via SPFY_PITCH_SEMITONES; residual
+         * (anything beyond Tom's corpus-natural range) is post-processed
+         * by TD-PSOLA on the returned WAV. The split itself is
+         * implemented in spfy_synth_lib (32-bit) so we re-derive the
+         * crossover here to avoid a cross-bitness library dep. */
+        float target_st = (float)f->State.PitchAdj.MiddleAdj;
+        float sel_st = target_st;
+        if (sel_st >  1.5f) sel_st =  1.5f;
+        if (sel_st < -2.0f) sel_st = -2.0f;
+        float psola_st = target_st - sel_st;
+
+        /* Rate — same mapping as spfy_sapi.c. */
+        long ra = f->State.RateAdj + site_base_rate;
+        if (ra > 10) ra = 10;
+        if (ra < -10) ra = -10;
+        float rate_factor = (float)pow(1.2, (double)ra / 2.0);
+
         if (f->State.SilenceMSecs > 0) {
             HRESULT shr = emit_silence64(pOutputSite,
                 (ULONG)(((uint64_t)f->State.SilenceMSecs * sr) / 1000u),
@@ -694,7 +872,9 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
                 pOutputSite->lpVtbl->AddEvents(pOutputSite, &wev, 1);
             }
             HRESULT fhr = speak_one_frag_text64(impl, f, pOutputSite,
-                                                gain, &cum_samples);
+                                                gain, sel_st, psola_st,
+                                                rate_factor,
+                                                &cum_samples);
             if (FAILED(fhr)) hr = fhr;
             break;
         }

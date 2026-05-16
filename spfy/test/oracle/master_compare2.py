@@ -395,8 +395,14 @@ def run_one_multi(args):
     except OSError:
         pass
     if r.returncode != 0 and not slots:
+        # r.stderr is None when stderr was merged into stdout via
+        # stderr=subprocess.STDOUT (the case here). Fall back to the
+        # last lines of stdout for context.
+        tail = "\n".join(r.stdout.splitlines()[-10:]) if r.stdout else ""
+        if os.environ.get("SPFY_AUDIT_DEBUG"):
+            print(f"=== full stdout for failed {tid} ===\n{r.stdout}\n=== end ===")
         return mc.SynthResult(tid=tid, ok=False,
-                              err=f"rc={r.returncode}: {r.stderr[:200]}",
+                              err=f"rc={r.returncode}: ...{tail[-200:]}",
                               elapsed_s=elapsed)
     res = mc.SynthResult(tid=tid, ok=True, slots=slots,
                           path_uids=path_uids,
