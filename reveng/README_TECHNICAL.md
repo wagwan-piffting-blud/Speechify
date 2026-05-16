@@ -353,48 +353,434 @@ Duration prediction trees. One CART tree per phone label (47 total).
 Total across all 47 trees: 778 branch nodes + 825 leaf nodes.
 Leaf predictions: duration mean (range ~57..193 in local_pos units) with variance (0.017..0.31).
 
-### `ccos` (CONFIRMED -- detailed disassembly 2026-03-17)
+### `ccos` (CONFIRMED -- full format + scoring formula decoded 2026-04-19)
 
-Boundary spectral feature table AND duration-continuity cost table used for runtime join
-cost computation on hash misses.
+**NOT a spectral feature table.** `ccos` stores precomputed symmetric phone-context
+**distance matrices** used directly in S-cost scoring. One set of tables per halfphone
+class (left/right), with 4 slots per class corresponding to the 4 context positions
+(`pp2, pp1, pn1, pn2` -- two before, one before, one after, two after).
+
+**Supersedes prior `47 x 722 x 12` interpretation** (which was numerologically
+plausible but structurally wrong; the 722x12 grouping is arbitrary).
 
 Sub-chunks:
 
 | Sub-chunk | Size (bytes) | Content |
 |-----------|-------------|---------|
 | `labl` | 175 | `u32 n_labels=47`, then 47 x `{ u16 name_len; char[name_len] name }` |
-| `data` | 1,628,832 | `47 x 722 x 48` bytes = `47 x 722 x 12` f32 boundary vectors |
+| `data` | 1,628,832 | `2 * num_labels` halfphone-classes x 4 slots x (`2 u32 hdr + 1081 f32 triangle`) |
 
-**`ccos/labl`** -- 47 phone label strings (last is empty):
+**`ccos/labl`** -- 47 phone label strings. For Tom:
 `aa, ae, ah, ao, aw, ax, ay, b, ch, dx, d, dh, eh, el, er, en, ey, f, g, hh, ih, ix, iy, jh, k, l, m, n, ng, ow, oy, p, pau, r, s, sh, t, th, uh, uw, v, w, xx, y, z, zh, ""`
 
-**`ccos/data`** -- flat array, organized as:
+**`ccos/data`** -- layout per halfphone-class (2 * num_labels = 94 classes for Tom):
 
 ```
-47 phones x 722 entries x 12 f32s = 407,208 f32 values = 1,628,832 bytes (exact)
+for hp_class in 0 .. 2*num_labels - 1:       # first num_labels = LEFT halves, rest = RIGHT
+    for slot in 0..3:
+        u32 hp_class_validator   # = hp_class (checked by loader)
+        u32 slot_validator       # = slot (checked by loader, raises if mismatched)
+        f32 triangle[N*(N-1)/2]  # upper triangle (j<i, row-major), N = num_labels = 47
 ```
 
-- Each **entry** is 48 bytes = 12 f32 spectral feature values (4 sub-entries of 3 floats).
-- Each **phone block** contains 722 entries (361 left-boundary + 361 right-boundary, per loader).
-- **Value range**: 0.0 .. 83.308 (all in MFCC-compatible range, 99.9% in [-20, 50]).
+For Tom: 94 classes x 4 slots x (8 + 1081*4) bytes = 94 * 17,328 = 1,628,832 bytes. Exact.
 
-**Loader (0x8E86830-0x8E869F4):**
-- Opens "ccos" chunk, then "labl" sub-chunk, then "data" sub-chunk
-- Allocates `722 * 48 + 4 = 34,660` bytes for raw data buffer per phone
-- Loop at 0x8E86920: iterates 722 times (2 x 361), calls 0x8E84130 for each entry
-- is_first_half flag: entries 0-360 are first-half, 361-721 are second-half
-- Per-entry reader at 0x8E84130: reads 4 sub-entries of 12 bytes each (total 48 bytes)
-- Raw data stored at voice[0x610]
-- Log strings: `"Loaded %d context tables"`, `"creating mapping num_phones %d num_labels %d"`
+**Runtime table build** (per-slot scaling at load time, `FUN_08e83f60`):
 
-**Post-processor (0x8E83160):**
-- Builds phone-to-label reverse mapping
-- Writes ccos label index into each unit's byte at offset +0x13 (runtime-only field)
-- This field is what the engine uses to look up the correct ccos boundary vectors
+```
+table[i][j] = table[j][i] = (raw + 0.1) * slot_scale
+table[i][i] = 0
+```
 
-**Feature semantics**: 12-dimensional spectral feature vector per phone boundary frame.
-Values are LPC or MFCC-derived boundary frame coefficients (confirmed by MFCC-range
-values and the LPC-autocorrelation style normalization in the distance computation).
+where `slot_scale` depends on **halfphone side and slot index**:
+
+| Side  | slot 0 (pp2) | slot 1 (pp1) | slot 2 (pn1) | slot 3 (pn2) |
+|-------|:------------:|:------------:|:------------:|:------------:|
+| LEFT  |     0.2      |     1.0      |     0.5      |     0.1      |
+| RIGHT |     0.1      |     0.5      |     1.0      |     0.2      |
+
+(Scale peaks on the context position closest to the halfphone boundary: pp1 for left
+halves, pn1 for right halves.)
+
+**Loader functions** (USel.dll):
+
+- `FUN_08e857a0` -- `load_chunky_index`, overall driver; allocates `*(this+0x610)` as
+  `num_labels*2` entries of `0x30` bytes each (4 slots x `0xc` bytes per slot header:
+  `{u32 num_labels; u32 row_stride; f32* table_ptr}`).
+- `FUN_08e83c00` -- reads `labl` sub-chunk, stores `num_labels` at `this+0x600`
+  and label-name array at `this+0x60c`.
+- `FUN_08e83ce0` -- `create_context_label_mapping`: for each of `num_halfphones`
+  (voice+0x28; Tom has 92) looks up the phone's `name` attribute in the label list,
+  optionally stripping a trailing single character, and writes:
+  - `voice+0x604[hp_id] = label_idx`                            (always, 0..N-1)
+  - `voice+0x608[hp_id] = label_idx`                            if name ended in `'1'`
+  - `voice+0x608[hp_id] = label_idx + num_labels`               otherwise             (0..2N-1)
+- `FUN_08e84130` -- per-class loop: 4 iterations of (read 2 u32 hdrs, call `FUN_08e83f60`).
+- `FUN_08e83f60` -- per-slot: allocates `N*N` f32 table via `FUN_08e879c0`, reads
+  upper triangle and applies offset+scale.
+
+**Scoring (`FUN_08e88de0`, the all-halfphone-costs kernel)**:
+
+Per target slot + candidate, the ccos contribution is:
+
+```
+hp_class = voice[0x608][target.hp_id]               # via FUN_08e87b50
+entry = voice[0x610] + hp_class * 0x30              # 4 slot-ptrs at offsets {8, 0x14, 0x20, 0x2c}
+L = voice[0x604]                                    # phone_id -> label_id (N entries)
+ccos_term = (table_slot[3])[ L[target.ctx[3]] ][ L[cand.ctx[3]] ]
+          + (table_slot[2])[ L[target.ctx[2]] ][ L[cand.ctx[2]] ]
+          + (table_slot[1])[ L[target.ctx[1]] ][ L[cand.ctx[1]] ]
+          + (table_slot[0])[ L[target.ctx[0]] ][ L[cand.ctx[0]] ]
+emit += ccos_term * VCF.float_at_0x44              # master ccos weight
+```
+
+Target `ctx[0..3]` come from halfphone_target fields at `+4,+8,+0x10,+0x14`. Candidate
+`ctx[0..3]` come from unit record bytes `+0x17,+0x18,+0x19,+0x1A` (or the cached
+translation at `voice+0xc0` on newer unitinfo versions 0x186a6/0x186a8).
+
+**Implications**:
+
+- No MFCC / spectral computation happens at join time from the ccos data -- the matrices
+  are already context-distance scores baked in at voice-build time.
+- The per-slot asymmetric scales ({0.2, 1.0, 0.5, 0.1} LEFT) are why we never
+  reproduced stock's S cost from an approximated mismatch-count: stock uses precomputed
+  distances with context-position-aware weighting, not binary mismatch.
+- Our previous experiments hashing the tables from ccos mean-MFCC distances
+  (Session 13) failed because ccos does **not** store MFCCs.
+
+### SP (position-mismatch) matrices in `voice[+0xd8 .. +0x5f8]` (CONFIRMED 2026-04-19)
+
+The same scorer kernel (`FUN_08e88de0`) that reads the ccos tables also sums **five
+additional target-vs-candidate 2D tables** stored inline inside the voice struct at
+fixed offsets. These are loaded from the VCF `proscost` matrices at voice-load time
+(not from the VIN).
+
+| Voice offset | Cols | Stride | Candidate byte (runtime) | Candidate byte (disk) | Matrix              |
+|-------------:|------|--------|--------------------------|------------------------|---------------------|
+| `+0x0d8`     | 10   | `0x28` | `unit[+0xa]`             | `disk[+0x0C]`          | `sylInPhraseCosts`  |
+| `+0x268`     | 9    | `0x24` | `unit[+0xb]`             | `disk[+0x0D]`          | `sylTypeCosts`      |
+| `+0x3ac`     | 7    | `0x1c` | `unit[+0xc]`             | `disk[+0x0E]`          | `wordInPhraseCosts` |
+| `+0x470`     | 7    | `0x1c` | `unit[+0xd]`             | `disk[+0x0F]`          | `sylInWordCosts`    |
+| `+0x534`     | 7    | `0x1c` | `unit[+0xe]`             | **hardcoded `6`**      | (Tom: degenerate; stock's 5th table input is the constant `6`, so only target-feat varies) |
+
+Per-target, per-table weights live in the VCF struct at offsets `+0x10, +0x14, +0x18,
++0x1c, +0x20`, matching our `phrase_pos_mismatch_cost`, `stress_mismatch_cost`,
+`word_in_phrase_mismatch_cost`, `syll_in_word_mismatch_cost`, and `phone_in_syl_mismatch_cost`.
+
+Emit contribution:
+
+```
+SP = sum over k in 0..4:
+       VCF.weight[k] * table[k][target_feat[k]][cand_byte[k]]
+```
+
+**Disk-byte layout correction**. The on-disk unit record bytes at `+0x0C..+0x0F` are
+the first four SP features in this exact order: sylInPhrase, sylType, wordInPhrase,
+sylInWord. Earlier docs (and the NG Unit struct) incorrectly labelled `+0x0C` as
+`syl_type` and `+0x0D` as `syl_in_phrase` -- the order is actually swapped. Confirmed
+via distribution sweep over 10k Tom units: byte `+0x0C` is unique=6 max=8 (matches
+kSylInPhraseMap UNDEF..WordMedial range), `+0x0D` is unique=7 max=7 (matches
+kSylTypeMap UNDEF..LastPAInPhrase range).
+
+**Tom-specific**: version `0x186a6` causes the `uStack_1cc` / disk byte-4 slot of the
+11-byte per-unit variable block to be *hardcoded to 6* at load time (see the
+`if (ppiStack_1e8 == 0)` branch in `load_chunky_index`). Stock's 5th table thus
+becomes a degenerate per-target-feat scalar for Tom -- other voices (versions
+`0x186a5` / `0x186a7`) read the real byte from disk.
+
+**Load path**: no dedicated loader was decoded for the voice+0xd8 region (it's
+populated by the VCF-reading arm of `SWIttsUSelCreateVoice`; not disassembled in
+detail). Since our NG already parses every VCF `proscost` matrix into
+`VcfParams::syl_in_phrase/syl_type/word_in_phrase/syl_in_word`, the RE work here is
+**done on the VIN/voice-struct side**; remaining NG work is: (a) fix the disk-byte
+name swap in `vin_chunks::Unit`, (b) add `syl_in_word_stored` + phone_in_syl to the
+halfphone target, (c) re-enable SP with the corrected 5-term formula.
+
+**Session 15 (2026-04-19) status**: tables identified and dimensioned; semantic
+mapping between disk bytes and VCF matrices confirmed; NG SP path rewired to the
+correct `matrix -> disk byte` pairs; but UID match does not improve at
+`sp_weight_scale > 0`, pointing at incomplete target-side feature extraction in
+`halfphone_target.cpp` (only 3 of 5 features populated; `syl_in_word_stored` and the
+5th/phone_in_syl stored field are missing).
+
+**Session 16 (2026-04-19)**: NG Unit struct renamed (`sp_syl_in_phrase / sp_syl_type /
+sp_word_in_phrase / sp_syl_in_word`) to match disk semantics; `syl_in_word_stored`
+added to `halfphone_target.cpp` (per-word PA-relative position); SP block extended
+to 4-matrix lookup. UID match unchanged at 129/432 because Tom's `sylInWordCosts`
+matrix is all-zero off-diagonal (`UNDEF=100` in every row, everything else 0) --
+the 4th SP table is a degenerate no-op for this voice. Only tables 0-2
+(sylInPhrase, sylType, wordInPhrase) contribute meaningful costs for Tom.
+
+**Session 17 (2026-04-19)**: Frida-captured stock's per-slot target values via
+a hook on the scorer at `FUN_08e88de0` (read `param_1+0x28/+0x2c/+0x34/+0x38/+0x3c`
+arrays indexed by slot). Slot-by-slot diff against NG's halfphone_target revealed
+that the stock numeric values **do not correspond to the VCF XML row name order**
+(`kSylInPhraseMap` guesses were wrong). Empirical rules derived from the cem_s1
+trace:
+
+`syl_in_phrase_stored` (100% agreement after fix):
+- `1` = utterance-initial syllable (special)
+- `2` = leading pau (`pau_L`, `pau_R`)
+- `5` = last-syl of last word (the final non-pau syllable)
+- `6` = first syl of multi-syl word (not utt-initial)
+- `7` = medial syl of multi-syl word
+- `8` = last syl of multi-syl word OR any non-utt-initial monosyl word
+
+`word_in_phrase_stored` (98% agreement):
+- `1` = monosyl word / pau / utt-initial
+- `2` = first syl of multi-syl word when *this* syl has no PA
+- `3` = any syl with a pitch accent
+- `4` = non-PA middle/last syl of multi-syl word
+- `5` = far-from-PA last syl (2+ syls after PA in a 3+-syl word)
+
+`syl_in_word_stored` (100% agreement) is actually **word-position-in-utterance**,
+not PA-relative as the VCF name suggests:
+- `2` = default
+- `4` = leading/trailing pau
+- `5` = first word of utterance
+- `6` = last word of utterance
+
+`syl_type_stored` (63% with Session 7 rule; attempted Session 17 refinement to 81%
+regressed UID match 132->129 because systematic disagreement pattern, left on
+Session 7 rule). Observed stock values are `{1, 2, 3, 4, 7}` where `2` = stressed
+non-PA syllable (monosyl content OR first-syl of multi-syl content where PA lives
+elsewhere), `3` = non-first/non-last PA syllable, `4` = first PA in utterance,
+`7` = last PA in phrase.
+
+**Session 17 result**: UID match 129 -> **132 / 432 (30.6%)**, +3 UIDs over the
+Session 14 ccos baseline. `sp_weight_scale` default bumped to 0.2 (sweet spot;
+regresses >= 0.3). Frida hook is at [viz/frida_hooks/sp_target_dump.js](../viz/frida_hooks/sp_target_dump.js).
+
+**Session 18 (2026-04-19)**: Three paths explored, one hit:
+
+1. **Runtime context recompute (DEAD END).** Hypothesized stock's
+   `voice+0xc4` cached neighbor halfphone-IDs (from `FUN_08e91c30`) would
+   beat the disk-stored `unit+0x17..+0x1A` bytes. Verified 85% byte-level
+   agreement between disk and computed phone-codes of same-rec neighbors;
+   replacing disk with runtime regressed 132 -> 111-120 across fallback
+   variants. The voice builder tuned the disk bytes with some
+   recording-boundary logic our simple `file_idx` compare doesn't capture;
+   disk values win.
+
+2. **Candidate-cap raising (WIN: +7 UIDs).** Pool diagnostic on cem_s1
+   showed 11/178 slots where stock's chosen UID sat at positions 32-110 of
+   our PRSL-returned pool. Raised `max_candidates_per_slot` 32 -> 96.
+   Sweep peak at 96; regresses >=112 as marginal candidates crowd the
+   lattice. UID 132 -> **139 / 432 (32.2%)**.
+
+3. **HP-enrichment pool additions (DEAD END).** 39/178 slots on cem_s1
+   have stock UIDs entirely outside our pool (even uncapped). These UIDs
+   systematically have `hp XOR 1` of the target OR come from other-half
+   PRSL keys. Attempted adding opposite-half PRSL lookups + capped
+   same-hp/opposite-half index injections; regressed 139 -> 138 because
+   the extra candidates crowd out better-ranked ones. Stock's pool source
+   for these UIDs is still unknown — candidate RE target: how stock's
+   PRSL is keyed per unit (possibly a second hp-agnostic index, or wider
+   triphone-bucket matching).
+
+**Session 18 result**: UID match **139 / 432 (32.2%)**, +7 over Session 17.
+
+**Session 19 (2026-04-19)**: Two wins from two angles.
+
+1. **sylType empirical rule refined** (+6 UIDs). The broader 5-sentence Frida
+   corpus (cem_s1 + short_decl + question + two_clause + numbers, 330 slots
+   combined) revealed stock's sylType value distribution {1: 182, 2: 40,
+   3: 50, 4: 26, 6: 6, 7: 26}. Previously only cem_s1 was traced and showed
+   {1: 104, 2: 30, 3: 36, 4: 4, 7: 4} — not enough to justify the risk.
+   New rule (see `halfphone_target.cpp` Session 19 block):
+   - `7` = last-PA OR sent-final accent
+   - `4` = first PA of utterance
+   - `3` = mid-utterance PA (non-first, non-last)
+   - `2` = stressed-no-PA (`word.level > 0` AND monosyl OR first-syl)
+   - `1` = default
+   Value `6` (seen only in two_clause, 6 slots) not modeled — likely
+   "post-comma first PA"; falls through to `4` for now.
+   Previous attempt at this rule (Session 17) regressed UID 132 -> 129
+   because the `max_candidates_per_slot` cap was too tight. With Session
+   18's cap-raise to 96, the refined rule now adds +6 UIDs (139 -> 145),
+   and the SP sweet-spot shifts from 0.2 -> 0.1.
+
+2. **PRSL partial-match indexing** (infrastructure landed, can't enable).
+   Scanning PRSL for each of the 39 OOP UIDs from cem_s1 revealed stock
+   includes candidates matching only (center_hp, next_hp) or (prev_hp,
+   center_hp) — not the full triphone. Added a `PrslPartialIndex`
+   structure that pre-computes these buckets at voice-load in a single
+   linear scan. Queried it in gather_candidates with various caps and
+   gates — ALL variants regressed 139 -> 121-128 UIDs. The partial-index
+   candidates ARE correct (they recover ~22/39 OOP UIDs), but Viterbi /
+   scoring picks noise from the enlarged pool faster than it wins back
+   OOP slots. The pool source is real but our scoring isn't sharp enough
+   to exploit it yet; reservation for post-sctx-refinement work.
+
+**Session 19 result**: UID match **145 / 432 (33.6%)**, +6 over Session 18.
+
+**Session 20 (2026-04-19) — re-sweep + IPM diagnosis**:
+
+After all target-feature + pool refinement landed, re-swept every weight at the
+Session 19 peak. Only `dur_weight` moved: +3 UIDs at 0.2 (previously defaulted
+to 0 because earlier pool/target issues made duration scoring noisy). Other
+weights (sctx=1.0, f0=0.15, f0_edge=0.1, sp=0.1, cross_rec=5) confirmed at
+peak. UID: 145 -> **148 / 432 (34.3%)**.
+
+Ran an **in-pool-mismatch** (IPM) diagnosis on the 66 slots where stock's
+chosen UID was in NG's pool but NG picked differently. Result (byte-level
+match rate between stock's vs NG's pick):
+
+| Feature | Match | Notes |
+|---|---|---|
+| `phone_code` | 66/66 | NG always picks correct phone |
+| `is_first` (half) | 65/66 | one half swap |
+| `sp_syl_type` | 38/66 | 42% — target rule imperfect |
+| `sp_syl_in_phrase` | 37/66 | 44% |
+| `sp_word_in_phrase` | 40/66 | 39% |
+| `sp_syl_in_word` | 45/66 | 32% |
+| `f0_start` | 20/66 | 30% (avg diff 9.5 Hz) |
+| `f0_context` | 1/66 | **1%** — stock + NG pick units with very different duration |
+| `dur_like` | 4/66 | **6%** — ditto on unit physical duration |
+| `context_cost` (0/100) | 48/66 | 73% |
+| `ctx0..ctx3` | 28/58/50/16 | ctx3 worst at 24% |
+
+The near-universal `f0_context` and `dur_like` disagreement is the single
+largest remaining scoring gap: stock scores units with markedly different
+duration/F0 than NG does, with matching phone_code. Retried variants to try
+closing it; all hurt or were neutral:
+
+- `score_duration` formula swap `(variance*d)^2 -> (stddev*d)^2` regressed at
+  every `dur_weight` (148 -> <105).
+- `score_f0` formula mirror regressed 145 -> 144 across f0 sweeps.
+- Stress additive `cost += context_cost * UNIT_BIAS_WEIGHT * 0.01`
+  (README §2174) regressed 148 -> 138 with either sign.
+- Hash-miss penalty sweep 50..10000: no effect (hash rarely misses).
+- Runtime-computed context + fallbacks (Session 18 revisited): still worse
+  than disk bytes.
+- PRSL partial-index at low/gated caps: still regresses 148 -> 138-140.
+
+**Session 20 result**: UID match **148 / 432 (34.3%)**, +3 over Session 19.
+
+**Remaining gaps, ranked by structural RE needed:**
+1. `score_duration` / `score_f0` exact formula — current form gives small
+   magnitudes and imprecise ranking on the duration-critical slots. Needs
+   disassembly of `FUN_08e88de0`'s D/F0/DU component math block (README
+   §2185) and/or Frida capture of per-candidate score breakdown.
+2. Target-side CART feature values for durt/f0tr leaf evaluation — our
+   syl_type/syl_in_phrase/word_in_phrase as passed to `evaluate_tree`
+   may diverge from stock's runtime values, causing leaf mean/variance
+   drift. Add a CART-feature Frida hook + diff.
+3. `FUN_08e8d550` DU (duration2) component — currently stubbed with a
+   log-domain mirror; stock's actual formula not yet decoded.
+
+**Session 21 (2026-04-19) — Ghidra RE of `FUN_08e88de0` scorer kernel**:
+
+Full disassembly confirmed the scoring pipeline. Formulas in stock:
+
+| Component | Disasm range | Formula |
+|---|---|---|
+| D (duration) | 0x08e8926b–0x08e89288 | `w_D × (variance × (f0_context - mean))²` |
+| F0 | 0x08e892f5–0x08e89308 | `w_F0 × (f0_variance × (f0_start - mean))²` |
+| 5 SP tables | 0x08e89121–0x08e89175 | `Σ_k w_k × table_k[tgt_feat_k][cand_byte_k]` |
+| ccos S | 0x08e891a8–0x08e89238 | `CONTEXT_COST_WEIGHT × Σ_k ccos_tbl[tgt_hp_class][k][L[tc_k]][L[cc_k]]` |
+| Stress additive | 0x08e8911a–0x08e8911f | `context_cost × UNIT_BIAS_WEIGHT × 0.01` |
+
+VCF struct offsets (from config-loader disassembly at `FUN_08e90dc0`):
+- `+0x10..+0x20` : five SP matrix weights (phrase_pos, stress, word_in_phrase, syll_in_word, phone_in_syl)
+- `+0x24` : ABS_F0_WEIGHT
+- `+0x34` : DUR_WEIGHT
+- `+0x38` : **UNIT_BIAS_WEIGHT** (Tom = 0.25, used × 0.01 × context_cost)
+- `+0x44` : CONTEXT_COST_WEIGHT
+- `+0x48` : HALFPHONE_CAND_MAX_UNITS (int, default 50 — Tom uses default)
+- `+0x4c` : HALFPHONE_CAND_PRUNE_THRESH (Tom = 0.8, README's old 3.0 was wrong)
+- `+0x50` : HALFPHONE_CAND_PRUNE_SLOPE (Tom = 0.005)
+- `+0x98` : EMPH_ENABLED flag
+- `+0x9c..+0xa8` : EMPH1/2/3_F0_OFFSET, EMPH1/2/3_DUR_OFFSET
+
+**Tested against stock disasm:**
+
+1. **Literal F0 formula** `(f0_variance × d)²`: peaks at f0=0.3 = 145 UIDs.
+   Our `(stddev × d)²` variant peaks at f0=0.15 = 148 UIDs. Kept stddev
+   because our VIN parser's variance field appears to encode 1/σ (not σ²),
+   so the literal stock formula yields z-score squared twice over.
+
+2. **Stress additive** `cc × unit_bias × 0.01` (math-exact):
+   regresses 148 → 138 (sp=0.1) or 142 (sp=0.15-0.3). Stock's
+   HALFPHONE_CAND_PRUNE step at threshold `best + 0.8` removes high-cost
+   candidates before Viterbi; without that prune, our Viterbi sees marginal
+   unstressed candidates that a shift of 0.25 flips to winning over stressed
+   ones it should not have. Would re-enable once pruning logic lands.
+
+3. **Score-then-sort-cap** (mirror of `FUN_08e88830`): regresses 148 → 123.
+   Emission-only sort drops candidates with good join potential in favor
+   of low-emission but bad-continuity ones. Stock's sort is benign because
+   Viterbi runs over ALL candidates — the sort only trims to MAX_UNITS
+   which is 50 by default (higher than typical pool size anyway).
+
+**Session 21 result**: no UID change (148/432 held); solid RE groundwork
+for future pruning-driven improvements. All formula offsets documented
+for Session 22+ DU/WSOLA work.
+
+**Session 22 (2026-04-19) — pruning + combined-change test**:
+
+User-raised hypothesis: previously individually-regressing stock-faithful
+changes (stress additive, literal F0 formula, partial-index pool,
+sort-by-cost) might net-positive if combined together with the pruning
+gate they collectively depend on. Tested each combination exhaustively.
+
+Implemented **HALFPHONE_CAND_PRUNE_THRESH pruning** (`prune_thresh` in
+`SelectorConfig`, env var `SPNG_PRUNE`) as a post-scoring filter:
+`keep candidate iff emit ≤ best + prune_thresh`.
+
+| Config | Prune 0 | Prune 0.8 | Prune 1.5 | Prune 3.0 | Prune 5+ |
+|---|---:|---:|---:|---:|---:|
+| Empirical (stddev F0, emp weights) | **148** | 114 | 139 | 148 | 148 |
+| Stock-literal F0 + stock weights | 132 | 139 | 132 | 132 | 132 |
+| +stress additive (stock-literal) | 125 | **135** | 117 | 119 | 125 |
+| +partial-index pool (stock-literal) | — | 135 | 117 | 119 | — |
+| Empirical + partial-index pool | — | — | — | 134 | 134 |
+
+**Key finding**: the combined stock-faithful configuration peaks at
+**135-139 UIDs**, still **9-13 below our empirical 148**.
+
+**Interpretation**: our empirical local optimum (stddev F0, dur=0.2,
+f0=0.15, sctx=1.0, no stress, no prune, partial-index off) has found a
+scoring landscape that compensates for components we haven't decoded
+yet — most likely **`FUN_08e8d550` DU (duration2)**, which stock's
+kernel adds but we currently stub as a log-domain mirror that
+contributes nothing material.
+
+Infrastructure kept in the code for future revival:
+- `prune_thresh` field + `SPNG_PRUNE` env var (defaults off)
+- `PrslPartialIndex` struct + `build_prsl_partial_index` builder
+- Stress-additive formula documented in comments at the insertion point
+
+**Session 22 result**: no UID gain (148/432 held); validated the user's
+hypothesis that combinations DO interact meaningfully (stock-faithful
+moves from 125 → 135 when prune is added), but the combined peak is
+still below empirical.
+
+**Session 22 post-decomp follow-up**: decompiled `FUN_08e8d550` expecting
+to find the "missing DU (duration2) component" hinted at by README §2144's
+mention of a 6-component scorer (S, D, DU, SP, J, F0). **It turned out
+to be a diagnostic logging function**, not a scoring path — it contains
+`fprintf` calls for "DUR2 %d %f", "Context: ...", "Phrase_pos ...",
+"Syl_type ...", etc. The formula it prints (`|exp(a*stored-b) - exp(a*pred-b)|`
+via f2xm1/fscale) is purely for log output, with no use in emission cost.
+
+The real scorer `FUN_08e88de0` has exactly 4 emission components:
+**S (ccos) + D (duration) + SP (5 tables + stress) + F0**. We already have
+all 4. The 13-UID gap between our empirical 148 and stock-faithful 135-139
+therefore has a more subtle cause — most likely:
+
+- **F0 variance field semantic**: our VIN parser's f0_variance may
+  encode inverse-stddev whereas stock's runtime reads it as raw
+  variance, making our `stddev*d` empirical formula correct-for-our-data
+  and stock's literal `variance*d` wrong-for-our-data (until we re-parse).
+- **Residual target-feature gaps**: `sylType` stored value agrees only
+  81% with stock's values on cem_s1 (values {1,2,3,4,6,7} vs our
+  {1,4,6,7}); a matching rule would likely bring us closer.
+- **Target CART features**: we haven't Frida-verified that our target
+  `syl_type`, `syl_in_phrase`, `word_in_phrase`, `phone_in_syl` match
+  stock's runtime values — which feed into durt/f0tr leaf evaluation.
+
+No active UID optimisation path from scoring refinement at this point.
 
 #### Runtime behavior: hash miss fallback and gate (CONFIRMED 2026-03-17)
 
@@ -1146,17 +1532,19 @@ Three nested sub-chunks (RIFF-style `tag + u32_size`):
 The `cell` sub-chunk stores two flat arrays back-to-back (Structure of Arrays):
 
 ```
-u32[n_cells]   cells_A   // uid_left values; 0xFFFFFFFF = sentinel
+u32[n_cells]   cells_A   // uid_right_owner values; 0xFFFFFFFF = sentinel
 f32[n_cells]   cells_B   // join_cost values; -1.0f at sentinel positions
 ```
+
+**CORRECTED 2026-05-05** (via [`viz/frida_hooks/hash_lookup_hook.js`](../viz/frida_hooks/hash_lookup_hook.js) live capture): each `cells_A[i]` stores the `uid_right` that "owns" the cell after suffix-sharing collapse — NOT `uid_left` as previously documented. This is what allows multiple uid_rights to share the same row offset: the verification key disambiguates which uid_right a given cell belongs to. See live-capture evidence below.
 
 The DLL loader (`load_join_cost_hash`) converts this to Array of Structures in memory:
 
 ```
-struct Cell { u32 uid_left; f32 join_cost; };   // 8 bytes each
+struct Cell { u32 uid_right_owner; f32 join_cost; };   // 8 bytes each
 Cell cells[n_cells];
-// cells[i].uid_left  = cells_A[i]
-// cells[i].join_cost = cells_B[i]
+// cells[i].uid_right_owner = cells_A[i]
+// cells[i].join_cost       = cells_B[i]
 ```
 
 ### `rows` sub-chunk
@@ -1182,7 +1570,8 @@ Lookup formula: `cell[rows[uid_right] + uid_left]`
 This is a SINGLE indexed access:
 - `rows[uid_right]` gives the base offset for that uid_right
 - Add `uid_left` to get the cell index
-- ONE comparison: if `cells_A[index] == uid_left`, it's a hit; otherwise miss
+- ONE comparison: if `cells_A[index] == uid_right`, it's a hit; otherwise miss
+  (the cell's verification key is the OWNING uid_right -- see CORRECTED 2026-05-05 below)
 - SENTINEL (0xFFFFFFFF) marks empty slots, NOT chain terminators
 
 The "suffix sharing" observed statistically is actually a consequence of the compressed
@@ -1206,32 +1595,53 @@ positions happen to align (same region of the cell array serves multiple uid_rig
 | n_rows (hash capacity) | 692,190 |
 | Populated row range | rows[0..169578]; rows[169579..692189] always 0 |
 
-### Join-cost lookup for `(uid_left, uid_right)` (CORRECTED 2026-03-16)
+### Join-cost lookup for `(uid_left, uid_right)` (CORRECTED 2026-05-05 via Frida live capture)
 
 ```
 index = rows[uid_right] + uid_left
-if cells_A[index] == uid_left:
-    return cells_B[index]           // HIT: precomputed cost
+if cells_A[index] == uid_right:        // verification of cell ownership
+    return cells_B[index]              // HIT: precomputed cost
 else:
-    return MISS                     // fallback (0.0 or ccos distance)
+    return MISS                        // fallback (0.0 or ccos distance)
 ```
 
 **Assembly (0x8E8B7BC-0x8E8B7EB):**
 ```asm
-0x8e8b7bc:  mov eax, [edx + 0x10]       ; eax = uid_left (from candidate struct)
-0x8e8b7e2:  mov esi, [esp + 0x40]        ; esi = hashBase + rows[uid_right] * 8
-0x8e8b7e6:  cmp [esi + eax*8], ebx       ; ONE comparison (ebx = uid_left)
-0x8e8b7e9:  jne 0x8e8b7f5               ; miss -> fallback (NO loop back)
-0x8e8b7eb:  fld [esi + eax*8 + 4]       ; HIT -> load f32 cost
+0x8e8b7bc:  mov eax, [edx + 0x10]      ; eax = uid_left  (from candidate struct)
+0x8e8b7e2:  mov esi, [esp + 0x40]      ; esi = hashBase + rows[uid_right] * 8
+0x8e8b7e6:  cmp [esi + eax*8], ebx     ; ONE comparison (ebx = uid_RIGHT)
+0x8e8b7e9:  jne 0x8e8b7f5              ; miss -> fallback (NO loop back)
+0x8e8b7eb:  fld [esi + eax*8 + 4]      ; HIT -> load f32 cost
 ```
 
 Note: the old chain-scan pseudocode was WRONG. There is no loop.
+
+**CORRECTED 2026-05-05:** the prior annotation `ebx = uid_left` was wrong; live
+capture (see `viz/frida_hooks/hash_lookup_hook.js`) shows `eax != ebx` on hits,
+so they cannot both be uid_left. The correct semantics are:
+- `eax` = uid_left  (offset within row)
+- `ebx` = uid_right (verification key compared against the cell)
+- Cell stores `uid_right_owner` -- which uid_right "owns" this slot after
+  suffix-sharing collapse. This is why suffix sharing works: many uid_rights
+  share row offsets, but each cell within a shared offset uniquely belongs
+  to one uid_right via this verification key.
+
+**Live evidence** (probes 1, 2, 13, 22 from `text_001` "Hello, world."):
+
+| n | uid_left (eax) | uid_right (ebx) | stored | hit | cost |
+|---|----------------|-----------------|--------|-----|------|
+| 1 | 0      | 39720  | 39720  | YES | 0.820 |
+| 2 | 0      | 87072  | 87072  | YES | 0.696 |
+| 13| 139245 | 128126 | 128126 | YES | 0.581 |
+| 22| 139245 | 70693  | 70693  | YES | 0.595 |
+
+In every hit, `stored == uid_right (ebx)`, never `== uid_left (eax)`.
 
 ### Confirmed field ranges
 
 | Array | Non-sentinel values | Sentinel | Range |
 |-------|---------------------|----------|-------|
-| `cells_A` | uid_left, min=1, max=169578 | `0xFFFFFFFF` | all ≤ UNIT_MAX=169578 |
+| `cells_A` | uid_right_owner, min=1, max=169578 | `0xFFFFFFFF` | all ≤ UNIT_MAX=169578 |
 | `cells_B` | join cost f32, min=0.0, max≈11.72 | `-1.0f` | ≥0, typical 0..3 |
 
 ### Within-recording vs. cross-recording pairs (open question)
@@ -2186,6 +2596,30 @@ Per-candidate cost computation (from the inner loop disassembly):
    cost tables (loaded from `ckls` data). Uses signed byte indices from the context array
    (voice_obj+0xC0, = on-disk bytes 23-26). Result weighted by `CONTEXT_COST_WEIGHT` (config+0x44).
    Stored at candidate+0x14.
+
+   **Deeper trace (Phase 8.9 Session 9, 2026-04-19):** From decompilation of FUN_08E88DE0,
+   the 4 tables are voice-resident and per-phone:
+   - `voice[0x610]` points at an array of `0x30`-byte context-config entries indexed by
+     `iVar16` (phone-specific context class from `FUN_08e87b50(voice+0x600, ..., phone)`).
+   - Each entry has 4 (ptr, stride) pairs at offsets `(+0x08, +0x04)`, `(+0x14, +0x10)`,
+     `(+0x20, +0x1c)`, `(+0x2c, +0x28)`. The pointer is a float array; the stride is the
+     row stride for a target-side feature.
+   - Target-side indices come from `voice[0x604][this[0x4/0x8/0x10/0x14]]` — a u32[]
+     translation table at voice+0x604 indexed by features in the scorer's `this` struct.
+   - Per-candidate 4 context bytes live at `voice[0xc0]` or `voice[0xc4]`
+     (two layout variants); each candidate has 4 bytes at `voice[0xc0][cand_idx*4+0..3]`.
+     These are NOT the same as the on-disk unit bytes 23-26 directly — there's an
+     intermediate translation via `voice[0x604]`.
+   - Final formula:
+     ```
+     s_raw = tables[0][cand_ctx[0]] + tables[1][cand_ctx[1]] +
+             tables[2][cand_ctx[2]] + tables[3][cand_ctx[3]]
+     s_cost = s_raw * CONTEXT_COST_WEIGHT
+     ```
+   - Session 9 extracted the 4 on-disk ctx bytes (0x17-0x1A) into `Unit::phone_ctx_{0,1,2,last}`
+     as infrastructure. Full impl blocked on RE of `voice[0x610]`/`voice[0x604]`/`voice[0xc0]`
+     formation — these are not direct VIN chunk reads, they're computed at voice-load time
+     from multiple chunks (likely `ckls` + `mean` + `hist`).
 
 4. **Duration / Unit Bias cost** (0x8E8925F-0x8E892AF): Quadratic penalty on f0_context deviation.
    The input field is **in-memory +0x12** = on-disk +0x13 = `f0_context` (for version 100006)

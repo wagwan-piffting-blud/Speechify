@@ -1,0 +1,235 @@
+{"id":"text_001","mode":"text","text":"Hello, world.","tags":["smoke","short"]}
+{"id":"text_002","mode":"text","text":"The quick brown fox jumps over the lazy dog.","tags":["pangram"]}
+{"id":"text_003","mode":"text","text":"A.","tags":["smoke","tiny"]}
+{"id":"text_004","mode":"text","text":"I.","tags":["smoke","tiny","vowel-only"]}
+{"id":"text_005","mode":"text","text":"Hi.","tags":["smoke","short"]}
+{"id":"text_006","mode":"text","text":"How are you today?","tags":["question"]}
+{"id":"text_007","mode":"text","text":"Stop.","tags":["consonant-cluster"]}
+{"id":"text_008","mode":"text","text":"She sells seashells by the seashore.","tags":["sibilants","tongue-twister"]}
+{"id":"text_009","mode":"text","text":"Peter Piper picked a peck of pickled peppers.","tags":["plosives","tongue-twister"]}
+{"id":"text_010","mode":"text","text":"The rain in Spain falls mainly on the plain.","tags":["vowel-rich"]}
+{"id":"text_011","mode":"text","text":"One.","tags":["digit"]}
+{"id":"text_012","mode":"text","text":"Two.","tags":["digit"]}
+{"id":"text_013","mode":"text","text":"Three.","tags":["digit","cluster"]}
+{"id":"text_014","mode":"text","text":"Four.","tags":["digit","fricative"]}
+{"id":"text_015","mode":"text","text":"Five.","tags":["digit","fricative"]}
+{"id":"text_016","mode":"text","text":"The weather today is partly cloudy with a chance of rain.","tags":["natural","forecast"]}
+{"id":"text_017","mode":"text","text":"Please leave a message after the tone.","tags":["natural"]}
+{"id":"text_018","mode":"text","text":"Press one for English.","tags":["natural","digit"]}
+{"id":"text_019","mode":"text","text":"Your call is important to us.","tags":["natural"]}
+{"id":"text_020","mode":"text","text":"Thank you.","tags":["short","natural"]}
+{"id":"text_021","mode":"text","text":"Aye.","tags":["vowel-only","tiny"]}
+{"id":"text_022","mode":"text","text":"Mmm.","tags":["nasal","cluster"]}
+{"id":"text_023","mode":"text","text":"Eight.","tags":["vowel-final"]}
+{"id":"text_024","mode":"text","text":"O.","tags":["smoke","tiny","vowel-only"]}
+{"id":"text_025","mode":"text","text":"Sssss.","tags":["fricative-only","unvoiced"]}
+{"id":"text_026","mode":"text","text":"Strengths.","tags":["consonant-cluster"]}
+{"id":"text_027","mode":"text","text":"Sixth.","tags":["consonant-cluster","fricative"]}
+{"id":"text_028","mode":"text","text":"Why?","tags":["question","short"]}
+{"id":"text_029","mode":"text","text":"Now is the time for all good men to come to the aid of their country.","tags":["natural","long"]}
+{"id":"text_030","mode":"text","text":"Synthesizing pre-recorded speech.","tags":["natural","sibilants"]}
+{"id":"spr_001","mode":"spr","text":"\\![.1Sa.0kIG]","tags":["spr","example","shocking"]}
+{"id":"spr_002","mode":"spr","text":"\\![.1pa.0tx.0wa.0tu.0mi]","tags":["spr","example","place-name"]}
+{"id": "phn_001", "mode": "text", "text": "This is the aa sound.", "tags": ["phn", "stratum=single_phoneme", "phone=aa"]}
+{"id": "phn_002", "mode": "text", "text": "This is the ae sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ae"]}
+{"id": "phn_003", "mode": "text", "text": "This is the ah sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ah"]}
+{"id": "phn_004", "mode": "text", "text": "This is the ao sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ao"]}
+{"id": "phn_005", "mode": "text", "text": "This is the aw sound.", "tags": ["phn", "stratum=single_phoneme", "phone=aw"]}
+{"id": "phn_006", "mode": "text", "text": "This is the ax sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ax"]}
+{"id": "phn_007", "mode": "text", "text": "This is the ay sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ay"]}
+{"id": "phn_008", "mode": "text", "text": "This is the b sound.", "tags": ["phn", "stratum=single_phoneme", "phone=b"]}
+{"id": "phn_009", "mode": "text", "text": "This is the ch sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ch"]}
+{"id": "phn_010", "mode": "text", "text": "This is the dx sound.", "tags": ["phn", "stratum=single_phoneme", "phone=dx"]}
+{"id": "phn_011", "mode": "text", "text": "This is the d sound.", "tags": ["phn", "stratum=single_phoneme", "phone=d"]}
+{"id": "phn_012", "mode": "text", "text": "This is the dh sound.", "tags": ["phn", "stratum=single_phoneme", "phone=dh"]}
+{"id": "phn_013", "mode": "text", "text": "This is the eh sound.", "tags": ["phn", "stratum=single_phoneme", "phone=eh"]}
+{"id": "phn_014", "mode": "text", "text": "This is the el sound.", "tags": ["phn", "stratum=single_phoneme", "phone=el"]}
+{"id": "phn_015", "mode": "text", "text": "This is the er sound.", "tags": ["phn", "stratum=single_phoneme", "phone=er"]}
+{"id": "phn_016", "mode": "text", "text": "This is the en sound.", "tags": ["phn", "stratum=single_phoneme", "phone=en"]}
+{"id": "phn_017", "mode": "text", "text": "This is the ey sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ey"]}
+{"id": "phn_018", "mode": "text", "text": "This is the f sound.", "tags": ["phn", "stratum=single_phoneme", "phone=f"]}
+{"id": "phn_019", "mode": "text", "text": "This is the g sound.", "tags": ["phn", "stratum=single_phoneme", "phone=g"]}
+{"id": "phn_020", "mode": "text", "text": "This is the hh sound.", "tags": ["phn", "stratum=single_phoneme", "phone=hh"]}
+{"id": "phn_021", "mode": "text", "text": "This is the ih sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ih"]}
+{"id": "phn_022", "mode": "text", "text": "This is the ix sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ix"]}
+{"id": "phn_023", "mode": "text", "text": "This is the iy sound.", "tags": ["phn", "stratum=single_phoneme", "phone=iy"]}
+{"id": "phn_024", "mode": "text", "text": "This is the jh sound.", "tags": ["phn", "stratum=single_phoneme", "phone=jh"]}
+{"id": "phn_025", "mode": "text", "text": "This is the k sound.", "tags": ["phn", "stratum=single_phoneme", "phone=k"]}
+{"id": "phn_026", "mode": "text", "text": "This is the l sound.", "tags": ["phn", "stratum=single_phoneme", "phone=l"]}
+{"id": "phn_027", "mode": "text", "text": "This is the m sound.", "tags": ["phn", "stratum=single_phoneme", "phone=m"]}
+{"id": "phn_028", "mode": "text", "text": "This is the n sound.", "tags": ["phn", "stratum=single_phoneme", "phone=n"]}
+{"id": "phn_029", "mode": "text", "text": "This is the ng sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ng"]}
+{"id": "phn_030", "mode": "text", "text": "This is the ow sound.", "tags": ["phn", "stratum=single_phoneme", "phone=ow"]}
+{"id": "phn_031", "mode": "text", "text": "This is the oy sound.", "tags": ["phn", "stratum=single_phoneme", "phone=oy"]}
+{"id": "phn_032", "mode": "text", "text": "This is the p sound.", "tags": ["phn", "stratum=single_phoneme", "phone=p"]}
+{"id": "phn_033", "mode": "text", "text": "This is the r sound.", "tags": ["phn", "stratum=single_phoneme", "phone=r"]}
+{"id": "phn_034", "mode": "text", "text": "This is the s sound.", "tags": ["phn", "stratum=single_phoneme", "phone=s"]}
+{"id": "phn_035", "mode": "text", "text": "This is the sh sound.", "tags": ["phn", "stratum=single_phoneme", "phone=sh"]}
+{"id": "phn_036", "mode": "text", "text": "This is the t sound.", "tags": ["phn", "stratum=single_phoneme", "phone=t"]}
+{"id": "phn_037", "mode": "text", "text": "This is the th sound.", "tags": ["phn", "stratum=single_phoneme", "phone=th"]}
+{"id": "phn_038", "mode": "text", "text": "This is the uh sound.", "tags": ["phn", "stratum=single_phoneme", "phone=uh"]}
+{"id": "phn_039", "mode": "text", "text": "This is the uw sound.", "tags": ["phn", "stratum=single_phoneme", "phone=uw"]}
+{"id": "phn_040", "mode": "text", "text": "This is the v sound.", "tags": ["phn", "stratum=single_phoneme", "phone=v"]}
+{"id": "phn_041", "mode": "text", "text": "This is the w sound.", "tags": ["phn", "stratum=single_phoneme", "phone=w"]}
+{"id": "phn_042", "mode": "text", "text": "This is the y sound.", "tags": ["phn", "stratum=single_phoneme", "phone=y"]}
+{"id": "phn_043", "mode": "text", "text": "This is the z sound.", "tags": ["phn", "stratum=single_phoneme", "phone=z"]}
+{"id": "phn_044", "mode": "text", "text": "This is the zh sound.", "tags": ["phn", "stratum=single_phoneme", "phone=zh"]}
+{"id": "phn_045", "mode": "spr", "text": "\\![.1a]", "tags": ["phn", "stratum=single_phoneme", "phone=aa", "stress=1", "padding=stress_variant"]}
+{"id": "phn_046", "mode": "spr", "text": "\\![.2Y]", "tags": ["phn", "stratum=single_phoneme", "phone=ay", "stress=2", "padding=stress_variant"]}
+{"id": "phn_047", "mode": "spr", "text": "\\![.1i]", "tags": ["phn", "stratum=single_phoneme", "phone=iy", "stress=1", "padding=stress_variant"]}
+{"id": "phn_048", "mode": "spr", "text": "\\![.0o]", "tags": ["phn", "stratum=single_phoneme", "phone=ow", "stress=0", "padding=stress_variant"]}
+{"id": "phn_049", "mode": "spr", "text": "\\![.2H]", "tags": ["phn", "stratum=single_phoneme", "phone=ah", "stress=2", "padding=stress_variant"]}
+{"id": "phn_050", "mode": "spr", "text": "\\![.1R]", "tags": ["phn", "stratum=single_phoneme", "phone=er", "stress=1", "padding=stress_variant"]}
+{"id": "mp_001", "mode": "text", "text": "A pat and a bat.", "tags": ["mp", "stratum=minimal_pairs", "pair=p_b", "context=initial"]}
+{"id": "mp_002", "mode": "text", "text": "A rapid rabid.", "tags": ["mp", "stratum=minimal_pairs", "pair=p_b", "context=medial"]}
+{"id": "mp_003", "mode": "text", "text": "A cap, a cab.", "tags": ["mp", "stratum=minimal_pairs", "pair=p_b", "context=final"]}
+{"id": "mp_004", "mode": "text", "text": "A spot, a sbot.", "tags": ["mp", "stratum=minimal_pairs", "pair=p_b", "context=cluster_pre"]}
+{"id": "mp_005", "mode": "text", "text": "A play, a blay.", "tags": ["mp", "stratum=minimal_pairs", "pair=p_b", "context=cluster_post"]}
+{"id": "mp_006", "mode": "text", "text": "ap #ab.", "tags": ["mp", "stratum=minimal_pairs", "pair=p_b", "context=across_boundary"]}
+{"id": "mp_007", "mode": "text", "text": "A tat and a dat.", "tags": ["mp", "stratum=minimal_pairs", "pair=t_d", "context=initial"]}
+{"id": "mp_008", "mode": "text", "text": "A ratid radid.", "tags": ["mp", "stratum=minimal_pairs", "pair=t_d", "context=medial"]}
+{"id": "mp_009", "mode": "text", "text": "A cat, a cad.", "tags": ["mp", "stratum=minimal_pairs", "pair=t_d", "context=final"]}
+{"id": "mp_010", "mode": "text", "text": "A stot, a sdot.", "tags": ["mp", "stratum=minimal_pairs", "pair=t_d", "context=cluster_pre"]}
+{"id": "mp_011", "mode": "text", "text": "A tlay, a dlay.", "tags": ["mp", "stratum=minimal_pairs", "pair=t_d", "context=cluster_post"]}
+{"id": "mp_012", "mode": "text", "text": "at #ad.", "tags": ["mp", "stratum=minimal_pairs", "pair=t_d", "context=across_boundary"]}
+{"id": "mp_013", "mode": "text", "text": "A kat and a gat.", "tags": ["mp", "stratum=minimal_pairs", "pair=k_g", "context=initial"]}
+{"id": "mp_014", "mode": "text", "text": "A rakid ragid.", "tags": ["mp", "stratum=minimal_pairs", "pair=k_g", "context=medial"]}
+{"id": "mp_015", "mode": "text", "text": "A cak, a cag.", "tags": ["mp", "stratum=minimal_pairs", "pair=k_g", "context=final"]}
+{"id": "mp_016", "mode": "text", "text": "A skot, a sgot.", "tags": ["mp", "stratum=minimal_pairs", "pair=k_g", "context=cluster_pre"]}
+{"id": "mp_017", "mode": "text", "text": "A klay, a glay.", "tags": ["mp", "stratum=minimal_pairs", "pair=k_g", "context=cluster_post"]}
+{"id": "mp_018", "mode": "text", "text": "ak #ag.", "tags": ["mp", "stratum=minimal_pairs", "pair=k_g", "context=across_boundary"]}
+{"id": "mp_019", "mode": "text", "text": "A fat and a vat.", "tags": ["mp", "stratum=minimal_pairs", "pair=f_v", "context=initial"]}
+{"id": "mp_020", "mode": "text", "text": "A rafid ravid.", "tags": ["mp", "stratum=minimal_pairs", "pair=f_v", "context=medial"]}
+{"id": "mp_021", "mode": "text", "text": "A caf, a cav.", "tags": ["mp", "stratum=minimal_pairs", "pair=f_v", "context=final"]}
+{"id": "mp_022", "mode": "text", "text": "A sfot, a svot.", "tags": ["mp", "stratum=minimal_pairs", "pair=f_v", "context=cluster_pre"]}
+{"id": "mp_023", "mode": "text", "text": "A flay, a vlay.", "tags": ["mp", "stratum=minimal_pairs", "pair=f_v", "context=cluster_post"]}
+{"id": "mp_024", "mode": "text", "text": "af #av.", "tags": ["mp", "stratum=minimal_pairs", "pair=f_v", "context=across_boundary"]}
+{"id": "mp_025", "mode": "text", "text": "A sat and a zat.", "tags": ["mp", "stratum=minimal_pairs", "pair=s_z", "context=initial"]}
+{"id": "mp_026", "mode": "text", "text": "A rasid razid.", "tags": ["mp", "stratum=minimal_pairs", "pair=s_z", "context=medial"]}
+{"id": "mp_027", "mode": "text", "text": "A cas, a caz.", "tags": ["mp", "stratum=minimal_pairs", "pair=s_z", "context=final"]}
+{"id": "mp_028", "mode": "text", "text": "A ssot, a szot.", "tags": ["mp", "stratum=minimal_pairs", "pair=s_z", "context=cluster_pre"]}
+{"id": "mp_029", "mode": "text", "text": "A slay, a zlay.", "tags": ["mp", "stratum=minimal_pairs", "pair=s_z", "context=cluster_post"]}
+{"id": "mp_030", "mode": "text", "text": "as #az.", "tags": ["mp", "stratum=minimal_pairs", "pair=s_z", "context=across_boundary"]}
+{"id": "mp_031", "mode": "text", "text": "A shat and a zhat.", "tags": ["mp", "stratum=minimal_pairs", "pair=sh_zh", "context=initial"]}
+{"id": "mp_032", "mode": "text", "text": "A rashid razhid.", "tags": ["mp", "stratum=minimal_pairs", "pair=sh_zh", "context=medial"]}
+{"id": "mp_033", "mode": "text", "text": "A cash, a cazh.", "tags": ["mp", "stratum=minimal_pairs", "pair=sh_zh", "context=final"]}
+{"id": "mp_034", "mode": "text", "text": "A sshot, a szhot.", "tags": ["mp", "stratum=minimal_pairs", "pair=sh_zh", "context=cluster_pre"]}
+{"id": "mp_035", "mode": "text", "text": "A shlay, a zhlay.", "tags": ["mp", "stratum=minimal_pairs", "pair=sh_zh", "context=cluster_post"]}
+{"id": "mp_036", "mode": "text", "text": "ash #azh.", "tags": ["mp", "stratum=minimal_pairs", "pair=sh_zh", "context=across_boundary"]}
+{"id": "mp_037", "mode": "text", "text": "A chat and a jhat.", "tags": ["mp", "stratum=minimal_pairs", "pair=ch_jh", "context=initial"]}
+{"id": "mp_038", "mode": "text", "text": "A rachid rajhid.", "tags": ["mp", "stratum=minimal_pairs", "pair=ch_jh", "context=medial"]}
+{"id": "mp_039", "mode": "text", "text": "A cach, a cajh.", "tags": ["mp", "stratum=minimal_pairs", "pair=ch_jh", "context=final"]}
+{"id": "mp_040", "mode": "text", "text": "A schot, a sjhot.", "tags": ["mp", "stratum=minimal_pairs", "pair=ch_jh", "context=cluster_pre"]}
+{"id": "mp_041", "mode": "text", "text": "A chlay, a jhlay.", "tags": ["mp", "stratum=minimal_pairs", "pair=ch_jh", "context=cluster_post"]}
+{"id": "mp_042", "mode": "text", "text": "ach #ajh.", "tags": ["mp", "stratum=minimal_pairs", "pair=ch_jh", "context=across_boundary"]}
+{"id": "mp_043", "mode": "text", "text": "A that and a dhat.", "tags": ["mp", "stratum=minimal_pairs", "pair=th_dh", "context=initial"]}
+{"id": "mp_044", "mode": "text", "text": "A rathid radhid.", "tags": ["mp", "stratum=minimal_pairs", "pair=th_dh", "context=medial"]}
+{"id": "mp_045", "mode": "text", "text": "A cath, a cadh.", "tags": ["mp", "stratum=minimal_pairs", "pair=th_dh", "context=final"]}
+{"id": "mp_046", "mode": "text", "text": "A with, a widh.", "tags": ["mp", "stratum=minimal_pairs", "pair=th_dh", "context=cluster_pre"]}
+{"id": "mp_047", "mode": "text", "text": "A thlay, a dhlay.", "tags": ["mp", "stratum=minimal_pairs", "pair=th_dh", "context=cluster_post"]}
+{"id": "mp_048", "mode": "text", "text": "ath #adh.", "tags": ["mp", "stratum=minimal_pairs", "pair=th_dh", "context=across_boundary"]}
+{"id": "mp_049", "mode": "text", "text": "ass azz.", "tags": ["mp", "stratum=minimal_pairs", "pair=s_z", "context=geminate"]}
+{"id": "mp_050", "mode": "text", "text": "att add.", "tags": ["mp", "stratum=minimal_pairs", "pair=t_d", "context=geminate"]}
+{"id": "nat_001", "mode": "text", "text": "Time to go.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_002", "mode": "text", "text": "No thanks.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_003", "mode": "text", "text": "Open the door.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_004", "mode": "text", "text": "Yes please.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_005", "mode": "text", "text": "All systems go.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_006", "mode": "text", "text": "Hold the line please.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_007", "mode": "text", "text": "Close the window.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_008", "mode": "text", "text": "It is raining.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_009", "mode": "text", "text": "Right now.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_010", "mode": "text", "text": "Press any key.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_011", "mode": "text", "text": "Lights off please.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_012", "mode": "text", "text": "Wait one moment.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_013", "mode": "text", "text": "Good morning.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_014", "mode": "text", "text": "Speak after the tone.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_015", "mode": "text", "text": "Welcome back.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_016", "mode": "text", "text": "Turn on the lights.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_017", "mode": "text", "text": "Not yet.", "tags": ["nat", "stratum=natural", "length_bucket=short", "seed=42"]}
+{"id": "nat_018", "mode": "text", "text": "This message is being recorded for quality assurance.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_019", "mode": "text", "text": "All passengers must remain seated until we land.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_020", "mode": "text", "text": "Please stay on the line for the next available agent.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_021", "mode": "text", "text": "The library will be closed on Monday for the holiday.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_022", "mode": "text", "text": "The fire alarm test will run for thirty seconds.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_023", "mode": "text", "text": "Please leave your name and number after the beep.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_024", "mode": "text", "text": "The road ahead is closed due to ongoing construction.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_025", "mode": "text", "text": "Press one for sales, two for support, three for billing.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_026", "mode": "text", "text": "Please return your tray tables to the upright position.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_027", "mode": "text", "text": "Your package will arrive between three and five today.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_028", "mode": "text", "text": "The weather today is partly cloudy with light winds.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_029", "mode": "text", "text": "The next train to the airport leaves in ten minutes.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_030", "mode": "text", "text": "Office hours are from nine in the morning until five.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_031", "mode": "text", "text": "Your appointment is confirmed for Tuesday at two o'clock.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_032", "mode": "text", "text": "All circuits are busy, please try your call later.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_033", "mode": "text", "text": "Mind the gap between the train and the platform.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_034", "mode": "text", "text": "The current temperature is sixty eight degrees.", "tags": ["nat", "stratum=natural", "length_bucket=medium", "seed=42"]}
+{"id": "nat_035", "mode": "text", "text": "Our records indicate that your subscription expired last month, please renew to continue uninterrupted service.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_036", "mode": "text", "text": "We are experiencing a higher than usual call volume and apologize for the longer wait time.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_037", "mode": "text", "text": "The library is open from nine in the morning until eight at night Monday through Saturday.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_038", "mode": "text", "text": "If you would like to speak to a customer service representative, please remain on the line.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_039", "mode": "text", "text": "Tickets for the show go on sale tomorrow morning at ten o'clock through the official website.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_040", "mode": "text", "text": "Visitors are reminded that flash photography is not permitted anywhere inside the museum galleries.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_041", "mode": "text", "text": "All employees must complete the mandatory training course before the end of the calendar quarter.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_042", "mode": "text", "text": "The quick brown fox jumps over the lazy dog while the cat watches with mild interest.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_043", "mode": "text", "text": "Due to the heavy snowfall overnight, all schools in the district will be closed today.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_044", "mode": "text", "text": "Now is the time for all good men to come to the aid of their country.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_045", "mode": "text", "text": "Thank you for calling, your business is important to us and we will be with you shortly.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_046", "mode": "text", "text": "If this is a medical emergency, please hang up and dial nine one one immediately.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_047", "mode": "text", "text": "She walked along the seashore at sunset, listening to the gentle sound of waves on the sand.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_048", "mode": "text", "text": "Once upon a time, in a land far far away, there lived a clever little fox.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_049", "mode": "text", "text": "Please make sure all electronic devices are switched to airplane mode for the duration of the flight.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "nat_050", "mode": "text", "text": "Today's forecast calls for sunny skies in the morning followed by scattered thunderstorms in the afternoon.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
+{"id": "edge_001", "mode": "text", "text": "She sells seashells by the seashore.", "tags": ["edge", "seed", "compound", "regression"]}
+{"id": "edge_002", "mode": "text", "text": "Now is the time for all good men to come to the aid of their country.", "tags": ["edge", "seed", "long-no-punct", "regression"]}
+{"id": "edge_003", "mode": "text", "text": "Sssss.", "tags": ["edge", "seed", "fricative-only", "regression"]}
+{"id": "edge_004", "mode": "text", "text": "syn-", "tags": ["edge", "seed", "prefix", "regression"]}
+{"id": "edge_005", "mode": "text", "text": "important", "tags": ["edge", "seed", "stress-edge", "regression"]}
+{"id": "edge_006", "mode": "text", "text": "seashore", "tags": ["edge", "seed", "compound", "regression"]}
+{"id": "edge_007", "mode": "text", "text": "lighthouse", "tags": ["edge", "seed", "compound", "regression"]}
+{"id": "edge_008", "mode": "text", "text": "synthesizing", "tags": ["edge", "seed", "long-monomorph", "regression"]}
+{"id": "edge_009", "mode": "text", "text": "Hello, world.", "tags": ["edge", "comma", "pause-density"]}
+{"id": "edge_010", "mode": "text", "text": "Hello; world.", "tags": ["edge", "semicolon", "pause-density"]}
+{"id": "edge_011", "mode": "text", "text": "Hello... world.", "tags": ["edge", "ellipsis", "pause-density"]}
+{"id": "edge_012", "mode": "text", "text": "Wait, listen, then speak.", "tags": ["edge", "multi-comma", "pause-density"]}
+{"id": "edge_013", "mode": "text", "text": "Stop -- and look.", "tags": ["edge", "em-dash", "pause-density"]}
+{"id": "edge_014", "mode": "text", "text": "Aye.", "tags": ["edge", "all-vowel"]}
+{"id": "edge_015", "mode": "text", "text": "Ooh.", "tags": ["edge", "all-vowel"]}
+{"id": "edge_016", "mode": "text", "text": "Eee.", "tags": ["edge", "all-vowel"]}
+{"id": "edge_017", "mode": "text", "text": "Strengths.", "tags": ["edge", "consonant-cluster"]}
+{"id": "edge_018", "mode": "text", "text": "Sixths.", "tags": ["edge", "consonant-cluster"]}
+{"id": "edge_019", "mode": "text", "text": "Stretched twelfths.", "tags": ["edge", "consonant-cluster"]}
+{"id": "edge_020", "mode": "text", "text": "I.", "tags": ["edge", "very-short", "vowel-only"]}
+{"id": "edge_021", "mode": "text", "text": "A.", "tags": ["edge", "very-short", "vowel-only"]}
+{"id": "edge_022", "mode": "text", "text": "Hi.", "tags": ["edge", "very-short"]}
+{"id": "edge_023", "mode": "text", "text": "O.", "tags": ["edge", "very-short", "vowel-only"]}
+{"id": "edge_024", "mode": "text", "text": "It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity.", "tags": ["edge", "very-long"]}
+{"id": "edge_025", "mode": "text", "text": "If you would like to speak with a representative, please stay on the line, otherwise press one for English, two for Spanish, three for French, or remain on the line for our next available agent.", "tags": ["edge", "very-long"]}
+{"id": "edge_026", "mode": "text", "text": "One two three.", "tags": ["edge", "digits-as-words"]}
+{"id": "edge_027", "mode": "text", "text": "Ten nine eight seven.", "tags": ["edge", "digits-as-words"]}
+{"id": "edge_028", "mode": "text", "text": "123", "tags": ["edge", "numbers-as-text"]}
+{"id": "edge_029", "mode": "text", "text": "2026", "tags": ["edge", "numbers-as-text"]}
+{"id": "edge_030", "mode": "text", "text": "3.14", "tags": ["edge", "numbers-as-text"]}
+{"id": "edge_031", "mode": "text", "text": "Alice met Bob.", "tags": ["edge", "proper-noun"]}
+{"id": "edge_032", "mode": "text", "text": "California.", "tags": ["edge", "proper-noun"]}
+{"id": "edge_033", "mode": "text", "text": "New York City.", "tags": ["edge", "proper-noun"]}
+{"id": "edge_034", "mode": "text", "text": "I don't know.", "tags": ["edge", "contraction"]}
+{"id": "edge_035", "mode": "text", "text": "We'll see.", "tags": ["edge", "contraction"]}
+{"id": "edge_036", "mode": "text", "text": "They're here.", "tags": ["edge", "contraction"]}
+{"id": "edge_037", "mode": "text", "text": "I've been there.", "tags": ["edge", "contraction"]}
+{"id": "edge_038", "mode": "text", "text": "Well-known.", "tags": ["edge", "hyphenated"]}
+{"id": "edge_039", "mode": "text", "text": "Up-to-date status.", "tags": ["edge", "hyphenated"]}
+{"id": "edge_040", "mode": "text", "text": "Dr. Smith called.", "tags": ["edge", "abbreviation"]}
+{"id": "edge_041", "mode": "text", "text": "Mr. Jones is here.", "tags": ["edge", "abbreviation"]}
+{"id": "edge_042", "mode": "text", "text": "Apples, oranges, etc.", "tags": ["edge", "abbreviation"]}
+{"id": "edge_043", "mode": "text", "text": "Why?", "tags": ["edge", "question"]}
+{"id": "edge_044", "mode": "text", "text": "Are you ready?", "tags": ["edge", "question"]}
+{"id": "edge_045", "mode": "text", "text": "It's working, isn't it?", "tags": ["edge", "question"]}
+{"id": "edge_046", "mode": "text", "text": "Wow!", "tags": ["edge", "exclamation"]}
+{"id": "edge_047", "mode": "text", "text": "Watch out!", "tags": ["edge", "exclamation"]}
+{"id": "edge_048", "mode": "text", "text": "Stop!!", "tags": ["edge", "exclamation"]}
+{"id": "edge_049", "mode": "text", "text": "Mmm.", "tags": ["edge", "nasal-only"]}
+{"id": "edge_050", "mode": "spr", "text": "\\![.1Sa.0kIG]", "tags": ["edge", "spr", "lts-bypass"]}
+{"id": "edge_051", "mode": "text", "text": "NASA confirmed it.", "tags": ["edge", "acronym"]}
+{"id": "edge_052", "mode": "text", "text": "Five dollars exactly.", "tags": ["edge", "currency-words"]}
+{"id": "longtext_sioux_001", "mode": "text", "text": "The following message is transmitted at the request of the South Dakota emergency management agency sioux falls South Dakota. Sioux falls residents west of Interstate 29 must stop water usage immediately. Please stop flushing toilets, washing clothes, and using showers. Only use water for drinking purposes. Water does not need to be boiled. Discontinue all other uses of water. There is an issue with the sanitary sewer system, which may cause sewer backups in the affected area. Potential sewer backups will occur from an area bounded to the north, from the north Minnesota avenue water plant, to the south by 26th street. The eastern boundary is along Minnesota avenue and the western boundary along western avenue. Residents in the affected area should work to move critical items from their basements, to higher elevations until public works can fix the problem. In addition, sanitary sewage is being discharged into the big sioux river south of west 12th street. Residents should stay out of the big sioux river and parks adjacent to the river, including bike trails. Discharges into covell lake and overland north of falls park are also occurring. Residents are advised to stay out of these areas.", "tags": ["long", "stress", "multi-utt"]}

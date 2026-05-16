@@ -28,7 +28,7 @@ def _detect_proj_root():
         cur = start
         while cur and cur not in seen:
             seen.add(cur)
-            if os.path.isfile(os.path.join(cur, "bin", "spfy_dumpwav32_8khz.exe")):
+            if os.path.isfile(os.path.join(cur, "bin", "spfy_dumpwav.exe")):
                 return cur
             parent = os.path.dirname(cur)
             if parent == cur:

@@ -206,7 +206,7 @@ Key parameters (Tom's defaults work well):
 Start Speechify server and synthesize:
 
 ```bash
-bin\spfy_dumpwav32_8khz.exe "The weather today will be partly cloudy."
+bin\spfy_dumpwav.exe "The weather today will be partly cloudy."
 ```
 
 For detailed diagnostics:

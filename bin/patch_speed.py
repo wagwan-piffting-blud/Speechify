@@ -21,6 +21,16 @@ import shutil
 import struct
 import sys
 
+import psutil
+
+def kill_speechify():
+    """Kill any running Speechify process to free file locks."""
+    for proc in psutil.process_iter(['pid', 'name']):
+        if proc.info['name'] and proc.info['name'].lower() in ("speechify.exe", "speechify"):
+            proc.kill()
+            proc.wait(timeout=5)
+            print("Killed Speechify process (pid %d) to free file locks." % proc.info['pid'])
+
 DLL = 'SWIttsEngine.dll'
 BACKUP = 'SWIttsEngine_orig.dll'
 
@@ -30,6 +40,8 @@ ORIG_BYTES = bytes.fromhex('56ff1524f0b106')  # PUSH ESI; CALL [06B1F024]
 NOP_BYTES  = b'\x90' * 7                       # 7x NOP
 
 def main():
+    kill_speechify()
+
     if not os.path.exists(DLL):
         print('ERROR: %s not found (run from bin/ directory)' % DLL)
         return 1

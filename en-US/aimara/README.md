@@ -84,7 +84,7 @@ pip install frida frida-tools
 - Normalize output to -1dB headroom (clips at peak=1.0)
 
 **Speechify engine** (for testing):
-- `bin/Speechify.exe` (server) + `bin/spfy_dumpwav32_8khz.exe` (client)
+- `bin/Speechify.exe` (server) + `bin/spfy_dumpwav.exe` (client)
 - Must be running for synthesis tests
 
 ## Step-by-Step Guide
@@ -209,7 +209,7 @@ Recommended settings for voice skin builds:
 Start Speechify server, then:
 
 ```
-bin\spfy_dumpwav32_8khz.exe "The weather today will be partly cloudy."
+bin\spfy_dumpwav.exe "The weather today will be partly cloudy."
 ```
 
 For detailed diagnostics:

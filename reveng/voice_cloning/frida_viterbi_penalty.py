@@ -52,7 +52,7 @@ def _detect_proj_root():
         cur = start
         while cur and cur not in seen:
             seen.add(cur)
-            if os.path.isfile(os.path.join(cur, "bin", "spfy_dumpwav32_8khz.exe")):
+            if os.path.isfile(os.path.join(cur, "bin", "spfy_dumpwav.exe")):
                 return cur
             parent = os.path.dirname(cur)
             if parent == cur:
@@ -469,7 +469,7 @@ def generate_timeline_viz(comparison, text, voice, penalty, out_path):
 # =====================================================================
 def main():
     PROJ = _detect_proj_root()
-    SYNTH_EXE = os.path.join(PROJ, "bin", "spfy_dumpwav32_8khz.exe")
+    SYNTH_EXE = os.path.join(PROJ, "bin", "spfy_dumpwav.exe")
 
     VOICE_CONFIGS = {
         'mara': {

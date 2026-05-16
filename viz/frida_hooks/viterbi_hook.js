@@ -30,11 +30,16 @@ Interceptor.attach(ADDR_USEL, {
 });
 
 // --- Prune: capture pre-prune best + top candidates per halfphone ---
+// FUN_08e88830 decompile (Ghidra 2026-05-09 plan-zero audit):
+//   iVar10 = *this;                       // n_cands at this+0x00
+//   pfVar11 = (float *)(*(this + 0x18) + 4);  // cand array, 0x18 stride, cost@+4
+// Earlier this hook read n from this+0x14 which was a stale field-offset
+// drift from a prior struct-shape hypothesis; corrected to this+0x00.
 Interceptor.attach(ADDR_PRUNE_FN, {
     onEnter: function(args) {
         hpCount++;
         var thisPtr = this.context.ecx;
-        var n = tryU32(thisPtr.add(0x14));
+        var n = tryU32(thisPtr);              // this+0x00 per FUN_08e88830 disasm
         var arrVal = tryU32(thisPtr.add(0x18));
 
         if (n === null || arrVal === null || n < 1 || n > 500 || arrVal < 0x100000) {

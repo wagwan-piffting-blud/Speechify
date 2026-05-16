@@ -1,0 +1,12 @@
+build/
+build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+compile_commands.json
+.cache/
+.cmake/
+CMakeUserPresets.json
+t*.bin

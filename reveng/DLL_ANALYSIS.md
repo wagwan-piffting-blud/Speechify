@@ -438,7 +438,16 @@ Forward pass (0x8E8B6E8): for each position i = 1..N-1:
 ### Candidate Pipeline (scoring -> pruning -> Viterbi)
 
 The full pipeline from PRSL to Viterbi:
-1. **PRSL lookup** (`0x8E89A70`): returns candidate UIDs for triphone context key
+1. **Per-utterance setup** (`0x8E89A70` = `USelNetwork::BuildGraph`): builds
+   the phrase/word/syllable/segment tree from the FE-emitted utterance.
+   (Earlier docs labeled this as "PRSL lookup" -- incorrect; corrected
+   2026-05-05 by Ghidra decompile and confirmed by hook fire-rate.)
+1a. **Per-slot PRSL preselection** (`0x8E91DC0` = `USelNetwork::AddUnit`):
+   the actual per-target preselection. Reads 5 contexts at positions
+   slot-4..slot+4, builds key = `ctx[1]*10000 + ctx[2]*100 + ctx[3]`,
+   returns candidate UIDs into a 0x18-byte-stride buffer. Called per slot
+   from `USelNetwork::AddUnits` (`0x8E920F0`). Has a 1/2/3/5 fallback
+   chain (gap #6).
 2. **BuildCandidateList**: creates flat 0x18-byte candidate entries
 3. **InnerScorer** (`0x8E88DE0`): scores all candidates (target cost from unit properties)
 4. **Prune** (`0x8E88830`): removes candidates with total_score >= threshold (VCF param)

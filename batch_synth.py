@@ -4,8 +4,8 @@ batch_synth.py — Generate a training corpus by synthesizing diverse sentences
 through the Speechify engine. Used for Experiment F (train on engine output).
 
 Usage:
-    python batch_synth.py --exe "bin\\spfy_dumpwav32_8khz.exe" --output corpus
-    python batch_synth.py --exe "bin\\spfy_dumpwav32_8khz.exe" --output corpus --sentences custom.txt
+    python batch_synth.py --exe "bin\\spfy_dumpwav.exe" --output corpus
+    python batch_synth.py --exe "bin\\spfy_dumpwav.exe" --output corpus --sentences custom.txt
 """
 
 import argparse
@@ -87,7 +87,7 @@ DEFAULT_SENTENCES = [
 
 def main():
     parser = argparse.ArgumentParser(description="Batch synthesize sentences through Speechify")
-    parser.add_argument("--exe", default="bin\\spfy_dumpwav32_8khz.exe",
+    parser.add_argument("--exe", default="bin\\spfy_dumpwav.exe",
                         help="Path to Speechify dump executable")
     parser.add_argument("--output", default="corpus",
                         help="Output directory for WAV files")

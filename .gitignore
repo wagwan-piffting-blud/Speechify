@@ -13,6 +13,7 @@ reveng/att/
 reveng/ss_rs/
 *.json*
 !tom_vin_structure.json
+!spfy/test/oracle/corpus.jsonl
 wav*
 */*/transcripts
 ~*.*~
@@ -27,3 +28,5 @@ diagnostics/
 !reveng/voice_cloning/tom_16k/*.wav
 !reveng/voice_cloning/rvc_input_flashsr/
 !reveng/voice_cloning/rvc_input_flashsr/*.wav
+CMakeCache.txt
+RESUME.md
