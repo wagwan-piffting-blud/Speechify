@@ -1,0 +1,5 @@
+=== hello: 'Hello, world.' -> 0 ESPR strings ===
+=== pangram: 'The quick brown fox jumps over the lazy dog.' -> 0 ESPR strings ===
+=== single_a: 'A.' -> 0 ESPR strings ===
+=== two_words: 'Hi there.' -> 0 ESPR strings ===
+=== emphasis: 'I love this.' -> 0 ESPR strings ===
