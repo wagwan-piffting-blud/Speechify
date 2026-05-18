@@ -104,7 +104,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           submodules: false
@@ -136,10 +136,10 @@ jobs:
         shell: msys2 {0}
         run: |
           export PATH="/mingw32/bin:$PATH"
-          mkdir -p /tmp/spfy_build32
+          mkdir -p /c/tmp/spfy_build32
           /mingw64/bin/cmake.exe \
             -S "$(cygpath -u '${{ github.workspace }}')/spfy" \
-            -B /tmp/spfy_build32 \
+            -B /c/tmp/spfy_build32 \
             -G Ninja \
             -DCMAKE_MAKE_PROGRAM=/mingw64/bin/ninja.exe \
             -DCMAKE_C_COMPILER=/mingw32/bin/gcc.exe \
@@ -152,7 +152,7 @@ jobs:
         shell: msys2 {0}
         run: |
           export PATH="/mingw32/bin:$PATH"
-          /mingw64/bin/cmake.exe --build /tmp/spfy_build32
+          /mingw64/bin/cmake.exe --build /c/tmp/spfy_build32
 
       # --------------------------------------------------------------
       # Build the 64-bit SAPI shim (mingw64, standalone gcc invocation)
@@ -163,7 +163,7 @@ jobs:
         run: |
           SRCDIR="$(cygpath -u '${{ github.workspace }}')/spfy/src/sapi"
           DSPDIR="$(cygpath -u '${{ github.workspace }}')/spfy/src/dsp"
-          OUTDIR="/tmp/spfy_build32/src/sapi"
+          OUTDIR="/c/tmp/spfy_build32/src/sapi"
           mkdir -p "$OUTDIR"
           # -static -static-libgcc: avoid runtime dep on libgcc_s_seh-1.dll
           # / libwinpthread-1.dll on stock Windows VMs.
@@ -183,11 +183,11 @@ jobs:
       - name: Verify build outputs
         shell: msys2 {0}
         run: |
-          ls -la /tmp/spfy_build32/src/sapi/spfy_sapi.dll
-          ls -la /tmp/spfy_build32/src/sapi/spfy_sapi64.dll
-          ls -la /tmp/spfy_build32/src/cli/spfy_synth.exe
-          file /tmp/spfy_build32/src/sapi/spfy_sapi.dll
-          file /tmp/spfy_build32/src/sapi/spfy_sapi64.dll
+          ls -la /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll
+          ls -la /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll
+          ls -la /c/tmp/spfy_build32/src/cli/spfy_synth.exe
+          file /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll
+          file /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll
 
       # --------------------------------------------------------------
       # Inno Setup — package the installer
@@ -235,7 +235,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
           submodules: false
