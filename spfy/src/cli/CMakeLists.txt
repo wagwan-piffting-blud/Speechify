@@ -87,7 +87,32 @@ target_link_libraries(spfy_hp_score_test PRIVATE spfy_usel spfy_voice spfy_commo
 # spfy_fe_synth_text + parsed_to_fe_utt path (see #ifdef SPFY_FE_HOSTED
 # in spfy_synth.c). spfy_fe_synth.c and spfy_fe_test.c still call the
 # hand-written FE's stage functions directly and remain excluded.
-add_executable(spfy_synth spfy_synth.c)
+#
+# Embedded assets: spfy/tools/embed_assets.py generates a C source +
+# header at configure time that bakes the (otherwise external)
+# hpclass + fe_symbol_table.json + fe_tables_a + fe_tables blobs
+# straight into spfy_synth.exe. That lets the CLI accept a 5-arg form
+# (vin/vdb/vcf/text/out) instead of the legacy 9-arg form — the
+# extractor writes the bundled assets to a tempdir on startup.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(EMBED_OUT_C "${CMAKE_CURRENT_BINARY_DIR}/embedded_assets.c")
+set(EMBED_OUT_H "${CMAKE_CURRENT_BINARY_DIR}/embedded_assets.h")
+add_custom_command(
+    OUTPUT  "${EMBED_OUT_C}" "${EMBED_OUT_H}"
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/embed_assets.py"
+            --hpclass  "${CMAKE_SOURCE_DIR}/data/tom_hpclass.bin"
+            --vocab    "${CMAKE_SOURCE_DIR}/build/fe_symbol_table.json"
+            --tables-a "${CMAKE_SOURCE_DIR}/data/fe_tables_a"
+            --tables-b "${CMAKE_SOURCE_DIR}/data/fe_tables"
+            --out-c    "${EMBED_OUT_C}"
+            --out-h    "${EMBED_OUT_H}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/tools/embed_assets.py"
+            "${CMAKE_SOURCE_DIR}/data/tom_hpclass.bin"
+            "${CMAKE_SOURCE_DIR}/build/fe_symbol_table.json"
+    COMMENT "Embedding hpclass + fe_symbol_table + fe_tables into spfy_synth")
+
+add_executable(spfy_synth spfy_synth.c "${EMBED_OUT_C}")
 target_include_directories(spfy_synth
     PRIVATE ${CMAKE_SOURCE_DIR}/src/synth
             ${CMAKE_SOURCE_DIR}/src/voice
@@ -95,10 +120,12 @@ target_include_directories(spfy_synth
             ${CMAKE_SOURCE_DIR}/src/wsola
             ${CMAKE_SOURCE_DIR}/src/fe
             ${CMAKE_SOURCE_DIR}/src/fe_host
+            ${CMAKE_SOURCE_DIR}/src/fe_internal
             ${CMAKE_SOURCE_DIR}/src/cart
+            ${CMAKE_CURRENT_BINARY_DIR}      # for generated embedded_assets.h
 )
 target_link_libraries(spfy_synth
-    PRIVATE spfy_synth_lib spfy_fe spfy_usel spfy_cart spfy_voice spfy_wsola spfy_common)
+    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_common)
 
 # A/B test tool for the TD-PSOLA pitch shifter (used to tune quality
 # before wiring into the SAPI shim's <prosody pitch=...> path).
@@ -111,6 +138,25 @@ add_executable(spfy_time_stretch spfy_time_stretch.c)
 target_include_directories(spfy_time_stretch
     PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
 target_link_libraries(spfy_time_stretch PRIVATE spfy_dsp)
+
+# G2P module smoke test — CMU dict ARPAbet lookup. Foundation of the
+# in-house FE that replaces SWIttsFe-en-US.dll on ARM targets.
+add_executable(spfy_g2p_dump spfy_g2p_dump.c)
+target_include_directories(spfy_g2p_dump
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/g2p)
+target_link_libraries(spfy_g2p_dump PRIVATE spfy_g2p)
+
+# Phase 3 text normalizer smoke test — pre-G2P tokenizer.
+add_executable(spfy_text_norm_dump spfy_text_norm_dump.c)
+target_include_directories(spfy_text_norm_dump
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/text_norm)
+target_link_libraries(spfy_text_norm_dump PRIVATE spfy_text_norm)
+
+# Phase 4 in-house FE assembler — text → tagged-output (DLL-compatible).
+add_executable(spfy_fe_text2tagged spfy_fe_text2tagged.c)
+target_include_directories(spfy_fe_text2tagged
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/fe_internal)
+target_link_libraries(spfy_fe_text2tagged PRIVATE spfy_fe_internal)
 
 # One-shot diagnostic: print Tom's unit corpus F0 byte distribution to
 # size the selection-only pitch range before falling back to PSOLA.

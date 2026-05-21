@@ -1,3 +1,6 @@
+# `spfy_baked_pos` is declared at the top-level spfy/CMakeLists.txt so
+# src/fe_internal/ (in-house FE) can link it before src/fe/ is processed.
+
 add_library(spfy_fe STATIC
     vocab.c
     tables.c
@@ -5,7 +8,6 @@ add_library(spfy_fe STATIC
     prosody.c
     phoneset.c
     baked_dict.c
-    baked_pos.c
     stage_textnorm.c
     stage_morph.c
     stage_syl.c
@@ -21,4 +23,4 @@ target_include_directories(spfy_fe
             ${CMAKE_SOURCE_DIR}/src/common
             ${CMAKE_SOURCE_DIR}/src/voice
 )
-target_link_libraries(spfy_fe PUBLIC spfy_voice spfy_common)
+target_link_libraries(spfy_fe PUBLIC spfy_voice spfy_common spfy_baked_pos)

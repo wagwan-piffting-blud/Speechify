@@ -44,6 +44,11 @@
 #include "../fe/phoneset.h"
 #include "../fe/prosody.h"
 #include "../fe/baked_pos.h"
+
+/* In-house FE — used when SPFY_FE_INTERNAL=1 to bypass the SWIttsFe
+ * DLL drive entirely. Lets us A/B audit the new path vs the hosted FE
+ * and is the required path on ARM Android (no PE-executing CPU). */
+#include "../fe_internal/fe_internal.h"
 #  include "../fe_host/fe_parse.h"
 
 #include <ctype.h>
@@ -52,6 +57,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>     /* asset tempdir uniqueness via argv[0] mtime */
 
 #define SILENCE_SENTINEL_UID 169578u
 #define MAX_CANDS_PER_SLOT   512
@@ -738,6 +744,22 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 rc = SPFY_E_INVAL; goto fail;
             }
             rc = spfy_fe_synth_tagged(v->fe, tagged_buf_, &hints, &utt_unused);
+        } else if (getenv("SPFY_FE_INTERNAL")) {
+            /* In-house FE path: text → fe_internal → tagged-text →
+             * spfy_fe_synth_tagged → slot tree. Skips the DLL entirely.
+             * Quality is lower than the hosted FE (no engine-specific
+             * lexicon, simple syllabifier, no full prosody model) but
+             * portable to ARM and platforms where the DLL can't run. */
+            /* 64 KB tagged buffer — accommodates long passages (the
+             * sioux pangram in the audit corpus runs ~30 KB tagged). */
+            static char tagged_buf_[65536];
+            int frc = spfy_fe_internal_text_to_tagged(
+                text, tagged_buf_, sizeof tagged_buf_);
+            if (frc < 0) {
+                fprintf(stderr, "spfy_fe_internal_text_to_tagged failed\n");
+                rc = SPFY_E_INVAL; goto fail;
+            }
+            rc = spfy_fe_synth_tagged(v->fe, tagged_buf_, &hints, &utt_unused);
         } else {
             rc = spfy_fe_synth_text(v->fe, text, &hints, &utt_unused);
         }
@@ -779,17 +801,38 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     int first_phrase_only = (getenv("SPFY_FIRST_PHRASE_ONLY") != NULL);
     if (first_phrase_only) n_phrases = 1u;
 
-    /* Inter-phrase silence (engine inserts a clearly audible pause
-     * after commas/semicolons; we insert ~200 ms of zero samples). */
-    int inter_phrase_ms = 200;
+    /* Inter-phrase silence — DEFAULT OFF as of 2026-05-19 evening.
+     *
+     * The FE pad slots at each phrase boundary already render natural
+     * silence: the leading + trailing slots of every utt have
+     * ctx[2]∈{64,65} (HP_PAU_L/R) and the unit selector pulls real
+     * recorded `pau` halfphone units for them. Those units carry the
+     * recording's low-level noise floor; concatenating two of them
+     * across an utt boundary gives the listener a natural breath
+     * pause. Engine does exactly this.
+     *
+     * The legacy 200 ms (and later per-FE-pause-driven) ZERO-padding
+     * push that lived here added clinical digital silence on top —
+     * which the WSOLA crossfade then merged with the real speech, but
+     * with the silence-floor at TRUE zero rather than the recording
+     * noise floor. The resulting silence→speech transitions sounded
+     * "edited" / "hard-cut" — diagnosed via envelope-flux analysis:
+     * with the zero pad, silence-onset attacks ramped in ≤5 ms (one
+     * 5 ms frame); with the engine's natural pad units, attacks ramp
+     * in 20-35 ms.
+     *
+     * To restore the old behaviour (e.g. if FE pad duration is too
+     * short for your input), set SPFY_INTERPHRASE_MS=<N> with N in
+     * milliseconds. SPFY_INTERPHRASE_MS=0 explicitly suppresses. */
+    int inter_phrase_ms_override = -1;
     {
         const char *e = getenv("SPFY_INTERPHRASE_MS");
-        if (e) inter_phrase_ms = atoi(e);
-        if (inter_phrase_ms < 0)   inter_phrase_ms = 0;
-        if (inter_phrase_ms > 500) inter_phrase_ms = 500;
+        if (e) {
+            inter_phrase_ms_override = atoi(e);
+            if (inter_phrase_ms_override < 0)   inter_phrase_ms_override = 0;
+            if (inter_phrase_ms_override > 500) inter_phrase_ms_override = 500;
+        }
     }
-    size_t inter_phrase_n = (size_t)inter_phrase_ms
-                          * (size_t)v->vdb.sample_rate / 1000u;
 
     /* Sink is caller-owned (CLI opened a file, SAPI a callback). WSOLA
      * streams all phrases into it; the streamer state itself is per-call. */
@@ -2454,16 +2497,20 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     fe_utt = (spfy_fe_utt_t){0};
     n_slots = 0;
 
-    /* Inter-phrase silence between phrases (skipped after last). */
-    if (phrase_idx + 1 < n_phrases && inter_phrase_n > 0) {
-        static const int16_t INTER_PHRASE_SILENCE[16000] = {0};
-        size_t cap = sizeof INTER_PHRASE_SILENCE / sizeof *INTER_PHRASE_SILENCE;
-        size_t n = inter_phrase_n < cap ? inter_phrase_n : cap;
-        /* Same align=1 fade rationale as inter-word silence; smooths the
-         * voiced→silence boundary at sentence ends. */
-        int sil_align = (getenv("SPFY_WSOLA_NO_SILENCE_FADE") != NULL)
-                        ? 0 : 1;
-        (void)spfy_wsola_push_unit(&ws, INTER_PHRASE_SILENCE, n, sil_align);
+    /* Inter-phrase silence — DEFAULT OFF (rely on FE pad slots).
+     * Re-enable by setting SPFY_INTERPHRASE_MS=<N>. See big comment
+     * above the inter_phrase_ms_override declaration for rationale. */
+    if (phrase_idx + 1 < n_phrases && inter_phrase_ms_override > 0) {
+        size_t n = (size_t)inter_phrase_ms_override
+                 * (size_t)v->vdb.sample_rate / 1000u;
+        if (n > 0) {
+            static const int16_t INTER_PHRASE_SILENCE[16000] = {0};
+            size_t cap = sizeof INTER_PHRASE_SILENCE / sizeof *INTER_PHRASE_SILENCE;
+            if (n > cap) n = cap;
+            int sil_align = (getenv("SPFY_WSOLA_NO_SILENCE_FADE") != NULL)
+                            ? 0 : 1;
+            (void)spfy_wsola_push_unit(&ws, INTER_PHRASE_SILENCE, n, sil_align);
+        }
     }
 
     /* Update sentence_idx_in_para for next phrase per engine logic
@@ -2567,25 +2614,89 @@ void spfy_cli_word_cb(void *ctx, uint32_t sample_offset)
  * its helpers: decode_unit_samples, append_recording_span, dag_join_cb,
  * load_f0_hist_curve) linkable. */
 #ifndef SPFY_SYNTH_NO_MAIN
+#include "embedded_assets.h"
+
+/* Resolve a tempdir for asset extraction. Caller doesn't free.
+ * On Windows, prefers %TEMP%; on POSIX, $TMPDIR then /tmp.
+ * Subdir name keys off the binary's mtime so a re-extract happens
+ * automatically when the executable (and thus the bundled assets)
+ * change — no stale-asset corner case. */
+static const char *resolve_asset_tempdir(const char *argv0)
+{
+    static char dir[1024];
+    const char *base = NULL;
+#ifdef _WIN32
+    base = getenv("TEMP");
+    if (!base) base = getenv("TMP");
+    if (!base) base = "C:\\Windows\\Temp";
+#else
+    base = getenv("TMPDIR");
+    if (!base) base = "/tmp";
+#endif
+    /* Best-effort uniqueness key: mtime of argv0. Failing that, just use
+     * a fixed name. The extractor overwrites whatever's there anyway. */
+    long long key = 0;
+    struct stat st;
+    if (argv0 && stat(argv0, &st) == 0) key = (long long)st.st_mtime;
+#ifdef _WIN32
+    snprintf(dir, sizeof dir, "%s\\spfy_assets_%lld", base, key);
+#else
+    snprintf(dir, sizeof dir, "%s/spfy_assets_%lld", base, key);
+#endif
+    return dir;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 10) {
+    /* Two CLI forms:
+     *   5-arg (preferred):   <voice.vin> <voice.vdb> <voice.vcf>
+     *                        "<text>" <out.wav>
+     *     hpclass + vocab + fe_tables_{a,b} are embedded in the binary
+     *     (see spfy/tools/embed_assets.py) and extracted to a tempdir
+     *     on first invocation.
+     *   9-arg (legacy):      adds explicit hpclass/vocab/fe_tables_{a,b}
+     *                        paths between the voice triplet and text —
+     *                        kept so audit scripts that pass exact data
+     *                        paths still work. */
+    const char *vin_path, *vdb_path, *vcf_path;
+    const char *hpc_path, *vocab, *tab_a, *tab_b;
+    const char *text, *out_wav;
+    spfy_asset_paths_t embedded_paths = {0};
+
+    if (argc == 6) {
+        vin_path = argv[1];
+        vdb_path = argv[2];
+        vcf_path = argv[3];
+        text     = argv[4];
+        out_wav  = argv[5];
+        const char *tmpdir = resolve_asset_tempdir(argv[0]);
+        if (spfy_assets_extract(tmpdir, &embedded_paths) != 0) {
+            fprintf(stderr, "failed to extract embedded assets to %s\n", tmpdir);
+            return 1;
+        }
+        hpc_path = embedded_paths.hpclass;
+        vocab    = embedded_paths.vocab;
+        tab_a    = embedded_paths.tables_a;
+        tab_b    = embedded_paths.tables_b;
+    } else if (argc == 10) {
+        vin_path = argv[1];
+        vdb_path = argv[2];
+        vcf_path = argv[3];
+        hpc_path = argv[4];
+        vocab    = argv[5];
+        tab_a    = argv[6];
+        tab_b    = argv[7];
+        text     = argv[8];
+        out_wav  = argv[9];
+    } else {
         fprintf(stderr,
-            "usage: %s <voice.vin> <voice.vdb> <voice.vcf> <hpclass.bin>\n"
+            "usage: %s <voice.vin> <voice.vdb> <voice.vcf> \"<text>\" <out.wav>\n"
+            "   or: %s <voice.vin> <voice.vdb> <voice.vcf> <hpclass.bin>\n"
             "          <vocab.json> <fe_tables_a> <fe_tables_b>\n"
-            "          \"<text>\" <out.wav>\n",
-            argv[0]);
+            "          \"<text>\" <out.wav>          (legacy)\n",
+            argv[0], argv[0]);
         return 2;
     }
-    const char *vin_path = argv[1];
-    const char *vdb_path = argv[2];
-    const char *vcf_path = argv[3];
-    const char *hpc_path = argv[4];
-    const char *vocab    = argv[5];
-    const char *tab_a    = argv[6];
-    const char *tab_b    = argv[7];
-    const char *text     = argv[8];
-    const char *out_wav  = argv[9];
 
     /* Voice loaded once via the shared synth library; the rest of main()
      * references voice members through the `voice.` prefix below. */

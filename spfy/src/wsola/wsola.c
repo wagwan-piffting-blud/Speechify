@@ -371,8 +371,22 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
         for (uint32_t i = 0; i < s->ola_samples; ++i)
             lag_score += (long double)t0[i] * (long double)h0[i];
     }
-    if (getenv("SPFY_WSOLA_VERBOSE") && align) {
-        /* Normalised cross-correlation (cosine) for human-readability */
+    /* Compute the normalised cross-correlation at the chosen lag. The
+     * lag-search picks the MAX-NCC lag; if even that NCC is poor, the
+     * tail and head are decorrelated and a full OLA blend over
+     * ola_samples will introduce destructive interference where Hann's
+     * sin² · head — cos² · tail terms cancel pointwise. The audible
+     * symptom is the energy-dip / "hitch" the user identified:
+     * speech amplitude drops 15-25 dB for ~10 ms at every poorly-
+     * correlated join, then resumes. Empirically ~480 such dips across
+     * a 60 s passage vs oracle's ~280.
+     *
+     * Fix: shorten eff_ola dramatically when NCC at chosen lag is
+     * close to zero (signals are decorrelated). A 16-sample (2 ms)
+     * micro-fade preserves a soft crossfade for click avoidance but
+     * collapses the destructive-interference window. */
+    double ncc_chosen = 0.0;
+    if (align && s->tail_n >= s->ola_samples) {
         const int16_t *t0 = s->tail + (s->tail_n - s->ola_samples);
         long double te = 0.0L, he = 0.0L;
         for (uint32_t i = 0; i < s->ola_samples; ++i)
@@ -381,11 +395,14 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
         for (uint32_t i = 0; i < s->ola_samples; ++i)
             he += (long double)h0[i] * (long double)h0[i];
         double denom = sqrt((double)te) * sqrt((double)he);
-        double ncc_chosen = denom > 1.0 ? (double)lag_score / denom : 0.0;
-        double ncc_zero   = denom > 1.0 ? (double)lag0_score / denom : 0.0;
-        fprintf(stderr,
-                "[wsola] push n=%4zu align=1 lag=%+4d  ncc(chosen)=%+0.3f  ncc(lag0)=%+0.3f\n",
-                n, lag, ncc_chosen, ncc_zero);
+        ncc_chosen = denom > 1.0 ? (double)lag_score / denom : 0.0;
+        if (getenv("SPFY_WSOLA_VERBOSE")) {
+            double ncc_zero = denom > 1.0 ? (double)lag0_score / denom : 0.0;
+            fprintf(stderr,
+                    "[wsola] push n=%4zu align=1 lag=%+4d  "
+                    "ncc(chosen)=%+0.3f  ncc(lag0)=%+0.3f\n",
+                    n, lag, ncc_chosen, ncc_zero);
+        }
     }
     const int16_t *new_p = samples + lag;
     /* Duration-preserving truncation: each cross-rec join emits
@@ -415,10 +432,34 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
      */
     uint32_t eff_ola = s->ola_samples;
     int psola_active = 0;
-    static int psola_disabled = -1;
-    if (psola_disabled < 0)
-        psola_disabled = (getenv("SPFY_WSOLA_NO_PSOLA") != NULL);
-    if (!psola_disabled && f0_tail > 0 && f0_head > 0 && sample_rate > 0) {
+    /* PSOLA default-OFF as of 2026-05-19 evening.
+     *
+     * Tom-family voices run the engine's PLAIN WSOLA mode
+     * (state+0x3614=1; FUN_08EE3AA0 mode=1), verified via Frida probe
+     * in [[project-engine-wsola-mode-finding-2026-05-14]]. The
+     * Selective-F0-smoothing branch (which is what `eff_ola = 2*T0`
+     * mirrored) never fires for Tom. Empirically: PSOLA widening
+     * generated ~240 extra mini-dips per 60 s of audio relative to
+     * plain WSOLA (484 vs 247 dips at default settings, vs oracle's
+     * 281), because the wider Hann window at decorrelated voiced
+     * boundaries lets the sin²/cos² mix cancel pointwise over a 17 ms
+     * window instead of 10 ms.
+     *
+     * Re-enable per-voice with SPFY_WSOLA_PSOLA=1 (for voices that
+     * actually run the engine's PSOLA branch — verify with the
+     * wsola_unit_probe Frida hook first). */
+    static int psola_enabled = -1;
+    if (psola_enabled < 0) {
+        const char *e = getenv("SPFY_WSOLA_PSOLA");
+        if (e) {
+            psola_enabled = atoi(e) ? 1 : 0;
+        } else if (getenv("SPFY_WSOLA_NO_PSOLA")) {
+            psola_enabled = 0;       /* legacy override, redundant now */
+        } else {
+            psola_enabled = 0;       /* new default */
+        }
+    }
+    if (psola_enabled && f0_tail > 0 && f0_head > 0 && sample_rate > 0) {
         uint32_t avg_f0 = ((uint32_t)f0_tail + (uint32_t)f0_head + 1u) >> 1;
         if (avg_f0 >= 50 && avg_f0 <= 400) {   /* sane human-pitch range */
             uint32_t T0 = sample_rate / avg_f0;
@@ -433,6 +474,30 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
         fprintf(stderr,
                 "[wsola] psola f0_tail=%u f0_head=%u eff_ola=%u (default=%u)\n",
                 f0_tail, f0_head, eff_ola, s->ola_samples);
+    }
+
+    /* Low-NCC short-blend fallback. When the chosen lag's NCC is poor
+     * (decorrelated tail vs head), collapse eff_ola to a 2 ms micro-
+     * fade to avoid destructive-interference dips. Threshold of 0.2
+     * keeps full blend on clearly-correlated joins (~70% of joins on
+     * the Tom corpus) and uses the short fallback on the rest.
+     * SPFY_WSOLA_LOW_NCC=<float> overrides; <=-1 disables. */
+    static double low_ncc_thresh = -2.0;
+    if (low_ncc_thresh < -1.5) {
+        const char *e = getenv("SPFY_WSOLA_LOW_NCC");
+        low_ncc_thresh = e ? atof(e) : 0.2;
+    }
+    if (align && low_ncc_thresh > -1.0 && ncc_chosen < low_ncc_thresh) {
+        /* Micro-fade: 2 ms = 16 samples @ 8 kHz. Keep ≥ 8 samples for
+         * any sane sample rate. Applies to both plain WSOLA and the
+         * PSOLA-widened branch — many decorrelated joins occur at
+         * voiced→unvoiced transitions where PSOLA still fires on the
+         * voiced tail's f0 but the head is silence-bound. Don't shrink
+         * past what eff_ola already is, so configured smaller OLAs
+         * honour their setting. */
+        uint32_t micro = sample_rate / 500;     /* 2 ms */
+        if (micro < 8) micro = 8;
+        if (micro < eff_ola) eff_ola = micro;
     }
 
     /* Energy normalisation default-OFF (2026-05-14 evening).

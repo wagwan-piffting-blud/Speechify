@@ -70,6 +70,15 @@ add_subdirectory(src/cart)
 add_subdirectory(src/usel)
 add_subdirectory(src/wsola)
 add_subdirectory(src/dsp)
+add_subdirectory(src/g2p)
+add_subdirectory(src/text_norm)
+# Baked POS dictionary lives in src/fe/ but is needed by src/fe_internal/
+# (in-house pure-C FE for ARM Android) regardless of FE config. Declared
+# at the top level so subdir order doesn't matter.
+add_library(spfy_baked_pos STATIC ${CMAKE_CURRENT_SOURCE_DIR}/src/fe/baked_pos.c)
+target_include_directories(spfy_baked_pos PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/fe)
+
+add_subdirectory(src/fe_internal)
 if(SPFY_FE_HOSTED)
     add_subdirectory(src/fe_host)
 else()

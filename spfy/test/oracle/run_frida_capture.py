@@ -114,6 +114,8 @@ HOOK_JS = {
     "hp_prune_trace":    HOOK_DIR / "hp_prune_trace_hook.js",     # 2026-05-14 final-residual: trace FUN_08e88830 inputs/threshold/n_kept for prune-precision diagnosis
     "viterbi_c7c":       HOOK_DIR / "viterbi_c7c_hook.js",        # 2026-05-14 evening: per-cand c7c/c80 run-length state dump on FUN_08e8b620 leave (for 14-UID residual diag)
     "wsola_unit_probe":  HOOK_DIR / "wsola_unit_probe_hook.js",   # 2026-05-14: WsolaUnit + sub-unit + pmark struct dump at FUN_08EE2960 entry (PSOLA port scoping)
+    "userdict_lookup":   HOOK_DIR / "userdict_lookup_hook.js",    # 2026-05-20: dump (dict, key, value) at UserDict::lookup. Used to extract engine's disambigDict contents byte-exact for fe_internal POS port.
+    "probe_fe_module":   HOOK_DIR / "probe_fe_module.js",         # 2026-05-20: one-shot diag — list FE/engine module bases in target process.
 }
 
 # ---------------------------------------------------------------------------
@@ -170,6 +172,9 @@ MASTER_TYPE_TO_HOOK: dict[str, str] = {
     "viterbi_leave":            "viterbi_dp",
     # anchor_components emits per-anchor-call frames directly (no _batch)
     "anchor_components":        "anchor_components",
+    # userdict_lookup emits per-call (dict, key, value) batches
+    "userdict_lookup_batch":    "userdict_lookup",
+    "userdict_lookup":          "userdict_lookup",
 }
 
 

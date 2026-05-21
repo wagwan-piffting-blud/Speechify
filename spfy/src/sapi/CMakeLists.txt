@@ -25,10 +25,11 @@ target_include_directories(spfy_sapi
             ${CMAKE_SOURCE_DIR}/src/wsola
             ${CMAKE_SOURCE_DIR}/src/fe
             ${CMAKE_SOURCE_DIR}/src/fe_host
+            ${CMAKE_SOURCE_DIR}/src/fe_internal
             ${CMAKE_SOURCE_DIR}/src/cart
 )
 target_link_libraries(spfy_sapi
-    PRIVATE spfy_synth_lib spfy_fe spfy_usel spfy_cart
+    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart
             spfy_voice spfy_wsola spfy_dsp spfy_common
             ole32 oleaut32 advapi32 shell32 uuid)
 target_include_directories(spfy_sapi

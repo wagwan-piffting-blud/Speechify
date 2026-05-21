@@ -80,7 +80,6 @@ add_library(spfy_fe STATIC
     ${CMAKE_SOURCE_DIR}/src/fe/stream.c
     ${CMAKE_SOURCE_DIR}/src/fe/prosody.c
     ${CMAKE_SOURCE_DIR}/src/fe/baked_dict.c
-    ${CMAKE_SOURCE_DIR}/src/fe/baked_pos.c
     "${EMBED_OUT}"
     "${PHONEID_C}"
 )
@@ -92,7 +91,7 @@ target_include_directories(spfy_fe
             ${CMAKE_SOURCE_DIR}/src/common
             ${CMAKE_SOURCE_DIR}/src/voice
             ${CMAKE_SOURCE_DIR}/src/host)
-target_link_libraries(spfy_fe PUBLIC spfy_host spfy_voice spfy_common)
+target_link_libraries(spfy_fe PUBLIC spfy_host spfy_voice spfy_common spfy_baked_pos)
 
 # fe_host.c indexes the hosted DLL's vtable via function-pointer casts
 # (vfn0 -> vfn1/vfn3 by slot number). Same Windows-ABI constraint as

@@ -500,7 +500,26 @@ static void apply_phoneme_refinement(fe_parsed_t *out) {
              * would otherwise over-refine to `ix`. Empirically built
              * from fe_tree captures across the 500-phrase oracle
              * corpus + a vocab sweep (spfy/tools/no_refine_codegen.py).
-             * SPFY_FE_HOST_NO_LEXICAL_OVERRIDE=1 disables for A/B. */
+             * SPFY_FE_HOST_NO_LEXICAL_OVERRIDE=1 disables for A/B.
+             *
+             * Plus a small hardcoded list for high-frequency function
+             * words the autogen sweep missed (or that fall outside the
+             * 500-phrase training corpus). Discovered 2026-05-19 via
+             * per-slot ctx_center attribution on the 226-phrase audit:
+             * "this" syl 0 alone accounted for 92 of 94 `ix→ih`
+             * cascade-source mismatches. */
+            static const struct { const char *w; int s; } HARD_SKIP[] = {
+                { "this", 0 },
+                { NULL, 0 }
+            };
+            int hard_skip = 0;
+            for (int hi = 0; HARD_SKIP[hi].w; ++hi) {
+                if (HARD_SKIP[hi].s == ph->syl_index
+                    && strcmp(HARD_SKIP[hi].w, wlow) == 0) {
+                    hard_skip = 1; break;
+                }
+            }
+            if (hard_skip) continue;
             if (no_refine_enabled
                 && spfy_fe_should_skip_refinement(wlow, ph->syl_index)) {
                 continue;
