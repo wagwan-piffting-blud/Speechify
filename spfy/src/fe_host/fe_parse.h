@@ -35,6 +35,11 @@ typedef struct {
     int                  n_syllables;
     int                  pause_after_ms; /* inter-word pause value, 0 if none */
     int                  phrase_id;      /* 0-based; bumps on each #{...} block */
+    /* SSML / Balabolka prosody overrides (extension fields). Parsed
+     * from the optional ",p=N,r=M" trailers in the word header. Both
+     * default to 0 (= neutral, equivalent to no annotation). */
+    int8_t               pitch_st;       /* signed semitones */
+    int8_t               rate_pct;       /* signed percent, +N = faster */
     fe_parsed_phoneme_t *phonemes;
     int                  n_phonemes;
     int                  phonemes_cap;   /* allocator bookkeeping */

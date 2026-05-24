@@ -37,15 +37,39 @@ typedef enum {
     SPFY_TOKEN_WORD            = 0,  /* lexical content; .text populated */
     SPFY_TOKEN_PHRASE_BREAK    = 1,  /* ,  ;  :  ( ) -- short pause */
     SPFY_TOKEN_SENTENCE_BREAK  = 2,  /* .  !  ?         -- long pause */
+    SPFY_TOKEN_CUSTOM_PAUSE    = 3,  /* SSML <break time="..."> -- explicit ms */
 } spfy_token_type_t;
 
 /* Token capacity caps. Words rarely exceed 32 chars; the few that do
  * (long compounds, expanded numbers) fit comfortably here. */
-#define SPFY_TOKEN_TEXT_MAX  64
+#define SPFY_TOKEN_TEXT_MAX      64
+#define SPFY_TOKEN_PHONEMES_MAX  96   /* SSML <phoneme ph="..."> override */
 
 typedef struct {
     spfy_token_type_t type;
     char              text[SPFY_TOKEN_TEXT_MAX];
+    /* SSML extensions. Zero / empty by default; set only when the
+     * input was wrapped in the relevant tag.
+     *
+     *   phonemes    ARPAbet space-separated string ("T OW0 M EY1 T OW0").
+     *               When non-empty on a WORD token, fe_internal bypasses
+     *               CMU / LTS / FUNC_RED / LEX_OVERRIDE and feeds these
+     *               phonemes straight into split_phonemes + syllabify.
+     *   pause_ms    Duration (milliseconds) for a CUSTOM_PAUSE token.
+     *               fe_internal emits `pau(p<N>)` with the precise
+     *               duration instead of the terminator-class defaults.
+     *   pitch_st    Pitch shift in semitones for a WORD token (signed).
+     *               Carried through fe_internal → tagged text → fe_parse
+     *               → slot->pitch_offset_st → synth's f0tr_mean scaling.
+     *               Zero = neutral.
+     *   rate_pct    Speed delta in percent for a WORD token (signed).
+     *               +N = N% faster (shorter durations); -N = N% slower.
+     *               Applied as durt_mean *= 100 / (100 + rate_pct).
+     *               Zero = neutral. */
+    char              phonemes[SPFY_TOKEN_PHONEMES_MAX];
+    uint16_t          pause_ms;
+    int8_t            pitch_st;
+    int8_t            rate_pct;
 } spfy_token_t;
 
 /* Tokenize + normalize `input`. Caller provides a fixed-cap output

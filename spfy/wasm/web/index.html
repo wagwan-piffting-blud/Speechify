@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Speechify WASM Demo</title>
+        <link rel="stylesheet" href="./styles.css" />
+    </head>
+    <body>
+        <main>
+            <header>
+                <h1>Speechify WASM Demo</h1>
+                <p class="sub">
+                    In-house pure-C front-end + unit-selection synth, compiled to
+                    WebAssembly. The Tom voice corpus (~92&nbsp;MB) is loaded once
+                    from a preloaded virtual filesystem.
+                </p>
+            </header>
+            <section id="status-section">
+                <div id="status" class="status">Loading WebAssembly module...</div>
+                <progress id="load-progress" max="100" value="0"></progress>
+            </section>
+            <section id="synth-section" hidden>
+                <label for="text-input">Text</label>
+                <textarea id="text-input" rows="6"
+                    placeholder="Type some text to synthesize...">The quick brown fox jumps over the lazy dog.</textarea>
+                <div class="controls">
+                    <button id="speak-btn" type="button">Speak</button>
+                    <button id="stop-btn" type="button" disabled>Stop</button>
+                    <button id="save-btn" type="button" disabled>Save WAV</button>
+                </div>
+                <div id="meta" class="meta" hidden>
+                    <span id="meta-rate"></span>
+                    <span id="meta-samples"></span>
+                    <span id="meta-elapsed"></span>
+                </div>
+            </section>
+            <footer>
+                <p>
+                    Building blocks: Tom 3.0.5 voice corpus, in-house pure-C FE
+                    (POS tagging, syllabification, prosody), USel viterbi DP, WSOLA
+                    concatenative synth. No network calls after the initial asset
+                    load; all synthesis is local in the browser.
+                </p>
+            </footer>
+        </main>
+        <script src="./index.js" type="module"></script>
+    </body>
+</html>

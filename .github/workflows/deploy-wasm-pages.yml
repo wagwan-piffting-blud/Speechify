@@ -1,0 +1,130 @@
+# Build the in-browser spfy WASM demo and deploy it to GitHub Pages.
+#
+# The demo lives under spfy/wasm/. It compiles the pure-C synth core
+# (in-house FE + USel + WSOLA) to WebAssembly via Emscripten and bakes
+# Tom's voice corpus into a preloaded virtual FS (~90 MB .data file).
+#
+# Triggers:
+#   * push to main, filtered to paths that actually affect the wasm
+#     build — the build is expensive (~5-10 min cold) so we skip it
+#     when only unrelated files changed.
+#   * workflow_dispatch — manual rebuild / first-time setup.
+#
+# Repository setup (one-time, in the GitHub UI):
+#   Settings → Pages → Build and deployment → Source: "GitHub Actions"
+#
+# Output URL: https://<user>.github.io/<repo>/
+# Asset paths in the bundle are relative, so the demo works under any
+# subpath (no PUBLIC_URL / base-path rewriting needed).
+#
+# Notes on size: GitHub Pages serves .wasm with the right MIME but does
+# NOT do content-encoding negotiation for .wasm / .data — the 90 MB
+# preloaded-FS sidecar ships uncompressed on cold loads. emscripten's
+# IndexedDB preload cache (--use-preload-cache, set in CMakeLists.txt)
+# makes repeat visits ~free. The .br/.gz siblings produced by
+# `npm run pack` are unused on Pages; we skip that step here.
+
+name: Deploy WASM demo to Pages
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "spfy/wasm/**"
+      - "spfy/src/**"
+      - "spfy/include/**"
+      - "spfy/data/tom_hpclass.bin"
+      - "en-US/tom/**"
+      - ".github/workflows/deploy-wasm-pages.yml"
+  workflow_dispatch:
+
+# Pages deployments use OIDC for keyless auth + need write access to
+# the Pages environment. contents:read is the default but spelled out
+# for clarity.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deploy per ref. We do NOT cancel-in-progress because
+# Pages deployments are atomic — letting a build finish + publish is
+# safer than cancelling mid-deploy and risking a partial state.
+concurrency:
+  group: "pages-${{ github.ref }}"
+  cancel-in-progress: false
+
+jobs:
+  # --------------------------------------------------------------------
+  # build — emscripten + webpack. Produces build/web/ ready to ship.
+  # --------------------------------------------------------------------
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      # Emscripten SDK. The setup action caches the toolchain across
+      # runs keyed by version, so warm runs install in seconds.
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: "latest"
+          actions-cache-folder: "emsdk-cache"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: spfy/wasm/package-lock.json
+
+      - name: Install JS deps
+        working-directory: spfy/wasm
+        run: npm ci
+
+      # Compile C → wasm. Emits spfy/wasm/dist/spfy_wasm.{js,wasm,data}.
+      # The .data sidecar is the preloaded virtual FS (voice + tables);
+      # CMakeLists.txt stages only the four files the runtime actually
+      # opens (tom.vin, tom8.vdb, tom.vcf, tom_hpclass.bin).
+      - name: Build WASM module
+        working-directory: spfy/wasm
+        run: ./build.sh
+
+      # Webpack production bundle into spfy/wasm/build/web/. Copies the
+      # emscripten outputs through verbatim alongside the page HTML/CSS/JS.
+      - name: Bundle web app
+        working-directory: spfy/wasm
+        run: npm run build
+
+      # GitHub Pages runs files through Jekyll by default, which silently
+      # drops anything starting with "_" (some emscripten internals can).
+      # .nojekyll disables that pre-processing.
+      - name: Disable Jekyll
+        run: touch spfy/wasm/build/web/.nojekyll
+
+      - name: List bundle contents
+        run: ls -lh spfy/wasm/build/web/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: spfy/wasm/build/web
+
+  # --------------------------------------------------------------------
+  # deploy — publish the artifact to the github-pages environment.
+  # --------------------------------------------------------------------
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

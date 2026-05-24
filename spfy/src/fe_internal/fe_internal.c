@@ -614,6 +614,9 @@ typedef struct {
     int               n_phs;
     int               syl[MAX_PHONS_PER_WORD];
     int               n_syl;
+    /* SSML / Balabolka prosody override. 0 = neutral. */
+    int8_t            pitch_st;
+    int8_t            rate_pct;
 } word_rec_t;
 
 typedef struct {
@@ -817,6 +820,19 @@ static void emit_word_rec(emit_t *e, const word_rec_t *w, char boundary_term)
     emit_str(e, pos_name(w->pos));
     emit_str(e, ",");
     emit_int(e, w->stress_lvl);
+    /* SSML / Balabolka prosody overrides. Emitted only when non-zero
+     * so plain text round-trips byte-for-byte through the audit. The
+     * format ",p=N,r=M" is a strict extension of the existing
+     * "pos,stress" prefix — parsers that don't know these keys treat
+     * them as unknown trailing fields and ignore. */
+    if (w->pitch_st != 0) {
+        emit_str(e, ",p=");
+        emit_int(e, w->pitch_st);
+    }
+    if (w->rate_pct != 0) {
+        emit_str(e, ",r=");
+        emit_int(e, w->rate_pct);
+    }
     emit_str(e, " [");
 
     /* Boundary tone goes on the LAST syllable of the focus word,
@@ -1032,6 +1048,9 @@ int spfy_fe_internal_text_to_tagged(const char *text,
 
     int char_off = 0;
     int is_first_utt = 1;
+    /* SSML <break time="..."> — when set, overrides the next inter-utt
+     * opener pause. Consumed (zeroed) by WRITE_UTT after one use. */
+    uint16_t pending_custom_pause_ms = 0;
     utt_buf_t utt;
     utt_init(&utt);
 
@@ -1041,13 +1060,28 @@ int spfy_fe_internal_text_to_tagged(const char *text,
                 ((term_char) == '.' || (term_char) == '!' \
                  || (term_char) == '?') \
                 ? " pau(p350) " : " pau(p100) "; \
+            char custom_pau[32]; \
             int was_first_utt = is_first_utt; \
             if (is_first_utt) { \
                 emit_str(&e, "#{"); \
                 { char tmp[2] = { (term_char), 0 }; emit_str(&e, tmp); } \
                 emit_str(&e, " pau(p25) "); \
                 is_first_utt = 0; \
+                /* Pending pause is NOT cleared here — the first utt's
+                 * leading pau is fixed at p25, so any SSML break that
+                 * triggered THIS flush is semantically about the gap
+                 * BETWEEN this utt and the next. The next WRITE_UTT
+                 * (which takes the else branch) consumes it then. */ \
             } else { \
+                /* Only consume pending here — this opener represents the \
+                 * silence between the previous utt's end and this utt's \
+                 * start, which is exactly what SSML <break time> means. */ \
+                if (pending_custom_pause_ms > 0) { \
+                    snprintf(custom_pau, sizeof custom_pau, \
+                             " pau(p%u) ", (unsigned)pending_custom_pause_ms); \
+                    open_pau = custom_pau; \
+                    pending_custom_pause_ms = 0; \
+                } \
                 emit_str(&e, "{"); \
                 { char tmp[2] = { (term_char), 0 }; emit_str(&e, tmp); } \
                 emit_str(&e, open_pau); \
@@ -1169,6 +1203,34 @@ int spfy_fe_internal_text_to_tagged(const char *text,
             w->char_off = char_off;
             w->char_len = (int)wl;
             char_off += (int)wl + 1;
+            /* Inherit SSML/Balabolka prosody overrides set by text_norm. */
+            w->pitch_st = toks[i].pitch_st;
+            w->rate_pct = toks[i].rate_pct;
+
+            /* SSML <phoneme ph="..."> — caller-supplied ARPAbet override.
+             * Bypass POS / FUNC_RED / LEX_OVERRIDE / CMU / LTS entirely:
+             * split + syllabify the phonemes as-is, give the word a
+             * generic POS (engine usage of POS at this point is for
+             * focus and reduction decisions; we leave both at defaults
+             * and rely on stress level computed from the override). */
+            if (toks[i].phonemes[0]) {
+                w->n_phs = split_phonemes(toks[i].phonemes, w->phs,
+                                          MAX_PHONS_PER_WORD);
+                if (w->n_phs == 0) { memset(w, 0, sizeof *w); break; }
+                w->n_syl = syllabify(w->phs, w->n_phs, w->syl);
+                w->pos   = POS_NOUN;
+                int ms = 0, pr = -1;
+                for (int k = 0; k < w->n_phs; ++k) {
+                    int s = w->phs[k].stress;
+                    if (s > ms) ms = s;
+                    if (s == 1 && pr < 0) pr = w->syl[k];
+                }
+                w->stress_lvl  = (ms > 0) ? 1 : 0;
+                w->primary_syl = pr;
+                w->is_focus    = 0;
+                ++utt.n_words;
+                break;
+            }
 
             /* Letter-by-letter spell-out for ARPAbet 2-letter combos the
              * engine lacks in its dict (ch, dh, dx, hh, jh, ng, sh, zh).
@@ -1254,6 +1316,14 @@ int spfy_fe_internal_text_to_tagged(const char *text,
             WRITE_UTT(t);
             break;
         }
+        case SPFY_TOKEN_CUSTOM_PAUSE:
+            /* SSML <break time="..." /> — stash the explicit duration so
+             * the next utt's opener emits pau(p<ms>) instead of the
+             * terminator-class default, then close the current utt as
+             * a phrase break. */
+            pending_custom_pause_ms = toks[i].pause_ms;
+            WRITE_UTT(',');
+            break;
         }
     }
 

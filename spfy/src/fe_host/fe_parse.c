@@ -286,6 +286,43 @@ static int parse_word(parser_t *p, fe_parsed_t *out) {
     if (!p_parse_int(p, &w->stress_level)) {
         p->err = 1; p->err_msg = "stress_level"; return 0;
     }
+    /* Optional SSML/Balabolka prosody trailers ",p=N" and/or ",r=M".
+     * Either may appear (or both, in either order); both omitted in the
+     * common plain-text path so the audit round-trip stays clean.
+     * The parser is liberal: unknown trailing ",key=value" pairs are
+     * accepted and skipped so the format can grow without breaking
+     * older readers. */
+    p_skip_ws(p);
+    while (p_peek(p) == ',') {
+        ++p->p;                       /* consume the ',' */
+        p_skip_ws(p);
+        char key[8] = {0};
+        int  ki = 0;
+        while (p->p < p->end && ki + 1 < (int)sizeof(key)) {
+            int c = (unsigned char)*p->p;
+            if (!(isalpha(c) || c == '_')) break;
+            key[ki++] = (char)c;
+            ++p->p;
+        }
+        key[ki] = '\0';
+        if (p_peek(p) != '=') break;  /* malformed — bail to "[" expect */
+        ++p->p;                       /* consume '=' */
+        p_skip_ws(p);
+        /* Signed integer parse (p_parse_int handles unsigned only). */
+        int sign = 1;
+        if (p_peek(p) == '-') { sign = -1; ++p->p; }
+        else if (p_peek(p) == '+')         { ++p->p; }
+        int uval = 0;
+        if (!p_parse_int(p, &uval)) {
+            p->err = 1; p->err_msg = "prosody value"; return 0;
+        }
+        int val = sign * uval;
+        if (val < -127) val = -127; else if (val > 127) val = 127;
+        if      (strcmp(key, "p") == 0) w->pitch_st = (int8_t)val;
+        else if (strcmp(key, "r") == 0) w->rate_pct = (int8_t)val;
+        /* unknown keys silently ignored — extensibility hatch. */
+        p_skip_ws(p);
+    }
     if (!p_expect_lit(p, "[")) return 0;
     if (!parse_word_body(p, w)) return 0;
     if (!p_expect_lit(p, "]")) return 0;
@@ -989,6 +1026,12 @@ int fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
                 s->ctx[2] = (int32_t)((uint32_t)phone_id * 2u + (uint32_t)side);
                 s->is_voiced = voiced;
                 s->emphasis_level = emph;
+                /* SSML / Balabolka per-word prosody overrides flow from
+                 * fe_parsed_word_t into every slot under this word.
+                 * Downstream synth multiplies f0tr_mean by 2^(st/12)
+                 * and divides durt_mean by (1 + rate_pct/100). */
+                s->pitch_offset_st = w->pitch_st;
+                s->rate_offset_pct = w->rate_pct;
                 s->sp[0] = syl_in_utt;                   /* sylInPhrase */
                 s->sp[1] = (uint32_t)ph->syl_stress;     /* sylType */
                 s->sp[2] = (uint32_t)(prev_syl_in_word + 1); /* sylInWord */

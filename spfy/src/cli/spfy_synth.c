@@ -46,8 +46,7 @@
 #include "../fe/baked_pos.h"
 
 /* In-house FE — used when SPFY_FE_INTERNAL=1 to bypass the SWIttsFe
- * DLL drive entirely. Lets us A/B audit the new path vs the hosted FE
- * and is the required path on ARM Android (no PE-executing CPU). */
+ * DLL drive entirely. Lets us A/B audit the new path vs the hosted FE. */
 #include "../fe_internal/fe_internal.h"
 #  include "../fe_host/fe_parse.h"
 
@@ -693,6 +692,11 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     uint32_t *hp_to_post = NULL;
     uint32_t *post_to_hp = NULL;
     uint32_t *hp_word_idx = NULL;
+    /* Per-hp SSML / Balabolka prosody overrides (signed; 0 = neutral).
+     * Populated alongside hp_word_idx; read in the per-slot CART block
+     * so f0tr_mean / durt_mean adjust per-word from user markup. */
+    int8_t   *hp_pitch_st = NULL;
+    int8_t   *hp_rate_pct = NULL;
     spfy_viterbi_slot_t *vslots = NULL;
     uint32_t **cbuf = NULL;
     float    **tbuf = NULL;
@@ -1031,6 +1035,45 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         hp_word_idx[hp] = word_post;
     }
 
+    /* Per-hp SSML / Balabolka prosody overrides. Built once from the
+     * parsed FE output so the CART block reads them in O(1) per slot.
+     * Tree's WORD slots are emitted in fe_parsed_t order, so we count
+     * them up to map tree-post-order word index → parsed->words[]. */
+    hp_pitch_st = (int8_t *)calloc(n_hp, sizeof *hp_pitch_st);
+    hp_rate_pct = (int8_t *)calloc(n_hp, sizeof *hp_rate_pct);
+    if (!hp_pitch_st || !hp_rate_pct) {
+        rc = SPFY_E_NOMEM; free(seg_names); goto fail;
+    }
+    {
+        /* Build word_post → parsed_word_idx map (UINT32_MAX = not a word). */
+        uint32_t *word_post_to_parsed =
+            (uint32_t *)malloc(tree.n_slots * sizeof *word_post_to_parsed);
+        if (word_post_to_parsed) {
+            for (uint32_t s = 0; s < tree.n_slots; ++s)
+                word_post_to_parsed[s] = UINT32_MAX;
+            uint32_t wc = 0;
+            for (uint32_t s = 0; s < tree.n_slots; ++s) {
+                if (tree.slots[s].kind == SPFY_SK_WORD)
+                    word_post_to_parsed[s] = wc++;
+            }
+            const fe_parsed_t *parsed_ro =
+                (const fe_parsed_t *)spfy_fe_get_parsed(v->fe);
+            if (parsed_ro) {
+                for (uint32_t hp = 0; hp < n_hp; ++hp) {
+                    uint32_t wpost = hp_word_idx[hp];
+                    if (wpost < tree.n_slots) {
+                        uint32_t pi = word_post_to_parsed[wpost];
+                        if (pi != UINT32_MAX && (int)pi < parsed_ro->n_words) {
+                            hp_pitch_st[hp] = parsed_ro->words[pi].pitch_st;
+                            hp_rate_pct[hp] = parsed_ro->words[pi].rate_pct;
+                        }
+                    }
+                }
+            }
+            free(word_post_to_parsed);
+        }
+    }
+
     uint32_t total_cands = 0, n_empty = 0;
     int verbose = (getenv("SPFY_SYNTH_DEBUG") != NULL);
     for (uint32_t hp = 0; hp < n_hp; ++hp) {
@@ -1193,6 +1236,18 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     cart.f0tr_mean *= v->pitch_scale;
                 }
                 cfc.is_f0tr = 0;
+            }
+            /* SSML / Balabolka per-word prosody overrides. Both default
+             * to 0 which collapses the scale factors to exact identity
+             * so the audit-corpus path stays bit-stable. */
+            if (cart.durt_valid && hp_rate_pct[hp]) {
+                /* +N% rate = durations shrink by 100/(100+N). */
+                cart.durt_mean *= 100.0f
+                    / (100.0f + (float)hp_rate_pct[hp]);
+            }
+            if (cart.f0tr_valid && hp_pitch_st[hp]) {
+                cart.f0tr_mean *= powf(2.0f,
+                    (float)hp_pitch_st[hp] / 12.0f);
             }
         }
 
@@ -2467,6 +2522,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     free(hp_to_post); hp_to_post = NULL;
     free(post_to_hp); post_to_hp = NULL;
     free(hp_word_idx); hp_word_idx = NULL;
+    free(hp_pitch_st);
+    free(hp_rate_pct);
     free(dag_slots); dag_slots = NULL;
     if (anchor_cands) {
         for (uint32_t i = 0; i < tree.n_slots; ++i) {
