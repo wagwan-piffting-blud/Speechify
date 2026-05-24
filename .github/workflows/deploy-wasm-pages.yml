@@ -92,7 +92,9 @@ jobs:
       # opens (tom.vin, tom8.vdb, tom.vcf, tom_hpclass.bin).
       - name: Build WASM module
         working-directory: spfy/wasm
-        run: ./build.sh
+        # Invoke via `bash` rather than `./build.sh` — the script may
+        # not carry an executable bit through a Windows git checkout.
+        run: bash build.sh
 
       # Webpack production bundle into spfy/wasm/build/web/. Copies the
       # emscripten outputs through verbatim alongside the page HTML/CSS/JS.
