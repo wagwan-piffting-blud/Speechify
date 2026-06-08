@@ -1,11 +1,11 @@
 ###NOTE###
-This file originally comes from https://web.archive.org/web/20061015011102if_/http://www.nws.noaa.gov/ops2/crs/document/vip_dicta.txt and is a Speechify dictionary/replacement list for the National Weather Service dated June 2002. It is used to help Speechify pronounce weather-related words and phrases correctly. The original file contains a list of words and phrases, along with their corresponding pronunciations or substitutions. The pronunciations are mostly given in SPR format (see the repo's README and the source for bin/spfy_dumpwav.c for more info, the SPR format entries look like this: \![...]). The original file is organized into sections, with some common weather words listed first, followed by a more extensive list of words and phrases. There is also a section for general digit substitutions, which helps Speechify pronounce numbers correctly in the context of weather reports. Use this however you wish. The original file in its entirety is below and can be found without this note at the link above. This note is only for posterity purposes. Thanks to @cajuninthesouth8075 on Discord for sending this along to me! -Wags
+# This file originally comes from https://web.archive.org/web/20061015011102if_/http://www.nws.noaa.gov/ops2/crs/document/vip_dicta.txt and is a Speechify dictionary/replacement list for the National Weather Service dated June 2002. It is used to help Speechify pronounce weather-related words and phrases correctly. The original file contains a list of words and phrases, along with their corresponding pronunciations or substitutions. The pronunciations are mostly given in SPR format (see the repo's README and the source for bin/spfy_dumpwav.c for more info, the SPR format entries look like this: \![...]). The original file is organized into sections, with some common weather words listed first, followed by a more extensive list of words and phrases. There is also a section for general digit substitutions, which helps Speechify pronounce numbers correctly in the context of weather reports. Use this however you wish. The file, with some minor modifications, in its entirety, is below and can be found unmodified at the link above. This note is only for posterity purposes. Thanks to @cajuninthesouth8075 on Discord for sending this along to me! -Wags
 ###END NOTE###
 
-VIP DICTIONARY/PRE-PROCESSOR HELP LIST
-COMPILED BY RAYMOND TANABE (WFO LOX)
-LAST UPDATED: 16 JUNE 2002
---------------------------------------
+# VIP DICTIONARY/PRE-PROCESSOR HELP LIST
+# COMPILED BY RAYMOND TANABE (WFO LOX)
+# LAST UPDATED: 16 JUNE 2002
+# --------------------------------------
 
 # SOME COMMON WEATHER WORDS
 buoy,boo'uey
@@ -148,7 +148,7 @@ CICOTT,sigh cott
 CHURUBUSCO,chareuhbusco
 cloudiness,\![1klW.di.2nxs]
 cloudy,\![1klWF.0Fi]
-cloudy, clowd ee {"ok" for donna, craig has trouble}
+cloudy, clowd ee # "ok" for donna, craig has trouble
 coastal valleys,coastal, valleys
 coesse,co essy
 coeur,core
@@ -359,7 +359,7 @@ observations,\![.1abz.R.ve.Snz]
 offshore,off shore
 ogallala,\![.1o.gx.2la.lx]
 okolona,\![2okx.1lo.nx]
-omaha,\![.1o.2mx.0hcx]
+omaha,\![.1o.2mx.0ha]
 ora,\![1orH]
 OSCEOLA,ohseeohluh
 osseo,awsseeoh
@@ -413,7 +413,7 @@ seyberts,see berts
 shortpause,\![[]]
 sidney,\![1sId.ni]
 southworth,\![1sWT.wRT]
-southern deserts,southern /!p1 deserts
+southern deserts,southern \!p1 deserts
 speicherville,speaker ville
 steuben,\![2stu.1bEn]
 st joe,saint joe
@@ -426,7 +426,7 @@ sunday night,sunday, night
 sunday through,sunday, through
 sunny,\![1sHn.i]
 sunny,sunnee
-sunny,sun knee {"ok" for donna, craig has trouble}
+sunny,sun knee # "ok" for donna, craig has trouble
 surrounding,\![2sR.1Wnd.IG]
 swayzee,\![1swe.zi]
 TALMA,tawhlmuh
@@ -440,7 +440,7 @@ TIOSA,tie oh suh
 TIPPECANOE,tip ih cuh noo
 TO,TO
 to 2.@@,to two point @ @
-tornado	\![1tor.1ne.0Fo]
+tornado,\![1tor.1ne.0Fo]
 townwood,\![1tWn.wxd]
 traveling,\![1trAv.2lIG]
 under sunny,under \![.1sHn.i]
@@ -479,8 +479,7 @@ WOLCOTTVILLE,wall cot ville
 woodruff,wood rough
 yoder,\![1yo.dR]
 
-#GENERAL DIGIT SUBST.
-
+# GENERAL DIGIT SUBST.
 PM.,pee em. \!p300
 @@@ AM,@:@@ Ay em
 @@@@ AM,@@:@@ Ay em

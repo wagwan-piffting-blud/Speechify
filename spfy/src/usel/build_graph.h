@@ -95,6 +95,13 @@ typedef struct {
      * word_n_syls[0..w-1] + s for word w's s-th syl). Length n_syls. */
     int32_t  *syl_stress;    /* raw FE syl stress (0/1/2 etc; -1 unknown) */
     uint32_t *syl_accent;    /* 0 = no accent, 1..6 = pitch-accent code */
+    /* Per-syllable phrase-boundary tone target, in signed semitones
+     * relative to the syllable's carrier F0. 0 = no boundary tone.
+     * Derived from the ToBI boundary marker in the FE accent string
+     * (L-L% → fall, L-H%/H-H% → rise). Drives the F0 target bias that
+     * steers unit selection toward naturally-contoured units (Option A
+     * of prosody realization). NULL if not populated. */
+    int8_t   *syl_btone;
     /* For each word i, an ordered list of its syllable shared ids
      * (collected by walking the word's SylStructure daughter chain). */
     uint32_t **word_syls;       /* word_syls[i] = array of syl shared ids */

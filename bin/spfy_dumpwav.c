@@ -6,6 +6,7 @@
 //   --pron "..."  Synthesize raw SPR phonemes (see --help for symbol table)
 //   --g2p         Print phoneme sequence for text (no audio output)
 //   --16k         Use 16kHz output (default: 8kHz)
+//   --dictionary F Apply a substitution dictionary (word/phrase -> SPR or text)
 //
 // Conversion (no server needed... just kidding, still needs server):
 //   --bal2spr "..." Convert Balabolka/ARPAbet phonemes to SPR format
@@ -19,6 +20,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 #include "swi_min.h"
 
 // crude wave helper
@@ -160,6 +164,156 @@ static void bal_to_spr(const char *input, char *output, int maxlen) {
     #undef MAX_TOKS
 }
 
+// --------------------------------------------------------------------------
+// Substitution dictionary (Speechify/NWS "vip_dicta.txt" style)
+//
+// Each non-comment line is  key<sep>value  where <sep> is the first comma or
+// tab.  '#' starts a comment (whole-line or inline) and is stripped.  Keys may
+// be single words, multi-word phrases, or digit patterns where '@' matches one
+// decimal digit.  '@' in the value is back-filled with the captured digits, in
+// order (e.g.  "@@@ AM" -> "@:@@ Ay em"  turns "830 AM" into "8:30 Ay em").
+// On duplicate keys an SPR value ( \![...] ) is preferred over a plain respell.
+// --------------------------------------------------------------------------
+#define DICT_MAX     2048
+#define DICT_KEYLEN  96
+#define DICT_VALLEN  256
+#define DICT_MAXCAPS 64
+
+typedef struct {
+    char key[DICT_KEYLEN];
+    char val[DICT_VALLEN];
+} DictEntry;
+
+static DictEntry g_dict[DICT_MAX];
+static int g_dictCount = 0;
+
+static int dict_val_is_spr(const char *v) {
+    return strstr(v, "\\![") != NULL;
+}
+
+static char *dict_trim(char *s) {
+    while (*s == ' ' || *s == '\t') s++;
+    size_t n = strlen(s);
+    while (n > 0 && (s[n-1]==' '||s[n-1]=='\t'||s[n-1]=='\r'||s[n-1]=='\n'))
+        s[--n] = '\0';
+    return s;
+}
+
+// Returns number of entries loaded, or -1 if the file could not be opened.
+static int dict_load(const wchar_t *path) {
+    FILE *fp = _wfopen(path, L"r");
+    if (!fp) return -1;
+
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        // Strip '#' comments (whole-line or trailing).
+        char *hash = strchr(line, '#');
+        if (hash) *hash = '\0';
+
+        // Separator = first comma or tab (handles the lone tab-delimited line).
+        char *sep = NULL;
+        for (char *p = line; *p; p++) {
+            if (*p == ',' || *p == '\t') { sep = p; break; }
+        }
+        if (!sep) continue;
+        *sep = '\0';
+
+        char *k = dict_trim(line);
+        char *v = dict_trim(sep + 1);
+        if (!*k || !*v) continue;
+
+        int newSpr = dict_val_is_spr(v);
+        int found = -1;
+        for (int i = 0; i < g_dictCount; i++) {
+            if (_stricmp(g_dict[i].key, k) == 0) { found = i; break; }
+        }
+        if (found >= 0) {
+            // SPR always wins; a later SPR beats an earlier one; a plain
+            // respell only replaces another plain respell.
+            if (newSpr || !dict_val_is_spr(g_dict[found].val)) {
+                strncpy(g_dict[found].val, v, DICT_VALLEN - 1);
+                g_dict[found].val[DICT_VALLEN - 1] = '\0';
+            }
+        } else if (g_dictCount < DICT_MAX) {
+            strncpy(g_dict[g_dictCount].key, k, DICT_KEYLEN - 1);
+            g_dict[g_dictCount].key[DICT_KEYLEN - 1] = '\0';
+            strncpy(g_dict[g_dictCount].val, v, DICT_VALLEN - 1);
+            g_dict[g_dictCount].val[DICT_VALLEN - 1] = '\0';
+            g_dictCount++;
+        }
+    }
+    fclose(fp);
+    return g_dictCount;
+}
+
+// Match key against text[0..]; '@' matches a single digit (recorded in caps[]).
+// Returns matched length in text, or -1 on mismatch.
+static int dict_match(const char *key, const char *text, char *caps, int *ncaps) {
+    int ti = 0, nc = 0;
+    for (const char *k = key; *k; k++) {
+        char tc = text[ti];
+        if (tc == '\0') return -1;
+        if (*k == '@') {
+            if (tc < '0' || tc > '9') return -1;
+            if (nc < DICT_MAXCAPS) caps[nc] = tc;
+            nc++;
+        } else if (tolower((unsigned char)tc) != tolower((unsigned char)*k)) {
+            return -1;
+        }
+        ti++;
+    }
+    *ncaps = nc;
+    return ti;
+}
+
+// Apply the loaded dictionary to 'in', writing to 'out'.  Single pass,
+// longest-match-first, token boundaries required on both sides.  Output is
+// never re-scanned, so replacements cannot chain.  Returns substitution count.
+static int dict_apply(const char *in, char *out, size_t outsz) {
+    int n = (int)strlen(in);
+    int pos = 0;
+    size_t oi = 0;
+    int subs = 0;
+
+    while (pos < n) {
+        int bestLen = 0, bestIdx = -1, bestNcaps = 0;
+        char bestCaps[DICT_MAXCAPS] = {0};
+
+        // Left token boundary: previous char must not be alphanumeric.
+        int leftOk = (pos == 0) || !isalnum((unsigned char)in[pos-1]);
+        if (leftOk) {
+            for (int i = 0; i < g_dictCount; i++) {
+                char caps[DICT_MAXCAPS];
+                int nc = 0;
+                int m = dict_match(g_dict[i].key, in + pos, caps, &nc);
+                if (m <= 0) continue;
+                // Right token boundary: next char must not be alphanumeric.
+                if (isalnum((unsigned char)in[pos + m])) continue;
+                if (m > bestLen) {
+                    bestLen = m; bestIdx = i; bestNcaps = nc;
+                    memcpy(bestCaps, caps, sizeof(caps));
+                }
+            }
+        }
+
+        if (bestIdx >= 0) {
+            const char *v = g_dict[bestIdx].val;
+            int ci = 0;
+            for (const char *p = v; *p; p++) {
+                char c = (*p == '@') ? ((ci < bestNcaps) ? bestCaps[ci++] : '@') : *p;
+                if (oi + 1 < outsz) out[oi++] = c;
+            }
+            pos += bestLen;
+            subs++;
+        } else {
+            if (oi + 1 < outsz) out[oi++] = in[pos];
+            pos++;
+        }
+    }
+    out[oi] = '\0';
+    return subs;
+}
+
 #define MAX_G2P_PHONES 256
 
 typedef struct {
@@ -282,6 +436,7 @@ static void print_usage(const wchar_t *exe) {
         L"  --g2p           Print phoneme sequence for text (ARPAbet + SPR)\n"
         L"  --bal2spr \"...\" Convert Balabolka phonemes to SPR format\n"
         L"  --spr2bal \"...\" Convert SPR phonemes to Balabolka/ARPAbet format\n"
+        L"  --dictionary F  Apply a substitution dictionary (e.g. vip_dicta.txt)\n"
         L"  --rawdump       Dump raw callback bytes to stderr (diagnostic)\n"
         L"  --16k           Use 16kHz output (default: 8kHz)\n"
         L"\n"
@@ -306,6 +461,7 @@ int wmain(int argc, wchar_t **wargv) {
     const wchar_t *pronPhonemes = NULL;
     const wchar_t *wtext = NULL;
     const wchar_t *woutPath = NULL;
+    const wchar_t *dictPath = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (wcscmp(wargv[i], L"--phonemes") == 0) {
@@ -382,6 +538,13 @@ int wmain(int argc, wchar_t **wargv) {
                 fwprintf(stderr, L"ERROR: --pron requires a phoneme string argument\n");
                 return 2;
             }
+        } else if (wcscmp(wargv[i], L"--dictionary") == 0 || wcscmp(wargv[i], L"--dict") == 0) {
+            if (i + 1 < argc) {
+                dictPath = wargv[++i];
+            } else {
+                fwprintf(stderr, L"ERROR: --dictionary requires a file path argument\n");
+                return 2;
+            }
         } else if (wcscmp(wargv[i], L"--rawdump") == 0) {
             rawDump = 1;
             enablePhonemes = 1;  // need to enable marks to get callbacks
@@ -412,6 +575,16 @@ int wmain(int argc, wchar_t **wargv) {
         return 2;
     }
 
+    // Load substitution dictionary if requested
+    if (dictPath) {
+        int nd = dict_load(dictPath);
+        if (nd < 0) {
+            fwprintf(stderr, L"ERROR: could not open dictionary file %ls\n", dictPath);
+            return 7;
+        }
+        fwprintf(stderr, L"INFO: Loaded %d dictionary entries from %ls\n", nd, dictPath);
+    }
+
     // Build the text to send
     char utf8buf[8192];
     if (pronPhonemes) {
@@ -424,6 +597,24 @@ int wmain(int argc, wchar_t **wargv) {
         _snprintf(utf8buf, sizeof(utf8buf), "\\![%s]", pronUtf8);
     } else {
         WideCharToMultiByte(CP_UTF8, 0, wtext, -1, utf8buf, sizeof(utf8buf), NULL, NULL);
+    }
+
+    // Apply the substitution dictionary to plain text (not to raw --pron phonemes).
+    // Replacements can expand the text, so use a separate, generously sized buffer.
+    char *speakBuf = utf8buf;
+    if (!pronPhonemes && g_dictCount > 0) {
+        size_t cap = strlen(utf8buf) * 32 + 4096;
+        char *db = (char*)malloc(cap);
+        if (db) {
+            int subs = dict_apply(utf8buf, db, cap);
+            fwprintf(stderr, L"INFO: Dictionary applied (%d substitution%hs)\n",
+                     subs, subs == 1 ? "" : "s");
+            if (subs > 0)
+                fprintf(stderr, "INFO: Rewritten text: %s\n", db);
+            speakBuf = db;
+        } else {
+            fwprintf(stderr, L"WARNING: dictionary buffer alloc failed; using original text\n");
+        }
     }
 
     // Open output WAV (skip for g2p-only mode)
@@ -505,11 +696,11 @@ int wmain(int argc, wchar_t **wargv) {
 
 
     // Speak
-    const unsigned char *bytes = (const unsigned char*)utf8buf;
-    unsigned len = (unsigned)strlen(utf8buf);
+    const unsigned char *bytes = (const unsigned char*)speakBuf;
+    unsigned len = (unsigned)strlen(speakBuf);
     // Auto-detect SSML: if input starts with '<speak' or '<?xml', use SSML content type
     const char *contentType = "text/plain;charset=utf-8";
-    if (strncmp(utf8buf, "<speak", 6) == 0 || strncmp(utf8buf, "<?xml", 5) == 0) {
+    if (strncmp(speakBuf, "<speak", 6) == 0 || strncmp(speakBuf, "<?xml", 5) == 0) {
         contentType = "application/synthesis+ssml";
     }
 
@@ -569,6 +760,8 @@ int wmain(int argc, wchar_t **wargv) {
         }
         printf("\n");
     }
+
+    if (speakBuf != utf8buf) free(speakBuf);
 
     return 0;
 }

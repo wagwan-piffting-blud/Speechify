@@ -264,6 +264,35 @@ static char detect_phrase_term(const char *text)
  * the hosted branch can see it. */
 static int is_arpa_vowel(const char *a);
 
+/* Classify a ToBI accent string's phrase-BOUNDARY tone into an F0
+ * ramp endpoint in signed semitones (relative to the syllable's
+ * carrier). 0 = no boundary tone. Only phrase-level boundary tones
+ * (the `X-Y%` forms) trigger a ramp; starred pitch accents (H*, L*)
+ * shape prominence and are handled via syl_accent. The two tone
+ * letters immediately preceding `%` select the contour:
+ *
+ *   L-L%  declarative fall    → -6
+ *   L-H%  continuation rise    → +4
+ *   H-L%  list-final / partial → -3
+ *   H-H%  question rise        → +6
+ *
+ * The magnitude is a nominal contour depth; downstream scaling decides
+ * how it maps to an actual F0 bias. Accepts both `L-L%` and `LL%`. */
+static int boundary_tone_target_st(const char *accent)
+{
+    if (!accent || !*accent) return 0;
+    const char *pct = strchr(accent, '%');
+    if (!pct || pct < accent + 2) return 0;
+    char hi = pct[-1];
+    char lo = pct[-2];
+    if (lo == '-' && pct >= accent + 3) lo = pct[-3];
+    if (lo == 'L' && hi == 'L') return -6;
+    if (lo == 'L' && hi == 'H') return +4;
+    if (lo == 'H' && hi == 'L') return -3;
+    if (lo == 'H' && hi == 'H') return +6;
+    return 0;
+}
+
 
 /* Hosted FE: build spfy_fe_utt_t directly from the parser's per-word
  * structure for a single phrase_id. The hosted FE has already done
@@ -310,11 +339,12 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
     out->word_syls    = (uint32_t **)calloc(total_words, sizeof *out->word_syls);
     out->syl_stress   = (int32_t  *)calloc(total_syls,  sizeof *out->syl_stress);
     out->syl_accent   = (uint32_t *)calloc(total_syls,  sizeof *out->syl_accent);
+    out->syl_btone    = (int8_t   *)calloc(total_syls,  sizeof *out->syl_btone);
     out->syl_n_segs   = (uint32_t *)calloc(total_syls,  sizeof *out->syl_n_segs);
     out->syl_segs     = (uint32_t **)calloc(total_syls,  sizeof *out->syl_segs);
     if (!out->word_shareds || !out->word_names || !out->word_n_syls
         || !out->word_syls || !out->syl_stress || !out->syl_accent
-        || !out->syl_n_segs || !out->syl_segs) {
+        || !out->syl_btone || !out->syl_n_segs || !out->syl_segs) {
         spfy_fe_utt_free(out); return SPFY_E_NOMEM;
     }
 
@@ -381,6 +411,14 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
             out->syl_stress[syl_g_idx] = (int32_t)ph0->syl_stress;
             out->syl_accent[syl_g_idx] =
                 (ph0->accent[0] && strchr(ph0->accent, '*')) ? 1u : 0u;
+            /* Phrase-boundary tone: scan the syllable's phonemes for a
+             * ToBI boundary marker (it usually rides the last phoneme). */
+            {
+                int bt = 0;
+                for (int pi = first_pi; pi <= last_pi && bt == 0; pi++)
+                    bt = boundary_tone_target_st(w->phonemes[pi].accent);
+                out->syl_btone[syl_g_idx] = (int8_t)bt;
+            }
 
             uint32_t n_seg_in_syl = (uint32_t)(last_pi - first_pi + 1);
             out->syl_n_segs[syl_g_idx] = n_seg_in_syl;
@@ -714,6 +752,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     uint32_t  *anchor_n      = NULL;
     spfy_viterbi_dag_slot_t *dag_slots = NULL;
     uint32_t  n_slots = 0;
+    /* Per-hp boundary-tone target (signed ST; 0 = none). Built from the
+     * slot tree's syllable fe_shared id → fe_utt.syl_btone, the reliable
+     * mapping (shared = global_syl_index + 1). Option A: biases the
+     * per-slot F0 target to steer unit selection toward naturally
+     * contoured units. SPFY_PROSODY_REALIZE-gated. */
+    int8_t   *hp_btone = NULL;
     int rc;
     spfy_prosody_hints_init(&hints);
 
@@ -753,7 +797,25 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
              * spfy_fe_synth_tagged → slot tree. Skips the DLL entirely.
              * Quality is lower than the hosted FE (no engine-specific
              * lexicon, simple syllabifier, no full prosody model) but
-             * portable to ARM and platforms where the DLL can't run. */
+             * portable to ARM and platforms where the DLL can't run.
+             *
+             * On Windows desktop this env var is the ONLY way to force
+             * the in-house FE — the default `spfy_fe_synth_text` call
+             * below resolves at link time to the hosted DLL backend
+             * (SPFY_FE_HOSTED=ON build) and gives 100% engine UID match
+             * since the FE output is bit-identical to the engine's. On
+             * Android NDK / WASM builds the same `spfy_fe_synth_text`
+             * call resolves to fe_stub.c which uses the in-house FE
+             * (no DLL loader on ARM / wasm32) — so on those platforms
+             * the env var is redundant. Logged once on first synth so
+             * the user can verify which backend is live. */
+            static int logged = 0;
+            if (!logged) {
+                fprintf(stderr,
+                    "[spfy] FE backend: IN-HOUSE pure-C "
+                    "(SPFY_FE_INTERNAL forced override)\n");
+                logged = 1;
+            }
             /* 64 KB tagged buffer — accommodates long passages (the
              * sioux pangram in the audit corpus runs ~30 KB tagged). */
             static char tagged_buf_[65536];
@@ -765,6 +827,19 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
             rc = spfy_fe_synth_tagged(v->fe, tagged_buf_, &hints, &utt_unused);
         } else {
+            static int logged = 0;
+            if (!logged) {
+#ifdef SPFY_FE_HOSTED
+                fprintf(stderr,
+                    "[spfy] FE backend: HOSTED DLL "
+                    "(SWIttsFe-en-US.dll, 100%% engine UID match)\n");
+#else
+                fprintf(stderr,
+                    "[spfy] FE backend: IN-HOUSE pure-C "
+                    "(no DLL loader on this build)\n");
+#endif
+                logged = 1;
+            }
             rc = spfy_fe_synth_text(v->fe, text, &hints, &utt_unused);
         }
         if (rc != SPFY_OK) {
@@ -1025,6 +1100,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         || !cand_c68 || !cand_c6c || !cand_c70 || !cand_c78) {
         rc = SPFY_E_NOMEM; free(seg_names); goto fail;
     }
+    hp_btone = (int8_t *)calloc(n_hp, sizeof *hp_btone);
+    if (!hp_btone) { rc = SPFY_E_NOMEM; free(seg_names); goto fail; }
     for (uint32_t hp = 0; hp < n_hp; ++hp) {
         uint32_t s = hp_to_post[hp];
         /* Walk parent chain HP -> SYL -> WORD. */
@@ -1033,6 +1110,18 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                              ? tree.slots[syl_post].parent_idx
                              : UINT32_MAX;
         hp_word_idx[hp] = word_post;
+        /* Per-hp boundary tone via the syllable slot's fe_shared id.
+         * fe_shared = global_syl_index + 1 (parsed_to_fe_utt assigns
+         * shared ids sequentially from 1 for the leading pad). This is
+         * the reliable HP→syllable map; the tree-word→parsed-word count
+         * is NOT (it merged adjacent words in earlier attempts). */
+        if (syl_post < tree.n_slots
+            && tree.slots[syl_post].kind == SPFY_SK_SYLLABLE
+            && fe_utt.syl_btone) {
+            uint32_t shared = tree.slots[syl_post].fe_shared;
+            if (shared >= 1 && (shared - 1) < fe_utt.n_syls)
+                hp_btone[hp] = fe_utt.syl_btone[shared - 1];
+        }
     }
 
     /* Per-hp SSML / Balabolka prosody overrides. Built once from the
@@ -1248,6 +1337,42 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             if (cart.f0tr_valid && hp_pitch_st[hp]) {
                 cart.f0tr_mean *= powf(2.0f,
                     (float)hp_pitch_st[hp] / 12.0f);
+            }
+            /* Global scale on durt CART target. SPFY_DURT_SCALE=N
+             * multiplies the per-slot duration target before USel cost
+             * is computed; values > 1.0 bias toward longer units (slower
+             * speech), < 1.0 toward shorter. Default 1.0 = exact
+             * IEEE identity (audit-invariant). Empirically the curve
+             * saturates around 1.08-1.10 — past that, USel hits poor
+             * Pareto fronts and viterbi cost spikes without further
+             * duration gain. Use 1.05-1.07 as a soft slowdown knob;
+             * for stronger slowdown, a post-WSOLA time-stretch is the
+             * cleaner architectural lever (see spfy_dsp/time_stretch). */
+            if (cart.durt_valid) {
+                static float dscale = -1.0f;
+                if (dscale < 0.0f) {
+                    const char *e = getenv("SPFY_DURT_SCALE");
+                    dscale = (e && *e) ? (float)atof(e) : 1.0f;
+                    if (dscale < 0.1f) dscale = 0.1f;
+                    if (dscale > 5.0f) dscale = 5.0f;
+                }
+                if (dscale != 1.0f) cart.durt_mean *= dscale;
+            }
+            /* Option A: boundary-tone F0 target bias. Shift the per-slot
+             * F0 target by the syllable's boundary tone so the unit-
+             * selection target cost prefers naturally-contoured units
+             * (no DSP — the chosen units are real recorded speech).
+             * Gated by SPFY_PROSODY_REALIZE; zero btone is identity, so
+             * the audit-corpus path stays bit-stable. SPFY_PROSODY_BT_GAIN
+             * scales the nominal ToBI depth into applied semitones
+             * (default 1.0 = use the depth directly). */
+            if (cart.f0tr_valid && hp_btone[hp]
+                && getenv("SPFY_PROSODY_REALIZE")) {
+                float gain = 1.0f;
+                const char *g = getenv("SPFY_PROSODY_BT_GAIN");
+                if (g) { float f = (float)atof(g); if (f >= 0.0f) gain = f; }
+                cart.f0tr_mean *= powf(2.0f,
+                    (float)hp_btone[hp] * gain / 12.0f);
             }
         }
 
@@ -2524,6 +2649,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     free(hp_word_idx); hp_word_idx = NULL;
     free(hp_pitch_st);
     free(hp_rate_pct);
+    free(hp_btone); hp_btone = NULL;
     free(dag_slots); dag_slots = NULL;
     if (anchor_cands) {
         for (uint32_t i = 0; i < tree.n_slots; ++i) {
@@ -2622,6 +2748,7 @@ cleanup:
     /* v->voicing_buf is owned by spfy_voice_t (freed by spfy_voice_free). */
     free(q5_per_slot); free(q5_has);
     free(hp_to_post); free(post_to_hp); free(hp_word_idx);
+    free(hp_btone);
     free(dag_slots);
     if (anchor_cands) {
         for (uint32_t i = 0; i < tree.n_slots; ++i) {

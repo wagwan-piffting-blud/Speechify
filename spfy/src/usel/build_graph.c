@@ -30,6 +30,7 @@ void spfy_fe_utt_free(spfy_fe_utt_t *u)
     free(u->syl_n_segs);
     free(u->syl_stress);
     free(u->syl_accent);
+    free(u->syl_btone);
     memset(u, 0, sizeof *u);
 }
 

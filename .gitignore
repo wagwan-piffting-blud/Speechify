@@ -36,3 +36,6 @@ RESUME.md
 installer/dist/
 !spfy/data/
 !spfy/data/**
+*.phn
+*.mp3
+examples/

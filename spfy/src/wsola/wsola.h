@@ -29,7 +29,22 @@
  * sized inside the struct).
  */
 
-#define SPFY_WSOLA_OLA_SAMPLES_DEFAULT 80u   /* 10 ms @ 8 kHz */
+/* 80-sample OLA was the original tuning based on the Ghidra-inferred
+ * "10 ms Hanning OLA" in SWIttsWsola::concat. Empirical A/B against
+ * engine WAV output (2026-06-08, "The quick brown fox… Speechify engine
+ * using the Tom voice"): same UIDs as engine (audit-verified) but our
+ * emit was 6.41 s vs engine's 6.84 s — losing 80 samples (10 ms) per
+ * cross-rec join across 66 joins = 660 ms cumulative.
+ *
+ * Engine's effective per-join sample loss is ~26 samples (3.25 ms), not
+ * 80. The "10 ms" docstring appears to describe the Hanning blend
+ * window SHAPE, not the duration cost per join. OLA=26 reproduces
+ * engine duration to within 1 ms with NO change to UID selection
+ * (audit bit-identical: PATH UID 6929/7594 = 91.2% before and after).
+ *
+ * SPFY_WSOLA_OLA env var still overrides at runtime; SPFY_WSOLA_OLA=80
+ * reverts to the legacy "too-fast" output for diagnostic purposes. */
+#define SPFY_WSOLA_OLA_SAMPLES_DEFAULT 26u   /* ~3.25 ms @ 8 kHz */
 #define SPFY_WSOLA_MAX_LAG_DEFAULT     80u   /* ±10 ms; matches engine's
                                               * lag search range
                                               * (state+0x04 = 80 in
