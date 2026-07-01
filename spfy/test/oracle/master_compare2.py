@@ -436,9 +436,21 @@ def main() -> None:
     ap.add_argument("--json", default=None)
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--tmpdir", default=os.environ.get("TEMP", "c:/tmp"))
-    ap.add_argument("--multi-phrase", action="store_true",
-                    help="Audit ALL phrases of each corpus entry "
-                         "(default audits phrase 0 only).")
+    # Multi-phrase comparison is the DEFAULT: the synth runner always
+    # synthesizes every phrase (it pops SPFY_FIRST_PHRASE_ONLY), so the
+    # engine-side comparison must align all phrases too. Single-phrase mode
+    # clips to utt 0 and, on multi-phrase inputs (e.g. edge_042 "Apples,
+    # oranges, etc." -> 3 comma-split phrases), mis-pairs the synth's utt-0
+    # slots against a length-fallback engine path from a later utt -> a
+    # false mismatch. Use --single-phrase to restore the legacy utt-0-only
+    # behaviour.
+    ap.add_argument("--multi-phrase", dest="multi_phrase",
+                    action="store_true", default=True,
+                    help="Audit ALL phrases of each corpus entry (default).")
+    ap.add_argument("--single-phrase", dest="multi_phrase",
+                    action="store_false",
+                    help="Legacy: audit phrase 0 only (mis-handles "
+                         "multi-phrase inputs).")
     args = ap.parse_args()
 
     if not args.exe:

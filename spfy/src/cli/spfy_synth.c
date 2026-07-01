@@ -111,7 +111,8 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
                                  const spfy_vdb_lookup_t *lookup,
                                  int align,
                                  uint8_t f0_tail, uint8_t f0_head,
-                                 uint32_t sample_rate)
+                                 uint32_t sample_rate,
+                                 float vol_gain)
 {
     int16_t *buf = NULL; size_t n = 0, nominal_n = 0;
     /* Over-decode by SPFY_WSOLA_MAX_LAG_DEFAULT (= engine's lag search
@@ -125,6 +126,17 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
                                  (uint16_t)dur, feat, vdb, lookup,
                                  over_n, &buf, &n, &nominal_n);
     if (rc != SPFY_OK) return rc;
+    /* Per-word volume (\!vp/\!vd embedded tags): scale the decoded unit
+     * before the OLA push. gain == 1.0 (the untagged default) is a no-op so
+     * normal synth stays byte-identical. */
+    if (vol_gain != 1.0f && buf) {
+        for (size_t i = 0; i < n; ++i) {
+            float v = (float)buf[i] * vol_gain;
+            if (v >  32767.0f) v =  32767.0f;
+            if (v < -32768.0f) v = -32768.0f;
+            buf[i] = (int16_t)lrintf(v);
+        }
+    }
     if (getenv("SPFY_TRACE_UNITS")) {
         /* Cumulative sample-count tracker so the user can map output
          * waveform positions back to which unit was being emitted. */
@@ -649,6 +661,327 @@ static const char *spr_to_arpabet(char c)
     return NULL;
 }
 
+/* ================================================================== */
+/* Embedded \!-tag pre-pass (Speechify User's Guide ch. 2, FE/text tags)*/
+/*                                                                      */
+/* The real engine resolves user-facing \! embedded tags in            */
+/* SWIttsSSML.dll, UPSTREAM of the FE — the FE DLL has no tag parser    */
+/* (it spells \!p300 out as "p three hundred"). We mirror the          */
+/* text-layer subset here as a portable pure-C text transform that runs */
+/* before FE dispatch, so it works on every backend (hosted DLL,        */
+/* in-house, WASM, Android):                                            */
+/*                                                                      */
+/*   \!eos          -> sentence terminator on the preceding word        */
+/*   \!ts0/c/a/r    -> character spellout modes (expand spanned chars)   */
+/*   \!ny0 / \!ny1  -> 4-digit number as quantity / year (en default)    */
+/*                                                                      */
+/* \!pN pauses and \![SPR] pass through untouched to the inline builder. */
+/* Engine-layer tags (\!bm \!di \!vp \!vd \!rp \!rd) are a later batch;  */
+/* any other \!-prefixed token is dropped, per the guide's "unknown \!   */
+/* tags are ignored in the speech output" rule.                         */
+
+/* '0'->"zero" .. '9'->"nine", else NULL. */
+static const char *etag_digit_name(int c)
+{
+    static const char *D[10] = {"zero","one","two","three","four",
+                                "five","six","seven","eight","nine"};
+    return (c >= '0' && c <= '9') ? D[c - '0'] : NULL;
+}
+
+/* Spoken letter name for \!tsa / \!tsc. Forms attested in the guide
+ * examples (a->ay, i->aye, l->ell, m->emm, n->en, p->pea, r->ar,
+ * s->ess, t->tee, z->zee, b->bee, c->cee, e->ee, f->eff); the rest use
+ * the conventional spoken spelling the FE pronounces cleanly. */
+static const char *etag_letter_name(int c)
+{
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if (c < 'a' || c > 'z') return NULL;
+    static const char *L[26] = {
+        "ay","bee","cee","dee","ee","eff","jee","aych","aye","jay",
+        "kay","ell","emm","en","oh","pea","cue","ar","ess","tee",
+        "you","vee","double you","eks","wy","zee"
+    };
+    return L[c - 'a'];
+}
+
+/* International Radio (NATO) alphabet for \!tsr. */
+static const char *etag_radio_name(int c)
+{
+    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+    if (c < 'a' || c > 'z') return NULL;
+    static const char *R[26] = {
+        "alpha","bravo","charlie","delta","echo","foxtrot","golf",
+        "hotel","india","juliet","kilo","lima","mike","november",
+        "oscar","papa","quebec","romeo","sierra","tango","uniform",
+        "victor","whiskey","xray","yankee","zulu"
+    };
+    return R[c - 'a'];
+}
+
+/* Spoken name of a punctuation/symbol char for all-character spellout
+ * (\!tsc). NULL for chars with no special name (caller emits verbatim).
+ * Dash/comma attested in the guide ("...dash bee...", "...comma..."). */
+static const char *etag_symbol_name(int c)
+{
+    switch (c) {
+        case '-':  return "dash";       case ',':  return "comma";
+        case '.':  return "period";     case '/':  return "slash";
+        case '\\': return "backslash";  case '@':  return "at";
+        case '#':  return "pound";      case '$':  return "dollar";
+        case '%':  return "percent";    case '&':  return "and";
+        case '*':  return "star";       case '+':  return "plus";
+        case '=':  return "equals";     case '!':  return "exclamation point";
+        case '?':  return "question mark"; case ':': return "colon";
+        case ';':  return "semicolon";  case '(':  return "open paren";
+        case ')':  return "close paren";case '[':  return "open bracket";
+        case ']':  return "close bracket"; case '{': return "open brace";
+        case '}':  return "close brace";case '<':  return "less than";
+        case '>':  return "greater than"; case '\'': return "apostrophe";
+        case '"':  return "quote";      case '_':  return "underscore";
+        case '|':  return "bar";        case '~':  return "tilde";
+        case '`':  return "backtick";   case '^':  return "caret";
+        default:   return NULL;
+    }
+}
+
+static const char *ETAG_ONES[20] = {
+    "zero","one","two","three","four","five","six","seven","eight","nine",
+    "ten","eleven","twelve","thirteen","fourteen","fifteen","sixteen",
+    "seventeen","eighteen","nineteen"
+};
+static const char *ETAG_TENS[10] = {
+    "","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"
+};
+
+/* Cardinal words for 0..99 -> buf; returns bytes written (excl NUL). */
+static int etag_cardinal_2(int n, char *buf, size_t cap)
+{
+    if (n < 20)        return snprintf(buf, cap, "%s", ETAG_ONES[n]);
+    if (n % 10 == 0)   return snprintf(buf, cap, "%s", ETAG_TENS[n / 10]);
+    return snprintf(buf, cap, "%s %s", ETAG_TENS[n / 10], ETAG_ONES[n % 10]);
+}
+
+/* Cardinal (quantity) words for a 4-digit number 1000..9999, e.g.
+ * 1945 -> "one thousand nine hundred forty five". \!ny0 reading. */
+static int etag_cardinal_4(int n, char *buf, size_t cap)
+{
+    int th = n / 1000, hu = (n / 100) % 10, rest = n % 100;
+    char *o = buf, *eo = buf + cap;
+    o += snprintf(o, (size_t)(eo - o), "%s thousand", ETAG_ONES[th]);
+    if (hu)   o += snprintf(o, (size_t)(eo - o), " %s hundred", ETAG_ONES[hu]);
+    if (rest) {
+        o += snprintf(o, (size_t)(eo - o), " ");
+        o += etag_cardinal_2(rest, o, (size_t)(eo - o));
+    }
+    return (int)(o - buf);
+}
+
+/* If `p` begins with "\!"<kw> AND the char after <kw> is a valid tag
+ * boundary (not alphanumeric — a tag "cannot be followed immediately by
+ * an alphanumeric character"), return p advanced past the keyword; else
+ * NULL. */
+static const char *etag_after(const char *p, const char *kw)
+{
+    if (p[0] != '\\' || p[1] != '!') return NULL;
+    size_t kn = strlen(kw);
+    if (strncmp(p + 2, kw, kn) != 0) return NULL;
+    if (isalnum((unsigned char)p[2 + kn])) return NULL;
+    return p + 2 + kn;
+}
+
+/* True when `text` carries an embedded \! tag this pre-pass resolves
+ * (eos / spellout / year) or any \! token other than \![SPR] / \!pN,
+ * which the downstream inline builder owns. Plain text and SPR-only /
+ * pause-only text return 0 so their existing paths stay byte-identical. */
+static int spfy_etags_need_resolve(const char *text)
+{
+    for (const char *q = text; (q = strstr(q, "\\!")) != NULL; q += 2) {
+        int c = (unsigned char)q[2];
+        if (c == '[') continue;                              /* \![SPR]  */
+        if (c == 'p' && isdigit((unsigned char)q[3])) continue; /* \!pN  */
+        return 1;
+    }
+    return 0;
+}
+
+/* Match `\!<vp|vd|rp|rd>(<digits>|r)` (volume/rate control) at p with a
+ * valid tag boundary. On match sets *knd ('v'/'r'), *rel ('p' port /
+ * 'd' baseline), *reset, *val, and returns p advanced past the tag; else
+ * NULL. */
+static const char *etag_vr(const char *p, int *knd, int *rel, int *reset, int *val)
+{
+    if (p[0] != '\\' || p[1] != '!') return NULL;
+    int k = (unsigned char)p[2], r = (unsigned char)p[3];
+    if ((k != 'v' && k != 'r') || (r != 'p' && r != 'd')) return NULL;
+    const char *q = p + 4;
+    if (*q == 'r' && !isalnum((unsigned char)q[1])) {
+        *knd = k; *rel = r; *reset = 1; *val = 0; return q + 1;
+    }
+    if (isdigit((unsigned char)*q)) {
+        int n = 0; const char *d = q;
+        while (isdigit((unsigned char)*d)) { n = n * 10 + (*d - '0'); d++; }
+        if (isalpha((unsigned char)*d)) return NULL;   /* tag can't be followed by alpha */
+        *knd = k; *rel = r; *reset = 0; *val = n; return d;
+    }
+    return NULL;
+}
+
+/* Resolve eos / spellout / year embedded tags into plain text the FE
+ * handles natively, AND emit parallel per-output-char volume/rate maps
+ * from the \!vp/\!vd/\!rp/\!rd tags (consumed post-FE via each word's
+ * char_start). Returns a malloc'd string (caller frees) or NULL on OOM;
+ * *out_vol / *out_rate (each malloc'd, same length as the result, % values
+ * where 0 means "default 100") are set on success. \!pN, \![SPR], and
+ * <...> markup pass through verbatim; spellout is suspended inside them. */
+static char *spfy_etags_resolve(const char *text,
+                                uint16_t **out_vol, uint16_t **out_rate)
+{
+    size_t len = strlen(text);
+    size_t cap = len * 16 + 256;          /* worst case: radio / cardinal */
+    char *out = (char *)malloc(cap);
+    uint16_t *mvol = (uint16_t *)calloc(cap, sizeof *mvol);
+    uint16_t *mrate = (uint16_t *)calloc(cap, sizeof *mrate);
+    if (!out || !mvol || !mrate) { free(out); free(mvol); free(mrate); return NULL; }
+    char *o = out, *eo = out + cap - 64;  /* slack for one token */
+
+    int sp = '0';   /* spellout: '0' default, 'c' all, 'a' alnum, 'r' radio */
+    int ny = '1';   /* year mode: '1' year (default), '0' quantity         */
+    int last = 0;   /* last non-space char emitted (for \!eos dedup)       */
+
+    /* Volume/rate state. Port-specific and baseline both default to 100%
+     * (the CLI has no port; a SAPI port value would seed port_*). `pv`/`pr`
+     * are the volume/rate currently in effect; the maps are filled lazily
+     * from `filled` up to the current output position whenever they change
+     * or at the end. */
+    int port_vol = 100, base_vol = 100, port_rate = 100, base_rate = 100;
+    int pv = 100, pr = 100;
+    size_t filled = 0;
+#define ETAG_FLUSH() do { size_t _e = (size_t)(o - out); \
+        for (size_t _i = filled; _i < _e; _i++) { mvol[_i] = (uint16_t)pv; \
+            mrate[_i] = (uint16_t)pr; } filled = _e; } while (0)
+
+    const char *p = text;
+    while (*p && o < eo) {
+        const char *a;
+        /* ---- \!vp/\!vd/\!rp/\!rd volume & rate control ---- */
+        {
+            int k, rel, rst, val;
+            const char *a2 = etag_vr(p, &k, &rel, &rst, &val);
+            if (a2) {
+                ETAG_FLUSH();                    /* chars so far keep old pv/pr */
+                int basis = (rel == 'p') ? (k == 'v' ? port_vol : port_rate)
+                                         : (k == 'v' ? base_vol : base_rate);
+                int nv = rst ? basis : (val * basis / 100);
+                if (k == 'v') { if (nv < 0) nv = 0; pv = nv; }
+                else { if (nv < 33) nv = 33; if (nv > 300) nv = 300; pr = nv; }
+                p = a2; continue;
+            }
+        }
+        /* ---- mode tags (consumed, no output) ---- */
+        if      ((a = etag_after(p, "ts0"))) { sp = '0'; p = a; continue; }
+        else if ((a = etag_after(p, "tsc"))) { sp = 'c'; p = a; continue; }
+        else if ((a = etag_after(p, "tsa"))) { sp = 'a'; p = a; continue; }
+        else if ((a = etag_after(p, "tsr"))) { sp = 'r'; p = a; continue; }
+        else if ((a = etag_after(p, "ny0"))) { ny = '0'; p = a; continue; }
+        else if ((a = etag_after(p, "ny1"))) { ny = '1'; p = a; continue; }
+
+        /* ---- \!eos: force a sentence end on the preceding word ---- */
+        if ((a = etag_after(p, "eos"))) {
+            if (last != '.' && last != '!' && last != '?') {
+                if (o > out && o[-1] == ' ') o--;   /* swallow trailing space */
+                *o++ = '.'; last = '.';
+            }
+            p = a; continue;
+        }
+
+        /* ---- pass-through tokens (no spellout inside) ---- */
+        if (p[0] == '\\' && p[1] == '!' && p[2] == '[') {       /* \![SPR]   */
+            const char *close = strchr(p + 3, ']');
+            const char *e = close ? close + 1 : p + strlen(p);
+            while (p < e && o < eo) *o++ = *p++;
+            last = 'x'; continue;
+        }
+        if (p[0] == '\\' && p[1] == '!' && p[2] == 'p'
+            && isdigit((unsigned char)p[3])) {                  /* \!pN      */
+            *o++ = *p++; if (o < eo) *o++ = *p++;               /* "\!"      */
+            while (o < eo && (*p == 'p' || isdigit((unsigned char)*p))) *o++ = *p++;
+            last = 'x'; continue;
+        }
+        if (p[0] == '<') {                                      /* SSML/pron */
+            const char *gt = strchr(p, '>');
+            const char *e = gt ? gt + 1 : p + strlen(p);
+            while (p < e && o < eo) *o++ = *p++;
+            last = 'x'; continue;
+        }
+
+        /* ---- other / unknown \! token: dropped (guide: ignored) ---- */
+        if (p[0] == '\\' && p[1] == '!') {
+            p += 2;
+            while (*p && !isspace((unsigned char)*p) && *p != '[') p++;
+            if (*p == '[') { const char *c = strchr(p, ']'); p = c ? c + 1 : p + strlen(p); }
+            continue;
+        }
+
+        /* ---- whitespace: emit verbatim (word separator) ---- */
+        if (isspace((unsigned char)*p)) { *o++ = *p++; continue; }
+
+        int c = (unsigned char)*p;
+
+        /* ---- spellout modes ---- */
+        if (sp != '0') {
+            const char *name = NULL;
+            if (sp == 'c') {
+                if (isdigit(c))      name = etag_digit_name(c);
+                else if (isalpha(c)) name = etag_letter_name(c);
+                else                 name = etag_symbol_name(c);
+            } else if (sp == 'a') {
+                if (isdigit(c))      name = etag_digit_name(c);
+                else if (isalpha(c)) name = etag_letter_name(c);
+            } else { /* 'r' radio */
+                if (isdigit(c))      name = etag_digit_name(c);
+                else if (isalpha(c)) name = etag_radio_name(c);
+            }
+            if (name) {
+                size_t nl = strlen(name);
+                if (o + nl + 2 >= eo) break;
+                if (o > out && o[-1] != ' ') *o++ = ' ';
+                memcpy(o, name, nl); o += nl; *o++ = ' ';
+                last = (unsigned char)name[nl - 1];
+                p++; continue;
+            }
+            /* alnum-mode punctuation / unmapped symbol: emit verbatim so the
+             * FE interprets it normally (may trigger a phrase break). */
+            *o++ = (char)c; last = c; p++; continue;
+        }
+
+        /* ---- default mode: \!ny0 forces 4-digit quantity reading ---- */
+        if (ny == '0' && isdigit(c)) {
+            int nd = 0; while (isdigit((unsigned char)p[nd])) nd++;
+            int prev_alnum = (o > out && isalnum((unsigned char)o[-1]));
+            int nxt = (unsigned char)p[nd];
+            if (nd == 4 && !prev_alnum && nxt != '.' && nxt != ',') {
+                int val = (p[0]-'0')*1000 + (p[1]-'0')*100
+                        + (p[2]-'0')*10   + (p[3]-'0');
+                if (val >= 1000) {
+                    if (o > out && o[-1] != ' ') *o++ = ' ';
+                    int w = etag_cardinal_4(val, o, (size_t)(eo - o));
+                    if (w > 0 && o + w < eo) {
+                        o += w; last = o[-1]; p += 4; continue;
+                    }
+                }
+            }
+        }
+
+        *o++ = (char)c; last = c; p++;
+    }
+    ETAG_FLUSH();
+#undef ETAG_FLUSH
+    *o = '\0';
+    *out_vol = mvol;
+    *out_rate = mrate;
+    return out;
+}
+
 /* Parse `\\![SPR]` and emit an FE tagged-output string. SPR `.0`/`.1`
  * (`.2`) starts a syllable with given stress; subsequent single chars
  * are phonemes. Output matches the FE's own tagged format so
@@ -656,8 +989,17 @@ static const char *spr_to_arpabet(char c)
  *
  * Output: #{. pau(p25) <SPR (0,N) undef,STRESS [.S,H* arpa(p100) ... ] > pau(p50) } %%
  *
+ * When `phrase_final` is set, the LAST syllable carries the `;L-L%`
+ * boundary tone (falling intonation) the engine puts on any word that ends
+ * a phrase/utterance, so an inline-SPR word at a phrase boundary falls like
+ * a natural one instead of staying flat. The first syllable keeps its `H*`
+ * pitch accent (unless it is also the last, in which case the boundary tone
+ * takes the slot — matching the engine's single-syllable phrase-final form,
+ * e.g. `is` -> `.1;L-L%`).
+ *
  * Returns positive byte count on success, 0 on parse failure. */
-static int spr_inline_to_tagged(const char *text, char *out, size_t out_n)
+static int spr_inline_to_tagged(const char *text, char *out, size_t out_n,
+                                int phrase_final)
 {
     const char *p = strchr(text, '[');
     if (!p) return 0;
@@ -665,10 +1007,13 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n)
     const char *end_br = strrchr(p, ']');
     if (!end_br) return 0;
     int max_stress = 0;
+    const char *last_syl = NULL;
     for (const char *q = p; q < end_br; ++q)
         if (*q == '.' && q + 1 < end_br
-            && q[1] >= '0' && q[1] <= '9'
-            && (q[1] - '0') > max_stress) max_stress = q[1] - '0';
+            && q[1] >= '0' && q[1] <= '9') {
+            if ((q[1] - '0') > max_stress) max_stress = q[1] - '0';
+            last_syl = q;                    /* track final syllable marker */
+        }
     char *o = out;
     char *eo = out + out_n - 1;
     int n = snprintf(o, (size_t)(eo - o),
@@ -681,13 +1026,16 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n)
         if (*q == ' ' || *q == '\t') { ++q; continue; }
         if (*q == '.' && q + 1 < end_br
             && q[1] >= '0' && q[1] <= '9') {
+            const char *marker = q;          /* this syllable's '.' */
             int stress = q[1] - '0';
             q += 2;
+            /* Boundary tone on the phrase-final syllable wins the accent
+             * slot; otherwise the first syllable carries the H* accent. */
+            const char *accent = (phrase_final && marker == last_syl) ? ";L-L%"
+                               : first_syl                            ? ",H*"
+                               :                                        "";
             n = snprintf(o, (size_t)(eo - o),
-                "%s.%d%s ",
-                first_syl ? "" : " ",
-                stress,
-                first_syl ? ",H*" : "");
+                "%s.%d%s ", first_syl ? "" : " ", stress, accent);
             if (n < 0) break;
             o += n;
             first_syl = 0;
@@ -707,13 +1055,326 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n)
     return (int)(o - out);
 }
 
+/* Inline-markup segment kinds. PLAIN runs go through the DLL FE; the two
+ * special kinds carry explicit pronunciation the DLL FE cannot read and
+ * would spell out literally. */
+enum { SEG_PLAIN = 0, SEG_SPR, SEG_PRON, SEG_PAUSE };
+
+/* `lt` points at a '<'. True if it opens a `<pron ...>` tag — name matched
+ * case-insensitively and delimited by whitespace, '/', or '>'. */
+static int is_pron_open(const char *lt)
+{
+    static const char kw[] = "pron";
+    if (lt[0] != '<') return 0;
+    for (int i = 0; i < 4; i++) {
+        int c = (unsigned char)lt[1 + i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c != kw[i]) return 0;
+    }
+    int d = (unsigned char)lt[5];
+    return d == '\0' || isspace(d) || d == '/' || d == '>';
+}
+
+/* One-past-end of a `<pron ...>` construct starting at `lt`: past `/>` for
+ * the self-closing form, past `</pron>` for `<pron ...>annotation</pron>`,
+ * or just past the open tag's `>` if no close tag follows. NULL if there is
+ * no `>` at all. */
+static const char *pron_construct_end(const char *lt)
+{
+    const char *gt = strchr(lt, '>');
+    if (!gt) return NULL;
+    if (gt > lt && gt[-1] == '/') return gt + 1;        /* <pron .../>        */
+    const char *close = strstr(gt + 1, "</pron>");       /* <pron ...>x</pron> */
+    if (close) { const char *cg = strchr(close, '>'); if (cg) return cg + 1; }
+    return gt + 1;                                        /* unclosed open tag */
+}
+
+/* Find the next inline-markup token (`\![...]` SPR escape, `\!pN` pause,
+ * or `<pron ...>` tag) at or after `s`. On success returns its start, sets
+ * *kind and *tok_end (one-past). Returns NULL if none remains. Unterminated
+ * tokens (no `]` / no `>`) are skipped — treated as plain text. */
+static const char *find_inline_token(const char *s, int *kind,
+                                     const char **tok_end)
+{
+    for (const char *q = s; *q; ++q) {
+        if (q[0] == '\\' && q[1] == '!' && q[2] == '[') {
+            const char *close = strchr(q + 3, ']');
+            if (close) { *kind = SEG_SPR; *tok_end = close + 1; return q; }
+        } else if (q[0] == '\\' && q[1] == '!' && q[2] == 'p'
+                   && isdigit((unsigned char)q[3])) {
+            const char *e = q + 3;
+            while (isdigit((unsigned char)*e)) ++e;
+            *kind = SEG_PAUSE; *tok_end = e; return q;          /* \!pN */
+        } else if (q[0] == '<' && is_pron_open(q)) {
+            const char *e = pron_construct_end(q);
+            if (e) { *kind = SEG_PRON; *tok_end = e; return q; }
+        }
+    }
+    return NULL;
+}
+
+/* True when `text` carries inline markup the DLL FE can't read — an
+ * `\![...]` SPR escape, a `\!pN` pause, or a `<pron ...>` tag — and so must
+ * be routed through build_inline_mixed_tagged (which also covers the lone-
+ * token case). Plain text returns 0. */
+static int spfy_text_has_inline_markup(const char *text)
+{
+    int kind; const char *te;
+    return find_inline_token(text, &kind, &te) != NULL;
+}
+
+/* Remove the single `;L-L%` phrase-final boundary tone an in-house-FE core
+ * carries when a `<pron>` word is phonemized in isolation, for use when the
+ * word is NOT phrase-final in the merged sentence (keeps mid-sentence pron
+ * words from falling under SPFY_PROSODY_REALIZE). */
+static void strip_boundary_tone(char *s)
+{
+    char *b = strstr(s, ";L-L%");
+    if (b) memmove(b, b + 5, strlen(b + 5) + 1);
+}
+
+/* Locate the inner word/pause "core" of one tagged-output block: the span
+ * AFTER the leading pad `pau(...)` and BEFORE the trailing pad `pau(...)`.
+ * Every block (DLL-FE or spr_inline_to_tagged) is wrapped as
+ *   `#{<T> pau(pNN) <word>...<word> pau(pNN) } %%`
+ * so the leading/trailing pads are the FIRST and LAST `pau(` occurrences.
+ * Internal pads (a comma break's `pau(p50) } {. pau(p25)`) sit between
+ * them and are kept verbatim. Returns 1 and sets start+len on success, or
+ * 0 when the block has no word core (empty / punctuation-only utterance). */
+static int spr_tagged_core(const char *block, const char **start, size_t *len)
+{
+    const char *first = strstr(block, "pau(");
+    if (!first) return 0;
+    const char *after = strchr(first, ')');
+    if (!after) return 0;
+    after++;                                 /* just past the leading pad's ) */
+
+    const char *last = NULL, *q = block;     /* trailing pad = last "pau(" */
+    while ((q = strstr(q, "pau(")) != NULL) { last = q; q += 4; }
+    if (!last || last <= after) return 0;    /* no distinct trailing pad */
+
+    while (after < last && (unsigned char)*after <= ' ') after++;
+    const char *e = last;
+    while (e > after && (unsigned char)e[-1] <= ' ') e--;
+    if (e <= after) return 0;
+    *start = after;
+    *len = (size_t)(e - after);
+    return 1;
+}
+
+/* Map a character to the tagged-output phrase-terminator marker it implies,
+ * or 0 if it is not phrase-breaking punctuation. Comma / semicolon and
+ * period / `!` / `?` pass through verbatim (all accepted by the tagged
+ * parser); colon maps to ';' since the parser has no ':' marker. Used to
+ * decide whether an inline-SPR segment junction needs a phrase break. */
+static char spr_break_marker(int c)
+{
+    switch (c) {
+        case ',': case ';':
+        case '.': case '!': case '?': return (char)c;
+        case ':':                     return ';';
+        default:                      return 0;
+    }
+}
+
+/* Build ONE flowing tagged-output utterance from text that mixes plain
+ * words with inline markup — `\![...]` SPR escapes, `\!pN` pause tags,
+ * and/or `<pron ...>` tags — none of which the DLL FE can read (it would
+ * spell the markup out literally).
+ *
+ * `\!pN` is not phonemized: it injects a `pau(pN)` at its position — either
+ * REPLACING an adjacent punctuation pause (when it sits immediately before
+ * the mark) or ADDING one (elsewhere), matching the User's Guide.
+ *
+ * Rendering each segment as its own utterance (the obvious approach) gives
+ * every run its own leading + trailing `pau` pad, so at a markup junction
+ * the plain run's trailing pad and the markup run's leading pad stack into
+ * a long, unnatural silence — and there is no cross-word WSOLA join.
+ * Instead we phonemize each run with the right backend — plain runs via the
+ * DLL FE, SPR via spr_inline_to_tagged, `<pron>` via the in-house FE (which
+ * owns the Balabolka `<pron sym=...>` parser) — strip each block down to its
+ * word core (dropping the OUTER pad pauses), and concatenate the cores under
+ * a SINGLE leading/trailing pad. The markup words then sit inline among the
+ * plain words in one phrase, flowing as a continuation, and downstream
+ * USel/WSOLA join across the boundary like any other word pair.
+ *
+ * Phrase-breaking punctuation that lands at a segment JUNCTION (e.g. the
+ * comma in `\![radio], commercial` — which the FE silently drops from a
+ * segment-edge position) is re-materialised as a real phrase break so the
+ * comma pause is preserved; only spans WITHOUT such punctuation join as a
+ * pause-free continuation. A markup word that ends up phrase-final keeps its
+ * `;L-L%` boundary tone (falling intonation); a non-final one has it removed.
+ *
+ * Returns a malloc'd tagged string (caller frees) or NULL on failure. */
+static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
+{
+    size_t tlen   = strlen(text);
+    /* DLL-FE output expands plain text by a large factor (each word grows
+     * to `<word (s,l) pos,k [.k,acc phon(pNNN) ...]>`); size generously and
+     * bound-check on append so we never overflow. */
+    size_t segcap = tlen * 80 + 65536;
+    size_t outcap = segcap + 1024;
+    char *seg = (char *)malloc(tlen + 1);
+    char *segbuf = (char *)malloc(segcap);
+    char *acc = (char *)malloc(outcap);
+    if (!seg || !segbuf || !acc) { free(seg); free(segbuf); free(acc); return NULL; }
+
+    size_t acc_len = 0;
+    acc_len += (size_t)snprintf(acc, outcap, "#{. pau(p25) ");
+
+    const char *p = text;
+    int ok = 0, any_core = 0;
+    char pend_break = 0;                      /* break punct trailing prev seg */
+    int pend_pause = 0;                       /* \!pN duration to inject (ms)  */
+    while (*p) {
+        int kind = SEG_PLAIN;
+        const char *tok_end = NULL;
+        const char *tok = find_inline_token(p, &kind, &tok_end);
+        const char *seg_start = p;
+        const char *seg_end;
+        if (tok == p) {                      /* this segment IS a markup token */
+            seg_end = tok_end;
+        } else if (tok) {                    /* plain run up to the next token */
+            seg_end = tok; kind = SEG_PLAIN;
+        } else {                             /* trailing plain run             */
+            seg_end = p + strlen(p); kind = SEG_PLAIN;
+        }
+        int is_markup = (kind != SEG_PLAIN);
+        size_t seg_len = (size_t)(seg_end - seg_start);
+        p = seg_end;
+        if (seg_len == 0) continue;
+
+        /* `\!pN` pause: not a phonemizable run — record the duration and
+         * whether it sits immediately before punctuation, then apply it at
+         * the next junction (or before the closing pad). Per the guide a
+         * pause right before a punctuation mark REPLACES that mark's default
+         * pause; elsewhere it adds one. `pend_break` is left untouched so a
+         * preceding comma still triggers its phrase break. */
+        if (kind == SEG_PAUSE) {
+            int n = atoi(seg_start + 3);     /* digits after "\!p"        */
+            if (n < 1)     n = 1;
+            if (n > 32767) n = 32767;        /* guide valid range 1..32767 */
+            pend_pause = n;
+            continue;
+        }
+
+        /* Skip whitespace-only plain runs (the space between a word and a
+         * markup token) — no phonemes, and the FE would emit an empty utt.
+         * A pending junction break carries across to the next real seg. */
+        if (!is_markup) {
+            int ws_only = 1;
+            for (size_t i = 0; i < seg_len; i++)
+                if (!isspace((unsigned char)seg_start[i])) { ws_only = 0; break; }
+            if (ws_only) continue;
+        }
+
+        /* Phrase-break punctuation adjacent to THIS junction: the break
+         * char trailing the previous seg, or leading this one (first non-ws
+         * char). The FE keeps a comma INSIDE a run but drops one at a
+         * run edge, so we re-insert it here. */
+        char lead = 0;
+        {
+            const char *s = seg_start;
+            while (s < seg_end && isspace((unsigned char)*s)) s++;
+            if (s < seg_end) lead = spr_break_marker((unsigned char)*s);
+        }
+
+        /* A markup run is phrase-final when the next non-whitespace content
+         * is phrase-breaking punctuation or end-of-text — i.e. a break (or
+         * the closing pad) will follow it. Its last syllable then keeps the
+         * falling boundary tone; otherwise the tone is suppressed/removed.
+         * `p` already points past this run. */
+        int seg_final = 0;
+        if (is_markup) {
+            const char *la = p;
+            while (*la && isspace((unsigned char)*la)) la++;
+            seg_final = (*la == '\0' || spr_break_marker((unsigned char)*la) != 0);
+        }
+
+        memcpy(seg, seg_start, seg_len);
+        seg[seg_len] = '\0';
+
+        const char *block;
+        if (kind == SEG_SPR) {
+            if (spr_inline_to_tagged(seg, segbuf, segcap, seg_final) <= 0)
+                goto done;                   /* fail */
+            block = segbuf;
+        } else if (kind == SEG_PRON) {
+            /* The in-house FE owns the <pron sym=...> parser. It phonemizes
+             * the tag in isolation (so always emits the phrase-final boundary
+             * tone); drop that tone when the word is NOT phrase-final here. */
+            if (spfy_fe_internal_text_to_tagged(seg, segbuf, segcap) < 0)
+                goto done;                   /* fail (truncation rc=1 is ok) */
+            if (!seg_final) strip_boundary_tone(segbuf);
+            block = segbuf;
+        } else {
+            if (spfy_fe_text_to_tagged(fe, seg, segbuf, segcap) <= 0) continue;
+            block = segbuf;
+        }
+
+        const char *core; size_t core_len;
+        if (!spr_tagged_core(block, &core, &core_len)) continue;  /* empty utt */
+
+        /* Separator: a real phrase break when a comma/period/... sits at
+         * this junction, otherwise a plain space (pause-free continuation).
+         * Bound-checked (break separator is ~24 bytes + the final close). */
+        if (acc_len + core_len + 64 >= outcap) goto done;        /* fail-safe */
+        if (any_core) {
+            char br = pend_break ? pend_break : lead;
+            if (pend_pause) {
+                /* \!pN renders as a phrase break carrying a `pau(uN)` USER
+                 * pause that the synth loop turns into N ms of injected
+                 * silence (the FE pipeline does not size silence from the
+                 * structural `pau(pN)` value). Keep the adjacent punctuation
+                 * as the opener term so its prosody is preserved; a bare
+                 * pause (no punctuation here) uses a neutral ',' break. */
+                char term = br ? br : ',';
+                acc_len += (size_t)snprintf(acc + acc_len, outcap - acc_len,
+                                            " pau(p50) } {%c pau(u%d) ", term, pend_pause);
+                pend_pause = 0;
+            } else if (br) {
+                acc_len += (size_t)snprintf(acc + acc_len, outcap - acc_len,
+                                            " pau(p50) } {%c pau(p100) ", br);
+            } else {
+                acc[acc_len++] = ' ';
+            }
+        }
+        memcpy(acc + acc_len, core, core_len);
+        acc_len += core_len;
+        any_core = 1;
+
+        /* Remember break punct trailing this seg (last non-ws char) for the
+         * NEXT junction — covers `word, \![...]` as well as `\![...], word`. */
+        pend_break = 0;
+        {
+            const char *e = seg_end;
+            while (e > seg_start && isspace((unsigned char)e[-1])) e--;
+            if (e > seg_start) pend_break = spr_break_marker((unsigned char)e[-1]);
+        }
+    }
+
+    if (!any_core) goto done;                /* nothing phonemizable */
+    acc_len += (size_t)snprintf(acc + acc_len, outcap - acc_len,
+                                " pau(p50) } %%");
+    ok = 1;
+
+done:
+    free(seg);
+    free(segbuf);
+    if (!ok) { free(acc); return NULL; }
+    return acc;
+}
+
 /* Per-call synth: text -> FE -> USel -> WSOLA -> sink. The voice is
  * loaded once by the caller (CLI main() or SAPI Speak()) and reused.
  * The sink is any open spfy_wav_writer_t (file or callback mode); we
- * neither open nor close it. Inputs starting with `\![SPR]` are routed
- * through the FE bypass (spr_inline_to_tagged + spfy_fe_synth_tagged)
- * so the FE DLL never sees the escape syntax (it would otherwise
- * synthesize the literal characters). */
+ * neither open nor close it. Text carrying inline pronunciation markup the
+ * DLL FE can't read — `\![...]` SPR escapes or `<pron ...>` tags — is
+ * routed through build_inline_mixed_tagged, which phonemizes each run with
+ * the right backend and merges everything into one flowing utterance so the
+ * markup reads as a continuation rather than standalone phrases with long
+ * junction pauses (and so the DLL FE never sees, and literally speaks, the
+ * markup). */
 int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                        spfy_wav_writer_t *sink,
                        const spfy_synth_callbacks_t *cb,
@@ -735,6 +1396,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * so f0tr_mean / durt_mean adjust per-word from user markup. */
     int8_t   *hp_pitch_st = NULL;
     int8_t   *hp_rate_pct = NULL;
+    uint16_t *syl_vol = NULL;      /* per-syllable volume % from \!vp/\!vd (0 = 100),
+                                    * indexed by fe_shared-1 (reliable, unlike the
+                                    * tree-word -> parsed-word count) */
     spfy_viterbi_slot_t *vslots = NULL;
     uint32_t **cbuf = NULL;
     float    **tbuf = NULL;
@@ -759,7 +1423,23 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * contoured units. SPFY_PROSODY_REALIZE-gated. */
     int8_t   *hp_btone = NULL;
     int rc;
+    char *etags_text = NULL;     /* owns the \!-tag pre-pass output (freed at cleanup) */
+    uint16_t *etag_vol = NULL;   /* per-char volume % map (0 = default 100) */
+    uint16_t *etag_rate = NULL;  /* per-char rate % map   (0 = default 100) */
+    size_t etag_maps_n = 0;      /* valid length of etag_vol / etag_rate     */
     spfy_prosody_hints_init(&hints);
+
+    /* Embedded \!-tag pre-pass (Speechify User's Guide ch. 2 FE/text tags):
+     * resolve \!eos, \!ts0/c/a/r spellout, and \!ny0/1 number-mode into plain
+     * text the FE handles natively. \!pN and \![SPR]/<pron> pass through to
+     * the inline builder below. Plain untagged text is untouched, so the
+     * byte-exact whole-text FE path (and the audit corpus) is unaffected. */
+    if (spfy_etags_need_resolve(text)) {
+        etags_text = spfy_etags_resolve(text, &etag_vol, &etag_rate);
+        if (etags_text) { text = etags_text; etag_maps_n = strlen(etags_text); }
+    }
+    if (getenv("SPFY_ETAGS_DUMP"))
+        fprintf(stderr, "[etags] resolved: %s\n", text);
 
     if (getenv("SPFY_VOICING_DUMP")) {
         /* Diagnostic: dump voicing[] table to verify per-hp_class
@@ -779,19 +1459,24 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * downstream slot-tree pipeline directly. */
     {
         spfy_fe_utterance_t *utt_unused = NULL;
-        int is_inline_spr_ = 0;
-        {
-            const char *tp = text;
-            while (*tp == ' ' || *tp == '\t') tp++;
-            is_inline_spr_ = (tp[0] == '\\' && tp[1] == '!' && tp[2] == '[');
-        }
-        if (is_inline_spr_) {
-            char tagged_buf_[4096];
-            if (spr_inline_to_tagged(text, tagged_buf_, sizeof tagged_buf_) <= 0) {
-                fprintf(stderr, "spr_inline_to_tagged: bad \\![...] input\n");
+        if (spfy_text_has_inline_markup(text)) {
+            /* Inline pronunciation markup — `\![...]` SPR escapes and/or
+             * `<pron ...>` tags — that the DLL FE can't read. Phonemize the
+             * plain runs with the DLL FE, the SPR runs with
+             * spr_inline_to_tagged, and the `<pron>` runs with the in-house
+             * FE, then merge into ONE flowing utterance so the markup words
+             * read as a continuation rather than standalone phrases with long
+             * junction pauses. Also covers the lone-token case (a single
+             * `\![...]` or `<pron ...>` with no surrounding words). */
+            char *mixed = build_inline_mixed_tagged(v->fe, text);
+            if (!mixed) {
+                fprintf(stderr, "build_inline_mixed_tagged: bad inline markup\n");
                 rc = SPFY_E_INVAL; goto fail;
             }
-            rc = spfy_fe_synth_tagged(v->fe, tagged_buf_, &hints, &utt_unused);
+            if (getenv("SPFY_ETAGS_DUMP"))
+                fprintf(stderr, "[etags] tagged: %s\n", mixed);
+            rc = spfy_fe_synth_tagged(v->fe, mixed, &hints, &utt_unused);
+            free(mixed);
         } else if (getenv("SPFY_FE_INTERNAL")) {
             /* In-house FE path: text → fe_internal → tagged-text →
              * spfy_fe_synth_tagged → slot tree. Skips the DLL entirely.
@@ -829,10 +1514,15 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         } else {
             static int logged = 0;
             if (!logged) {
-#ifdef SPFY_FE_HOSTED
+#if defined(SPFY_FE_EMU)
                 fprintf(stderr,
-                    "[spfy] FE backend: HOSTED DLL "
-                    "(SWIttsFe-en-US.dll, 100%% engine UID match)\n");
+                    "[spfy] FE backend: EMULATED DLL "
+                    "(SWIttsFe-en-US.dll via host_emu, "
+                    "100%% engine UID match, portable to arm64/wasm)\n");
+#elif defined(SPFY_FE_HOSTED)
+                fprintf(stderr,
+                    "[spfy] FE backend: NATIVE DLL "
+                    "(SWIttsFe-en-US.dll, 100%% engine UID match, 32-bit x86 only)\n");
 #else
                 fprintf(stderr,
                     "[spfy] FE backend: IN-HOUSE pure-C "
@@ -1130,6 +1820,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * them up to map tree-post-order word index → parsed->words[]. */
     hp_pitch_st = (int8_t *)calloc(n_hp, sizeof *hp_pitch_st);
     hp_rate_pct = (int8_t *)calloc(n_hp, sizeof *hp_rate_pct);
+    syl_vol = (uint16_t *)calloc(fe_utt.n_syls ? fe_utt.n_syls : 1,
+                                 sizeof *syl_vol);
     if (!hp_pitch_st || !hp_rate_pct) {
         rc = SPFY_E_NOMEM; free(seg_names); goto fail;
     }
@@ -1160,6 +1852,33 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 }
             }
             free(word_post_to_parsed);
+        }
+    }
+
+    /* Per-syllable volume map for the \!vp/\!vd embedded tags, keyed by
+     * fe_shared-1 (the reliable HP -> syllable id that hp_btone also uses;
+     * the tree-word -> parsed-word count drifts when adjacent words merge).
+     * fe_utt content words (index 1..N) are this phrase's parsed words in
+     * order; each carries char_start into the FE-fed text the etag_vol map
+     * is aligned to. */
+    if (syl_vol && etag_vol) {
+        const fe_parsed_t *pv = (const fe_parsed_t *)spfy_fe_get_parsed(v->fe);
+        if (pv) {
+            uint32_t fw = 1;                 /* fe_utt content word index */
+            for (int wi = 0; wi < pv->n_words; ++wi) {
+                if (pv->words[wi].phrase_id != (int)phrase_idx) continue;
+                int cs = pv->words[wi].char_start;
+                uint16_t vol = (cs >= 0 && (size_t)cs < etag_maps_n)
+                               ? etag_vol[cs] : 0;
+                if (vol && fw < fe_utt.n_words && fe_utt.word_syls[fw]) {
+                    for (uint32_t j = 0; j < fe_utt.word_n_syls[fw]; ++j) {
+                        uint32_t sh = fe_utt.word_syls[fw][j];   /* shared id */
+                        if (sh >= 1 && (sh - 1) < fe_utt.n_syls)
+                            syl_vol[sh - 1] = vol;
+                    }
+                }
+                ++fw;
+            }
         }
     }
 
@@ -1373,6 +2092,32 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 if (g) { float f = (float)atof(g); if (f >= 0.0f) gain = f; }
                 cart.f0tr_mean *= powf(2.0f,
                     (float)hp_btone[hp] * gain / 12.0f);
+            }
+            /* Speechify-4 accent-height (F0-range) compression. spfy realizes
+             * pitch accents (H*) too HIGH vs Speechify-4 (per-phrase peak F0 is
+             * ~+1 st median, up to +6 st, higher than the v4 NWR refs). Pull the
+             * f0tr target toward Tom's modal F0 so the unit-selection cost prefers
+             * flatter units (selection-driven; no DSP pitch-shift). r<1 flattens,
+             * r=1 widens. Gated: SPFY_SPFY4_F0_RANGE unset -> factor 1.0 -> the
+             * compression is skipped entirely, so the 3.0.5 audit path stays
+             * bit-identical. SPFY_SPFY4_F0_BASE sets the modal-F0 anchor in Hz
+             * (default 120 = Tom). See reveng/spfy4/08_accent_height_findings.md. */
+            if (cart.f0tr_valid) {
+                static float f0range = -1.0f, f0base = -1.0f;
+                if (f0range < 0.0f) {
+                    const char *e = getenv("SPFY_SPFY4_F0_RANGE");
+                    f0range = (e && *e) ? (float)atof(e) : 1.0f;
+                    if (f0range < 0.05f) f0range = 0.05f;
+                    if (f0range > 3.0f)  f0range = 3.0f;
+                    const char *b = getenv("SPFY_SPFY4_F0_BASE");
+                    f0base = (b && *b) ? (float)atof(b) : 120.0f;
+                    if (f0base < 50.0f)  f0base = 50.0f;
+                    if (f0base > 400.0f) f0base = 400.0f;
+                }
+                if (f0range != 1.0f) {
+                    cart.f0tr_mean = f0base
+                        + (cart.f0tr_mean - f0base) * f0range;
+                }
             }
         }
 
@@ -2570,6 +3315,21 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 ++run_n;
             }
         }
+        /* Per-word volume gain for this slot (\!vp/\!vd), via the slot's
+         * parent-syllable fe_shared into the syl_vol map. */
+        float vol_gain = 1.0f;
+        if (syl_vol) {
+            uint32_t post = hp_to_post[s];
+            if (post < tree.n_slots) {
+                uint32_t syl_post = tree.slots[post].parent_idx;
+                if (syl_post < tree.n_slots
+                    && tree.slots[syl_post].kind == SPFY_SK_SYLLABLE) {
+                    uint32_t sh = tree.slots[syl_post].fe_shared;
+                    if (sh >= 1 && (sh - 1) < fe_utt.n_syls && syl_vol[sh - 1])
+                        vol_gain = (float)syl_vol[sh - 1] / 100.0f;
+                }
+            }
+        }
         if (run_n >= 2) {
             spfy_unit_record_t r_last;
             (void)spfy_unit_record_get(&v->units, path_uids[s + run_n - 1],
@@ -2581,7 +3341,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             rc = append_recording_span(&ws, r1.file_idx, r1.local_pos,
                                        span, &v->feat, &v->vdb, &v->lookup, align,
                                        prev_f0_end, r1.f0_start,
-                                       v->vdb.sample_rate);
+                                       v->vdb.sample_rate, vol_gain);
             if (rc != SPFY_OK) { free(path_uids); goto fail; }
             ++paired_same; played += run_n;
             prev_have = 1;
@@ -2606,7 +3366,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             rc = append_recording_span(&ws, r1.file_idx, r1.local_pos,
                                        r1.dur_like, &v->feat, &v->vdb, &v->lookup, align,
                                        prev_f0_end, r1.f0_start,
-                                       v->vdb.sample_rate);
+                                       v->vdb.sample_rate, vol_gain);
             if (rc != SPFY_OK) { free(path_uids); goto fail; }
             ++played; prev_have = 1;
             prev_file_idx = r1.file_idx;
@@ -2649,6 +3409,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     free(hp_word_idx); hp_word_idx = NULL;
     free(hp_pitch_st);
     free(hp_rate_pct);
+    free(syl_vol);
     free(hp_btone); hp_btone = NULL;
     free(dag_slots); dag_slots = NULL;
     if (anchor_cands) {
@@ -2683,16 +3444,27 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     /* Inter-phrase silence — DEFAULT OFF (rely on FE pad slots).
      * Re-enable by setting SPFY_INTERPHRASE_MS=<N>. See big comment
      * above the inter_phrase_ms_override declaration for rationale. */
-    if (phrase_idx + 1 < n_phrases && inter_phrase_ms_override > 0) {
-        size_t n = (size_t)inter_phrase_ms_override
-                 * (size_t)v->vdb.sample_rate / 1000u;
-        if (n > 0) {
+    if (phrase_idx + 1 < n_phrases) {
+        int sil_ms = (inter_phrase_ms_override > 0) ? inter_phrase_ms_override : 0;
+        /* User `\!pN` pause before the NEXT phrase, threaded from the FE
+         * parser's phrase_lead_pause_ms (set from `pau(uN)` markers that
+         * build_inline_mixed_tagged emits for embedded pause tags). The FE
+         * pipeline does not size silence from structural `pau(pN)` tokens,
+         * so this is where an explicit pause duration becomes real silence. */
+        int npid = (int)phrase_idx + 1;
+        if (npid < 16 && parsed->phrase_lead_pause_ms[npid] > sil_ms)
+            sil_ms = parsed->phrase_lead_pause_ms[npid];
+        if (sil_ms > 0) {
             static const int16_t INTER_PHRASE_SILENCE[16000] = {0};
             size_t cap = sizeof INTER_PHRASE_SILENCE / sizeof *INTER_PHRASE_SILENCE;
-            if (n > cap) n = cap;
-            int sil_align = (getenv("SPFY_WSOLA_NO_SILENCE_FADE") != NULL)
-                            ? 0 : 1;
-            (void)spfy_wsola_push_unit(&ws, INTER_PHRASE_SILENCE, n, sil_align);
+            size_t remain = (size_t)sil_ms * (size_t)v->vdb.sample_rate / 1000u;
+            int sil_align = (getenv("SPFY_WSOLA_NO_SILENCE_FADE") != NULL) ? 0 : 1;
+            while (remain > 0) {                 /* chunked: pauses can exceed 1 s */
+                size_t n = remain > cap ? cap : remain;
+                (void)spfy_wsola_push_unit(&ws, INTER_PHRASE_SILENCE, n, sil_align);
+                remain -= n;
+                sil_align = 0;                   /* fade-in only the first chunk */
+            }
         }
     }
 
@@ -2767,6 +3539,9 @@ cleanup:
     spfy_slot_tree_free(&tree);
     spfy_fe_utt_free(&fe_utt);
     spfy_prosody_hints_free(&hints);
+    free(etags_text);
+    free(etag_vol);
+    free(etag_rate);
     /* Everything previously freed here individually (v->bucket, carts,
      * v->chunks, FE, v->hpc, v->prsl, v->hash, v->pros, v->maps, v->ccos, v->lookup, v->feat,
      * v->vcf, v->vdb, v->vin, v->voicing_buf) is owned by the spfy_voice_t and

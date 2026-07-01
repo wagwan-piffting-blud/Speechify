@@ -284,19 +284,16 @@ const void *spfy_fe_get_parsed(const spfy_fe_t *opaque) {
     return fe->last_parsed_valid ? (const void *)&fe->last_parsed : NULL;
 }
 
-int spfy_fe_synth_text(spfy_fe_t                  *opaque,
-                       const char                 *text,
-                       const spfy_prosody_hints_t *hints,
-                       spfy_fe_utterance_t       **out_utt) {
-    if (!opaque || !text || !out_utt) return -1;
-    hosted_fe_t *fe = (hosted_fe_t *)opaque;
-    *out_utt = NULL;
-
+/* Drive the FE over plain text and return the cleaned tagged-output
+ * stream (malloc'd; caller frees). NULL on error. Shared by
+ * spfy_fe_synth_text (which parses it into slots) and
+ * spfy_fe_text_to_tagged (which hands it back raw so the caller can
+ * splice DLL-FE words together with inline-SPR tagged blocks). */
+static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     if (fe->iobj->err_flag) {
         fprintf(stderr, "[fe_host] err_flag latched before synth — bailing\n");
-        return -2;
+        return NULL;
     }
-
     /* The SWI control header `\\\\!SWIcv3.0.0.` is NOT needed for
      * plain-text input — the FE phonemizes it and our drain ends up
      * with `<swicv () ...><three () ...>` noise. Just push the text.
@@ -311,12 +308,42 @@ int spfy_fe_synth_text(spfy_fe_t                  *opaque,
 
     /* Drain the tagged output stream + clean chunk-seam whitespace. */
     char *tagged = drain_delegate_b(fe->iobj);
-    if (!tagged) return -3;
+    if (!tagged) return NULL;
     fe_clean_stream_inplace(tagged);
 
     /* slot 11 = runOrAbort — commits any remaining synth work. */
     vfn1 fn11 = (vfn1)((vfn0 *)fe->iobj->vtable)[SLOT_RUN_OR_ABORT];
     fn11(fe->iobj, 0);
+    return tagged;
+}
+
+int spfy_fe_text_to_tagged(spfy_fe_t  *opaque,
+                           const char *text,
+                           char       *out,
+                           size_t      out_n) {
+    if (!opaque || !text || !out || out_n == 0) return -1;
+    out[0] = '\0';
+    hosted_fe_t *fe = (hosted_fe_t *)opaque;
+    char *tagged = hosted_fe_drain_tagged(fe, text);
+    if (!tagged) return -3;
+    size_t n = strlen(tagged);
+    if (n >= out_n) n = out_n - 1;
+    memcpy(out, tagged, n);
+    out[n] = '\0';
+    free(tagged);
+    return (int)n;
+}
+
+int spfy_fe_synth_text(spfy_fe_t                  *opaque,
+                       const char                 *text,
+                       const spfy_prosody_hints_t *hints,
+                       spfy_fe_utterance_t       **out_utt) {
+    if (!opaque || !text || !out_utt) return -1;
+    hosted_fe_t *fe = (hosted_fe_t *)opaque;
+    *out_utt = NULL;
+
+    char *tagged = hosted_fe_drain_tagged(fe, text);
+    if (!tagged) return (fe->iobj->err_flag) ? -2 : -3;
 
     /* 5. Build utterance struct + parse. */
     spfy_fe_utterance_t *u = (spfy_fe_utterance_t *)calloc(1, sizeof(*u));

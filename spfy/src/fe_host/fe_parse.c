@@ -140,11 +140,20 @@ static int p_parse_accent(parser_t *p, char *buf, size_t buf_sz) {
  * ============================================================ */
 
 static int parse_pau(parser_t *p, fe_parsed_t *out, int post_word) {
-    /* "pau(p" int ")" — already saw "pau"; consume "(p", digits, ")". */
+    /* "pau(p" int ")" — already saw "pau"; consume "(p", digits, ")".
+     * FE also emits "pau(p?d)" ("default duration") when it hasn't picked
+     * a concrete value (e.g. trailing phrase-boundary pause with plain-text
+     * input). Treat `?d` as 0 rather than a parse error. */
     if (!p_expect_lit(p, "(")) return 0;
     if (!p_expect_lit(p, "p")) return 0;
     int dur = 0;
-    if (!p_parse_int(p, &dur)) { p->err = 1; p->err_msg = "pau duration"; return 0; }
+    if (p_peek(p) == '?') {
+        p->p++;
+        if (p_peek(p) == 'd') p->p++;
+        dur = 0;
+    } else if (!p_parse_int(p, &dur)) {
+        p->err = 1; p->err_msg = "pau duration"; return 0;
+    }
     if (!p_expect_lit(p, ")")) return 0;
     if (out) {
         if (out->n_words == 0 && !post_word) {
@@ -270,7 +279,17 @@ static int parse_word(parser_t *p, fe_parsed_t *out) {
         w->char_start = 0;
         w->char_len = 0;
     } else {
-        if (!p_parse_int(p, &w->char_start)) {
+        /* The FE emits `?d` (its "default/unspecified" marker) instead of
+         * a numeric char_start when the DLL didn't compute one — happens
+         * with the plain-text feedConfigA path used by both fe_host.c and
+         * fe_host_emu.c. Treat it as 0 rather than a parse error; slot
+         * construction doesn't need char_start for the synth path, only
+         * downstream diagnostics do. */
+        if (p_peek(p) == '?') {
+            p->p++;  /* consume '?' */
+            if (p_peek(p) == 'd') p->p++;
+            w->char_start = 0;
+        } else if (!p_parse_int(p, &w->char_start)) {
             p->err = 1; p->err_msg = "char_start"; return 0;
         }
         if (!p_expect_lit(p, ",")) return 0;
@@ -403,6 +422,19 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
             /* "pau" literal before generic identifier parsing. */
             if (p->end - p->p >= 3 && p->p[0] == 'p' && p->p[1] == 'a' && p->p[2] == 'u') {
                 p->p += 3;
+                /* `pau(uN)` — USER pause from a `\!pN` embedded tag (emitted
+                 * by build_inline_mixed_tagged). The `u` unit distinguishes it
+                 * from the FE's structural `pau(pN)`, which is NOT rendered as
+                 * silence; user pauses ARE, via phrase_lead_pause_ms. */
+                if (p->end - p->p >= 2 && p->p[0] == '(' && p->p[1] == 'u') {
+                    p->p += 2;
+                    int dur = 0;
+                    if (!p_parse_int(p, &dur)) { p->err = 1; p->err_msg = "user pause"; goto fail; }
+                    if (!p_expect_lit(p, ")")) goto fail;
+                    if (phrase_id_for_this_utt >= 0 && phrase_id_for_this_utt < 16)
+                        out->phrase_lead_pause_ms[phrase_id_for_this_utt] += dur;
+                    continue;
+                }
                 int post = (out->n_words > 0);
                 if (!parse_pau(p, out, /*post_word=*/(post != 0))) goto fail;
                 continue;

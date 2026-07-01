@@ -67,14 +67,19 @@ typedef struct {
 """
 
 
-def emit_blob(out: List[str], symbol: str, data: bytes) -> None:
+def emit_blob(out: List[str], symbol: str, data: bytes,
+              emit_size: bool = True) -> None:
     out.append(f"static const unsigned char {symbol}[{len(data)}] = {{")
     chunk = 16
     for i in range(0, len(data), chunk):
         row = ", ".join(f"0x{b:02x}" for b in data[i : i + chunk])
         out.append(f"    {row},")
     out.append("};")
-    out.append(f"static const size_t {symbol}_size = {len(data)};")
+    # Single-blob assets (hpclass/vocab) are copied out by their _size const;
+    # directory blobs are sliced via their manifest's per-file offset+length,
+    # so their _size const would be dead code (a -Wunused warning). Skip it.
+    if emit_size:
+        out.append(f"static const size_t {symbol}_size = {len(data)};")
     out.append("")
 
 
@@ -99,7 +104,7 @@ def emit_dir(out: List[str], prefix: str, dirpath: Path) -> Tuple[str, str]:
     blob_sym = f"{prefix}_blob"
     man_sym = f"{prefix}_manifest"
 
-    emit_blob(out, blob_sym, blob)
+    emit_blob(out, blob_sym, blob, emit_size=False)
 
     out.append(f"static const embedded_file_t {man_sym}[] = {{")
     for name, off, size in entries:
@@ -215,8 +220,8 @@ typedef struct {
     char tables_b[1024];
 } spfy_asset_paths_t;
 
-/* Write all four embedded assets (hpclass, vocab, fe_tables_a/*,
- * fe_tables/*) into `outdir`, creating subdirs as needed. Fills
+/* Write all four embedded assets (hpclass, vocab, and the fe_tables_a and
+ * fe_tables directories) into `outdir`, creating subdirs as needed. Fills
  * `out_paths` (optional, may be NULL) with absolute paths to each.
  * Returns 0 on success, -1 on any I/O error. */
 int spfy_assets_extract(const char *outdir,

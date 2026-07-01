@@ -80,6 +80,14 @@ target_include_directories(spfy_baked_pos PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 add_subdirectory(src/fe_internal)
 if(SPFY_FE_HOSTED)
     add_subdirectory(src/fe_host)
+    # Now that fe_host has evaluated its SPFY_FE_EMU auto-detect (which may
+    # flip based on ANDROID / EMSCRIPTEN / non-32-bit host), surface the
+    # effective value globally so downstream CLIs (spfy_synth.c) can pick
+    # the right startup banner + call convention. Must be AFTER
+    # add_subdirectory(src/fe_host) so we read the post-detect value.
+    if(SPFY_FE_EMU)
+        add_compile_definitions(SPFY_FE_EMU=1)
+    endif()
 else()
     add_subdirectory(src/fe)
 endif()

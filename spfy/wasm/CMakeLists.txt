@@ -1,5 +1,11 @@
 # Emscripten build for the in-browser spfy demo.
 #
+# Ships an emulator-backed FE by default: the unmodified
+# SWIttsFe-en-US.dll (32-bit Windows PE) is embedded into the WASM
+# module and run through spfy/src/host_emu/ — the same portable x86
+# interpreter that audits 100% engine PATH UID on the desktop and
+# ships in the Android APK. wasm32 executes it identically.
+#
 # Build:
 #     emcmake cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 #     emmake  cmake --build build -j
@@ -7,7 +13,10 @@
 # Outputs in build/:
 #     spfy_wasm.js       JS loader (Module.cwrap-compatible API surface)
 #     spfy_wasm.wasm     WebAssembly binary
-#     spfy_wasm.data     Preloaded virtual-FS image (~92 MB, voice + tables)
+#     spfy_wasm.data     Preloaded virtual-FS image (voice + tables)
+#
+# Fallback: -DSPFY_WASM_INHOUSE_FE=ON drops the emulator and links the
+# stubbed in-house FE from stubs/fe_stub.c (91.2% audit).
 
 cmake_minimum_required(VERSION 3.22)
 project("spfy_wasm" LANGUAGES C)
@@ -15,10 +24,14 @@ project("spfy_wasm" LANGUAGES C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# No hosted FE (no PE-loader), no strict-FP (clang on wasm32 ignores the x87-specific flags anyway), no tests.
+# No strict-FP (clang on wasm32 ignores the x87-specific flags anyway), no tests.
 set(SPFY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SPFY_FE_HOSTED   OFF CACHE BOOL "" FORCE)
 set(SPFY_STRICT_FP   OFF CACHE BOOL "" FORCE)
+
+option(SPFY_WASM_INHOUSE_FE
+       "Fall back to the in-house pure-C FE (stubs/fe_stub.c) instead of the emulator-backed FE"
+       OFF)
 
 # Many TUs call libm functions. emscripten links libm into libc by
 # default, so no explicit -lm needed.
@@ -61,28 +74,84 @@ target_link_libraries(spfy_fe_types PUBLIC
     spfy_voice spfy_common spfy_baked_pos
 )
 
-# In-house pure-C FE (the actual text→tagged engine).
+# In-house pure-C FE — pulled in either way. When SPFY_WASM_INHOUSE_FE
+# is on it drives synth directly; when the emulator path is on it's a
+# no-op dependency of spfy_fe_types (baked_pos).
 add_subdirectory(${SPFY_ROOT}/src/fe_internal ${CMAKE_BINARY_DIR}/_fe_internal)
 
-# spfy_fe — the FE backend opaque-handle wrapper.
-add_library(spfy_fe STATIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/stubs/fe_stub.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/stubs/engine_phoneid.c
-    ${SPFY_ROOT}/src/fe_host/fe_parse.c
-    ${SPFY_ROOT}/src/fe_host/fe_no_refine.c
-)
-target_include_directories(spfy_fe
-    PUBLIC  ${SPFY_ROOT}/src/fe
-            ${SPFY_ROOT}/src/fe_host
-            ${CMAKE_CURRENT_SOURCE_DIR}/stubs
-    PRIVATE ${SPFY_ROOT}/src/common
-            ${SPFY_ROOT}/src/voice
-            ${SPFY_ROOT}/src/fe_internal
-)
-target_link_libraries(spfy_fe
-    PUBLIC  spfy_fe_types spfy_voice spfy_common
-    PRIVATE spfy_fe_internal
-)
+if(SPFY_WASM_INHOUSE_FE)
+    # -------- fallback path (in-house pure-C FE) --------
+    add_library(spfy_fe STATIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/stubs/fe_stub.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/stubs/engine_phoneid.c
+        ${SPFY_ROOT}/src/fe_host/fe_parse.c
+        ${SPFY_ROOT}/src/fe_host/fe_no_refine.c
+    )
+    target_include_directories(spfy_fe
+        PUBLIC  ${SPFY_ROOT}/src/fe
+                ${SPFY_ROOT}/src/fe_host
+                ${CMAKE_CURRENT_SOURCE_DIR}/stubs
+        PRIVATE ${SPFY_ROOT}/src/common
+                ${SPFY_ROOT}/src/voice
+                ${SPFY_ROOT}/src/fe_internal
+    )
+    target_link_libraries(spfy_fe
+        PUBLIC  spfy_fe_types spfy_voice spfy_common
+        PRIVATE spfy_fe_internal
+    )
+    message(STATUS "wasm FE: IN-HOUSE pure-C (91.2% audit)")
+
+else()
+    # -------- default: emulator-backed 100%-engine FE --------
+
+    # host_emu portable x86 interpreter.
+    add_subdirectory(${SPFY_ROOT}/src/host_emu ${CMAKE_BINARY_DIR}/_host_emu)
+
+    # DLL embed step.
+    set(SWITTSFE_DLL
+        "${SPFY_ROOT}/../bin/SWIttsFe-en-US.dll"
+        CACHE FILEPATH "Path to SWIttsFe-en-US.dll to embed into the WASM module")
+    if(NOT EXISTS "${SWITTSFE_DLL}")
+        message(FATAL_ERROR
+            "SWIttsFe-en-US.dll not found at ${SWITTSFE_DLL} — set "
+            "-DSWITTSFE_DLL=<path> or pass -DSPFY_WASM_INHOUSE_FE=ON to "
+            "fall back to the in-house FE.")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(EMBED_OUT "${CMAKE_BINARY_DIR}/swittsfe_data.c")
+    add_custom_command(
+        OUTPUT  "${EMBED_OUT}"
+        COMMAND "${Python3_EXECUTABLE}"
+                "${SPFY_ROOT}/src/fe_host/embed_dll.py"
+                "${SWITTSFE_DLL}" "${EMBED_OUT}" "swittsfe_dll"
+        DEPENDS "${SWITTSFE_DLL}"
+                "${SPFY_ROOT}/src/fe_host/embed_dll.py"
+        COMMENT "Embedding SWIttsFe-en-US.dll bytes for WASM module")
+
+    # spfy_fe — emulator-backed. Same target name so downstream link is
+    # unchanged.
+    add_library(spfy_fe STATIC
+        ${SPFY_ROOT}/src/fe_host/fe_host_emu.c
+        ${SPFY_ROOT}/src/fe_host/fe_parse.c
+        ${SPFY_ROOT}/src/fe_host/fe_no_refine.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/stubs/engine_phoneid.c
+        "${EMBED_OUT}"
+    )
+    target_include_directories(spfy_fe
+        PUBLIC  ${SPFY_ROOT}/src/fe
+                ${SPFY_ROOT}/src/fe_host
+                ${CMAKE_CURRENT_SOURCE_DIR}/stubs   # for engine_phoneid.h
+        PRIVATE ${SPFY_ROOT}/src/common
+                ${SPFY_ROOT}/src/voice
+                ${SPFY_ROOT}/src/host_emu
+    )
+    target_link_libraries(spfy_fe
+        PUBLIC  spfy_fe_types spfy_voice spfy_common
+        PRIVATE spfy_host_emu
+    )
+    target_compile_definitions(spfy_fe PRIVATE SPFY_FE_EMU=1)
+    message(STATUS "wasm FE: EMULATOR-backed (100% audit)")
+endif()
 
 # spfy_synth_lib — declared inline rather than via add_subdirectory
 # because the desktop src/synth/CMakeLists.txt builds only the

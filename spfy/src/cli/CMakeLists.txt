@@ -194,11 +194,14 @@ if(SPFY_FE_HOSTED)
 endif()
 
 if(NOT SPFY_FE_HOSTED)
+# These two exercise the legacy hand-written FE stage functions directly, so
+# they link spfy_fe_handwritten (the public `spfy_fe` target is now the
+# in-house adapter — see src/fe/CMakeLists.txt).
 add_executable(spfy_fe_test spfy_fe_test.c)
 target_include_directories(spfy_fe_test
     PRIVATE ${CMAKE_SOURCE_DIR}/src/fe
 )
-target_link_libraries(spfy_fe_test PRIVATE spfy_fe spfy_voice spfy_common)
+target_link_libraries(spfy_fe_test PRIVATE spfy_fe_handwritten spfy_voice spfy_common)
 
 # Path B M8: full text-or-SSML -> per-slot dump CLI. End-to-end exercise
 # of the entire FE pipeline (M1..M7).
@@ -206,5 +209,5 @@ add_executable(spfy_fe_synth spfy_fe_synth.c)
 target_include_directories(spfy_fe_synth
     PRIVATE ${CMAKE_SOURCE_DIR}/src/fe
 )
-target_link_libraries(spfy_fe_synth PRIVATE spfy_fe spfy_voice spfy_common)
+target_link_libraries(spfy_fe_synth PRIVATE spfy_fe_handwritten spfy_voice spfy_common)
 endif()

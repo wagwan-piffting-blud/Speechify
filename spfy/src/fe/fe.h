@@ -128,6 +128,18 @@ int  spfy_fe_synth_tagged(spfy_fe_t                  *fe,
                           const spfy_prosody_hints_t *hints,
                           spfy_fe_utterance_t       **out_utt);
 
+/* Phonemize plain text and return the FE's RAW tagged-output string in
+ * `out` (NUL-terminated, truncated to out_n), stopping before the parse
+ * + slot-build that spfy_fe_synth_text does. Lets callers splice the
+ * DLL FE's words for normal runs together with spr_inline_to_tagged
+ * blocks into one flowing utterance, then feed the result back through
+ * spfy_fe_synth_tagged. Returns the string length (>0), or <=0 on
+ * failure / empty output. */
+int  spfy_fe_text_to_tagged(spfy_fe_t  *fe,
+                            const char *text,
+                            char       *out,
+                            size_t      out_n);
+
 void spfy_fe_utterance_free(spfy_fe_utterance_t *u);
 
 /* ------------------------------------------------------------------ */

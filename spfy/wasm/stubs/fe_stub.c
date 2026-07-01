@@ -114,6 +114,22 @@ int spfy_fe_synth_tagged(spfy_fe_t *opaque,
     return 0;
 }
 
+int spfy_fe_text_to_tagged(spfy_fe_t *opaque,
+                           const char *text,
+                           char *out,
+                           size_t out_n) {
+    (void)opaque;
+    if (!text || !out || out_n == 0) return -1;
+    /* In-house FE already produces tagged text directly.
+     * spfy_fe_internal_text_to_tagged returns 0 ok / 1 truncated / -1 bad
+     * args; the public contract (fe.h) is "string length (>0) on success,
+     * <=0 on failure", so translate — otherwise callers that gate on a
+     * positive length (build_inline_mixed_tagged) drop every plain run. */
+    int rc = spfy_fe_internal_text_to_tagged(text, out, out_n);
+    if (rc < 0) return rc;
+    return (int)strlen(out);
+}
+
 int spfy_fe_synth_text(spfy_fe_t *opaque,
                        const char *text,
                        const spfy_prosody_hints_t *hints,

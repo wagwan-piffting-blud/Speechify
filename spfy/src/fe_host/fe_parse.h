@@ -60,6 +60,12 @@ typedef struct {
      * local_10=1 for utt 1 '.'). */
     char              phrase_terms[16];
     int               n_phrase_terms;
+    /* Per-phrase user pause (ms), from `\!pN` embedded tags rendered by
+     * build_inline_mixed_tagged as `pau(uN)` openers (the `u` unit marks a
+     * USER pause, distinct from the FE's structural `pau(pN)` which is not
+     * rendered as silence). phrase_lead_pause_ms[k] is extra silence to
+     * inject BEFORE phrase k. Indexed by phrase_id; 0 = none. */
+    int               phrase_lead_pause_ms[16];
 } fe_parsed_t;
 
 /* Parse the FE's tagged-text output (see host/PROTOCOL.md). Returns 0

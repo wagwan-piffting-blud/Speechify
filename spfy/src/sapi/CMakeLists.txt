@@ -35,12 +35,16 @@ target_link_libraries(spfy_sapi
 target_include_directories(spfy_sapi
     PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
 # Strip stdcall '@N' decoration from exported symbols so SAPI/regsvr32
-# resolves Dll* by their plain names.
+# resolves Dll* by their plain names. --enable-stdcall-fixup silences the
+# matching ld "resolving _DllCanUnloadNow by linking to _DllCanUnloadNow@0"
+# warnings: the .def lists the COM entry points undecorated, so ld matches
+# them to the stdcall-decorated symbols via fixup — which is exactly what
+# we want here, so do it quietly (keeps the build warning-clean).
 set_target_properties(spfy_sapi PROPERTIES
     PREFIX ""
     OUTPUT_NAME "spfy_sapi"
     SUFFIX ".dll"
-    LINK_FLAGS "-Wl,--kill-at"
+    LINK_FLAGS "-Wl,--kill-at -Wl,--enable-stdcall-fixup"
 )
 
 # The 64-bit SAPI shim (spfy_sapi64.dll) is built separately by
