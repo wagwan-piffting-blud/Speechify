@@ -106,7 +106,9 @@ exit /b 0
 
 :do_configure
 echo [configure] cmake -^> "%BUILD_DIR%"
-"%CMAKE%" -S "%SCRIPT_DIR%" -B "%BUILD_DIR%" -G Ninja -DCMAKE_MAKE_PROGRAM="%NINJA%" -DCMAKE_C_COMPILER="%GCC%" -DCMAKE_CXX_COMPILER="%GXX%" -DCMAKE_BUILD_TYPE=Debug -DSPFY_STRICT_FP=OFF -DSPFY_BUILD_TESTS=ON -DSPFY_FE_HOSTED=OFF
+REM Project is LANGUAGES C only — do NOT pass -DCMAKE_CXX_COMPILER (it would
+REM emit a "Manually-specified variables were not used" CMake warning).
+"%CMAKE%" -S "%SCRIPT_DIR%" -B "%BUILD_DIR%" -G Ninja -DCMAKE_MAKE_PROGRAM="%NINJA%" -DCMAKE_C_COMPILER="%GCC%" -DCMAKE_BUILD_TYPE=Debug -DSPFY_STRICT_FP=OFF -DSPFY_BUILD_TESTS=ON -DSPFY_FE_HOSTED=OFF
 exit /b %ERRORLEVEL%
 
 :do_build

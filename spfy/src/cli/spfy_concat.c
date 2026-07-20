@@ -315,7 +315,7 @@ int main(int argc, char **argv)
     if ((rc = parse_play_list(argv[3], &plays)) != SPFY_OK) goto done;
     annotate_play_list(&plays, &units);
 
-    fprintf(stdout, "voice: %u units, %u recordings, sample_rate=%u Hz\n",
+    fprintf(stdout, "voice: %u units, %zu recordings, sample_rate=%u Hz\n",
             units.n_units, vdb.n_indx_entries, vdb.sample_rate);
     fprintf(stdout, "trace: %zu units in playback order\n", plays.n);
 

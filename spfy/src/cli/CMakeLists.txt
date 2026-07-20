@@ -127,6 +127,29 @@ target_include_directories(spfy_synth
 target_link_libraries(spfy_synth
     PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_common)
 
+# Live-trace fork of spfy_synth: the SAME engine source compiled with
+# -DSPFY_TRACE=1, so the spfy_trace_eventf() instrumentation in spfy_synth.c
+# emits an NDJSON event stream (activated by --trace-stream) instead of
+# compiling away. Single-sourcing with spfy_synth guarantees the traced and
+# shipped engines can never diverge. Consumed by the viz live tracer's SSE
+# relay (viz/app.py). Shares the embedded-assets blob so it accepts the same
+# 5-arg form as spfy_synth.
+add_executable(spfy_synth_trace spfy_synth.c "${EMBED_OUT_C}")
+target_compile_definitions(spfy_synth_trace PRIVATE SPFY_TRACE=1)
+target_include_directories(spfy_synth_trace
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/synth
+            ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/wsola
+            ${CMAKE_SOURCE_DIR}/src/fe
+            ${CMAKE_SOURCE_DIR}/src/fe_host
+            ${CMAKE_SOURCE_DIR}/src/fe_internal
+            ${CMAKE_SOURCE_DIR}/src/cart
+            ${CMAKE_CURRENT_BINARY_DIR}      # for generated embedded_assets.h
+)
+target_link_libraries(spfy_synth_trace
+    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_common)
+
 # A/B test tool for the TD-PSOLA pitch shifter (used to tune quality
 # before wiring into the SAPI shim's <prosody pitch=...> path).
 add_executable(spfy_pitch_shift spfy_pitch_shift.c)

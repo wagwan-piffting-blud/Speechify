@@ -431,7 +431,8 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
                     int dur = 0;
                     if (!p_parse_int(p, &dur)) { p->err = 1; p->err_msg = "user pause"; goto fail; }
                     if (!p_expect_lit(p, ")")) goto fail;
-                    if (phrase_id_for_this_utt >= 0 && phrase_id_for_this_utt < 16)
+                    if (phrase_id_for_this_utt >= 0
+                        && phrase_id_for_this_utt < FE_PARSE_MAX_PHRASES)
                         out->phrase_lead_pause_ms[phrase_id_for_this_utt] += dur;
                     continue;
                 }

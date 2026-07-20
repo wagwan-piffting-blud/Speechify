@@ -6,7 +6,7 @@ Output: spfy/src/g2p/cmudict_data.c (a static C array consumed by g2p.c)
 
 Format of cmudict-0.7b:
     word PHONEMES
-    word(2) PHONEMES   <- alternate pronunciation, skipped
+    word(2) PHONEMES   <- alternate pronunciation
     ...
 
 Output format (intentionally simple — compiler dedups string literals):
@@ -18,41 +18,77 @@ Output format (intentionally simple — compiler dedups string literals):
     };
     const size_t cmudict_n_entries = N;
 
-Lookup is binsearch by strcmp on the .word field. We keep only the
-primary pronunciation per word (CMU's first listing), since alternates
-are noise for our use case.
+Lookup is binsearch by strcmp on the .word field. We keep ONE pronunciation
+per word — CMU's primary (first) listing — EXCEPT for the "-day" fix below.
+
+  "-day" fix: SpeechWorks pronounces weekday / -day words with /-deɪ/
+  (… D EY), but CMUdict lists the /-di/ (… D IY) form first for the
+  weekdays (monday/tuesday/wednesday/thursday/friday/saturday), which made
+  the in-house FE say "Mon-dee". When a "-day" word's primary ends in IY and
+  an EY alternate exists, we prefer the EY variant — matching the engine
+  (verified via spfy_dumpwav --g2p). Single-variant -day words (holiday,
+  someday, birthday, sunday, …) already end in EY and are left untouched.
 """
 
 import sys
 import os
 import re
 
-PARENS_RE = re.compile(r"\(\d+\)$")  # matches "word(2)"
+PARENS_RE = re.compile(r"\(\d+\)$")          # matches "word(2)"
+DAY_RE = re.compile(r"day(?:'s|s)?$")         # ...day / ...days / ...day's
+ARPA_VOWELS = {
+    "AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY",
+    "IH", "IX", "IY", "OW", "OY", "UH", "UW",
+}
+
+
+def base_word(w):
+    return PARENS_RE.sub("", w)
+
+
+def last_vowel(phon):
+    """Final ARPAbet vowel of a pronunciation (stress digit stripped), or None."""
+    v = None
+    for p in phon.split():
+        core = p[:-1] if p[-1:].isdigit() else p
+        if core in ARPA_VOWELS:
+            v = core
+    return v
 
 
 def parse(path):
-    entries = []
-    seen = set()
-    skipped_alt = 0
+    variants = {}   # base word -> [phon, ...] in file order
+    order = []
     with open(path, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
             if not line or line.startswith(";"):
                 continue
-            # Split first whitespace
             parts = line.split(None, 1)
             if len(parts) != 2:
                 continue
             word, phon = parts
-            # Skip alternate pronunciations
-            if PARENS_RE.search(word):
-                skipped_alt += 1
-                continue
-            if word in seen:
-                continue
-            seen.add(word)
-            entries.append((word, phon))
-    return entries, skipped_alt
+            bw = base_word(word)
+            if bw not in variants:
+                variants[bw] = []
+                order.append(bw)
+            variants[bw].append(phon)
+
+    entries = []
+    day_fixed = []
+    for bw in order:
+        prons = variants[bw]
+        chosen = prons[0]                    # CMU's primary listing
+        if DAY_RE.search(bw) and last_vowel(chosen) == "IY":
+            for alt in prons[1:]:
+                if last_vowel(alt) == "EY":
+                    chosen = alt
+                    day_fixed.append(bw)
+                    break
+        entries.append((bw, chosen))
+
+    skipped_alt = sum(len(v) - 1 for v in variants.values())
+    return entries, skipped_alt, day_fixed
 
 
 def escape(s):
@@ -84,13 +120,15 @@ def main():
     if not os.path.exists(in_path):
         print(f"input dict not found: {in_path}", file=sys.stderr)
         sys.exit(1)
-    entries, skipped_alt = parse(in_path)
+    entries, skipped_alt, day_fixed = parse(in_path)
     # Sort lexicographically by word for binsearch.
     entries.sort(key=lambda e: e[0])
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     emit(entries, out_path)
     print(f"cmudict_codegen: {len(entries):,} entries -> {out_path}")
     print(f"  ({skipped_alt:,} alternate pronunciations skipped)")
+    print(f"  (-day EY fix applied to {len(day_fixed)} words: "
+          f"{', '.join(day_fixed[:20])}{' …' if len(day_fixed) > 20 else ''})")
 
 
 if __name__ == "__main__":

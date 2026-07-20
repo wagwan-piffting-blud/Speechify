@@ -6,6 +6,8 @@ import os
 import sys
 import time
 import json
+import subprocess
+import platform
 
 # Add project root to path
 PROJ_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -748,6 +750,115 @@ def api_frida_detach():
     return jsonify(_get_frida_mgr().detach())
 
 
+def _synth_via_trace(text, voice="tom"):
+    """Batch synthesis for the Synthesis Tracer, powered by spfy_synth_trace.exe
+    instead of Frida/Speechify. Runs the trace binary, collects its full NDJSON
+    event stream, and reshapes it into the batch payload the tracer expects
+    (wsola_units, pre_prune_hps, word_phones). Unlike the Frida path this needs
+    no closed engine, is fully concurrent, and actually carries *every*
+    candidate's target cost (not just a pre-prune snapshot)."""
+    exe = _trace_exe()
+    if not exe:
+        return jsonify({"error": "spfy_synth_trace.exe not found — build spfy "
+                                 "(spfy/build.bat) or set SPFY_SYNTH_TRACE_EXE"}), 503
+    assets = _voice_assets(voice)
+    if not assets:
+        return jsonify({"error": f"Voice assets (vin/vdb/vcf) for '{voice}' not found"}), 404
+    vin, vdb, vcf = assets
+    v = _get_voice(voice)
+
+    wav_dir = os.path.join(app.static_folder, "synth_output")
+    os.makedirs(wav_dir, exist_ok=True)
+    wav_name = f"synth_{int(time.time())}.wav"
+    wav_path = os.path.join(wav_dir, wav_name)
+
+    try:
+        if platform.system() == "Windows":
+            proc = subprocess.run([exe, "--trace-stream", vin, vdb, vcf, text, wav_path],
+                              capture_output=True, text=True, timeout=120)
+        else:
+            proc = subprocess.run(["wine", exe, "--trace-stream", vin, vdb, vcf, text, wav_path],
+                              capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Synthesis timed out (120s)"}), 500
+    if proc.returncode != 0:
+        return jsonify({"error": f"Synthesis failed: {(proc.stderr or '').strip()[:400]}"}), 500
+
+    # Parse the event stream: per-slot candidates/pick, ordered picks, words.
+    slots = {}       # slot_idx -> {phone, pool_n, cands:[(uid,tc)], pick}
+    picks = []       # ordered [{slot, uid}]
+    words = []       # [{word, phones:[{phone,stress}]}]
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line or line[0] != '{':
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        st, d = obj.get("stage"), obj.get("data", {})
+        if st == "slot":
+            slots[d["slot"]] = {"phone": d.get("phone"), "pool_n": d.get("pool_n", 0),
+                                "cands": [], "pick": None}
+        elif st == "cand":
+            s = slots.get(d["slot"])
+            if s is not None:
+                s["cands"].append((d["uid"], d["tc"]))
+        elif st == "pick":
+            s = slots.get(d["slot"])
+            if s is not None:
+                s["pick"] = d["uid"]
+            picks.append({"slot": d["slot"], "uid": d["uid"]})
+        elif st == "word":
+            words.append({"word": d.get("text", "?"),
+                          "phones": [{"phone": p, "stress": 0} for p in d.get("phones", [])]})
+
+    if v and "filenames" not in v:
+        v["filenames"] = vin_parser.parse_feat_filenames(v["vin_plain"])
+    fns = v["filenames"] if v else {}
+
+    def enrich(uid):
+        if v and isinstance(uid, int) and 0 <= uid < v["n_units"]:
+            u = vin_parser.get_unit(v["unit_data"], uid)
+            if u:
+                u["rec_name"] = fns.get(u["file_idx"], "?")
+                return u
+        return {"uid": uid, "phone": "?", "half": 0, "local_pos": 0, "dur_like": 0,
+                "file_idx": -1, "rec_name": "?"}
+
+    # wsola_units = the per-half-phone Viterbi picks, in synthesis order.
+    wsola_units = [enrich(p["uid"]) for p in picks]
+
+    # pre_prune_hps = per slot, the greedy best-by-target-cost candidate (what
+    # you'd pick ignoring join cost) + the candidate list. A mismatch with the
+    # Viterbi pick means the join cost changed the choice — same semantic as the
+    # old Frida "pre-prune vs Viterbi" flag.
+    pre_prune_hps = []
+    for p in picks:
+        s = slots.get(p["slot"], {})
+        cands = s.get("cands", [])
+        if cands:
+            best = min(cands, key=lambda c: c[1])
+            top = sorted(cands, key=lambda c: c[1])[:6]
+        else:
+            best, top = (p["uid"], 0.0), [(p["uid"], 0.0)]
+        hp = enrich(best[0])
+        hp["total"] = best[1]
+        hp["n_cand"] = s.get("pool_n", len(cands))
+        hp["top"] = [{"uid": u, "total": t} for (u, t) in top]
+        pre_prune_hps.append(hp)
+
+    return jsonify({
+        "ok": True,
+        "wav_url": f"/static/synth_output/{wav_name}",
+        "wsola_units": wsola_units,
+        "pre_prune_hps": pre_prune_hps,
+        "word_phones": words,
+        "n_hps": len(pre_prune_hps),
+        "n_wsola": len(wsola_units),
+    })
+
+
 @app.route('/api/synth', methods=['POST'])
 def api_synth():
     body = request.get_json(force=True)
@@ -758,43 +869,162 @@ def api_synth():
     if _is_remote_mode():
         return _synth_remote(text, body.get("voice", "tom"))
 
-    result = _get_frida_mgr().synthesize(text)
-    if not result.get("ok"):
-        return jsonify(result), 500
+    # Local: powered by spfy_synth_trace.exe (no Frida, no Speechify.exe).
+    return _synth_via_trace(text, body.get("voice", "tom"))
 
-    # Enrich WSOLA UIDs with unit metadata
-    v, name = _voice()
-    if v:
-        if "filenames" not in v:
-            v["filenames"] = vin_parser.parse_feat_filenames(v["vin_plain"])
-        fns = v["filenames"]
-        enriched = []
-        for uid in result["wsola_uids"]:
-            if uid >= 0 and uid < v["n_units"]:
-                u = vin_parser.get_unit(v["unit_data"], uid)
-                u["rec_name"] = fns.get(u["file_idx"], "?")
-                enriched.append(u)
+
+# -- API: Live Tracer (spfy_synth_trace.exe -> NDJSON -> SSE) --
+#
+# Unlike the Frida tracer (which hooks the closed Speechify.exe and returns a
+# single batch result), the live tracer streams events from our own byte-exact
+# reimplementation, spfy_synth_trace.exe. That binary is spfy_synth compiled
+# with -DSPFY_TRACE=1: it emits one NDJSON line per core lookup (slot, every
+# candidate score, Viterbi pick, WSOLA unit) as synthesis runs. We relay those
+# lines to the browser over Server-Sent Events at full speed; the browser owns
+# all visual pacing, so nothing here (or in the C engine) is slowed down.
+
+def _trace_exe():
+    """Locate spfy_synth_trace.exe. Order: env override, project bin/, dev
+    build dir. Returns an absolute path or None if not built yet."""
+    env = os.environ.get('SPFY_SYNTH_TRACE_EXE')
+    if env and os.path.exists(env):
+        return env
+    for c in (os.path.join(PROJ_ROOT, "bin", "spfy_synth_trace.exe"),
+              os.path.join(r"C:\tmp\spfy_build", "src", "cli", "spfy_synth_trace.exe")):
+        if os.path.exists(c):
+            return c
+    return None
+
+
+def _voice_assets(name):
+    """Resolve (vin, vdb, vcf) for a voice. Prefers the 8-bit u-law VDB
+    (tom8.vdb) — the 16k VDB decodes wrong through the 8kHz mu-law path.
+    Returns None if any of the three is missing."""
+    d = os.path.join(PROJ_ROOT, "en-US", name)
+    vin = os.path.join(d, f"{name}.vin")
+    vcf = os.path.join(d, f"{name}.vcf")
+    vdb = None
+    for cand in (f"{name}8.vdb", f"{name}.vdb"):
+        p = os.path.join(d, cand)
+        if os.path.exists(p):
+            vdb = p
+            break
+    if not (os.path.exists(vin) and vdb and os.path.exists(vcf)):
+        return None
+    return vin, vdb, vcf
+
+
+def _enrich_uid_event(v, data):
+    """Add phone / half / rec_name / file_idx to a unit- or pick-event's data
+    dict, resolved from the VIN unit table + feat filenames. Mutates and
+    returns `data`. Only used for the low-volume unit/pick events — candidate
+    events stay lightweight (uid + tc)."""
+    uid = data.get("uid")
+    if uid is None or not isinstance(uid, int) or not (0 <= uid < v["n_units"]):
+        return data
+    if "filenames" not in v:
+        v["filenames"] = vin_parser.parse_feat_filenames(v["vin_plain"])
+    u = vin_parser.get_unit(v["unit_data"], uid)
+    if u:
+        data["phone"] = u.get("phone", "?")
+        data["half"] = u.get("half", 0)
+        data["file_idx"] = u.get("file_idx", -1)
+        data["rec_name"] = v["filenames"].get(u.get("file_idx"), "?")
+    return data
+
+
+@app.route('/api/synth/stream/status')
+def api_synth_stream_status():
+    exe = _trace_exe()
+    return jsonify({"available": exe is not None, "exe": exe})
+
+
+@app.route('/api/synth/stream')
+def api_synth_stream():
+    """SSE endpoint. Spawns spfy_synth_trace.exe and relays its NDJSON events
+    to the browser one `data:` frame at a time, as they arrive. EventSource is
+    GET-only, so text/voice come in as query params."""
+    text = request.args.get("text", "").strip()
+    voice = request.args.get("voice", "tom")
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    exe = _trace_exe()
+    if not exe:
+        return jsonify({"error": "spfy_synth_trace.exe not found — build spfy "
+                                 "(spfy/build.bat) or set SPFY_SYNTH_TRACE_EXE"}), 503
+    assets = _voice_assets(voice)
+    if not assets:
+        return jsonify({"error": f"Voice assets (vin/vdb/vcf) for '{voice}' not found"}), 404
+    vin, vdb, vcf = assets
+    v = _get_voice(voice)   # for uid enrichment; None only if vin vanished
+
+    wav_dir = os.path.join(app.static_folder, "synth_output")
+    os.makedirs(wav_dir, exist_ok=True)
+    wav_name = f"live_{int(time.time())}.wav"
+    wav_path = os.path.join(wav_dir, wav_name)
+
+    def sse(obj):
+        # Compact separators — the candidate stream is high-volume, so drop
+        # the default ", " / ": " padding.
+        return f"data: {json.dumps(obj, separators=(',', ':'))}\n\n"
+
+    def generate():
+        try:
+            if platform.system() == "Windows":
+                # Windows: spawn the trace binary directly
+                proc = subprocess.Popen(
+                    [exe, "--trace-stream", vin, vdb, vcf, text, wav_path],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                )
             else:
-                enriched.append({"uid": uid, "phone": "?", "half": 0,
-                                 "rec_name": "?", "file_idx": -1})
-        result["wsola_units"] = enriched
+                # Linux/macOS: spawn via wine
+                proc = subprocess.Popen(
+                    ["wine", exe, "--trace-stream", vin, vdb, vcf, text, wav_path],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                )
+        except Exception as e:
+            yield sse({"stage": "error", "data": {"message": str(e)}})
+            return
 
-        # Also enrich pre-prune HPs
-        for hp in result["pre_prune_hps"]:
-            uid = hp["uid"]
-            if uid >= 0 and uid < v["n_units"]:
-                u = vin_parser.get_unit(v["unit_data"], uid)
-                hp["phone"] = u["phone"]
-                hp["half"] = u["half"]
-                hp["rec_name"] = fns.get(u["file_idx"], "?")
-                hp["file_idx"] = u["file_idx"]
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line or line[0] != '{':
+                    continue  # skip any stray banner/diagnostic lines
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("stage") in ("unit", "pick") and v:
+                    obj["data"] = _enrich_uid_event(v, obj.get("data", {}))
+                yield sse(obj)
+            proc.wait()
+        finally:
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
 
-    return jsonify(result)
+        # Terminal frame: hand the browser the rendered WAV to play back. The
+        # client closes the EventSource on this event so it doesn't auto-
+        # reconnect and re-run the synthesis.
+        yield sse({"stage": "complete",
+                   "data": {"wav_url": f"/static/synth_output/{wav_name}"}})
 
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',   # disable proxy buffering (nginx/CF)
+        'Connection': 'keep-alive',
+    })
+
+PORT = int(os.environ.get('SPFY_VIZ_PORT', 5000))  # Flask server port, default 5000
 
 # -- Main --
 
-if __name__ == '__main__':
+def main():
     print("=" * 60)
     print("  Speechify VIN/VDB Visualizer")
     print("=" * 60)
@@ -804,6 +1034,11 @@ if __name__ == '__main__':
     print("\n  Pre-loading Tom voice...")
     _get_voice("tom")
 
-    print(f"\n  Starting server on http://localhost:5000")
+    print(f"\n  Starting server on http://localhost:{PORT}...")
     print("=" * 60)
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    # threaded=True so an open SSE stream (the live tracer) doesn't block
+    # the browser's concurrent /static and WAV requests.
+    app.run(host='0.0.0.0', port=PORT, debug=True, use_reloader=False, threaded=True)
+
+if __name__ == '__main__':
+    main()

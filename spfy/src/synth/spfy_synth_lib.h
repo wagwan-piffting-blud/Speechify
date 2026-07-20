@@ -148,9 +148,18 @@ typedef struct {
  * text. */
 typedef void (*spfy_word_event_cb_t)(void *ctx, uint32_t sample_offset);
 
+/* Phrase boundary callback. Fires once at the start of each FE phrase
+ * (utterance), before that phrase's first unit is pushed. phrase_idx is
+ * 0-based; sample_offset as in the word callback. Lets consumers emit
+ * sentence-boundary events and lets analysis tools segment a multi-phrase
+ * render exactly without energy heuristics. */
+typedef void (*spfy_phrase_event_cb_t)(void *ctx, uint32_t phrase_idx,
+                                       uint32_t sample_offset);
+
 typedef struct {
-    spfy_word_event_cb_t word_cb;
-    void                *ctx;
+    spfy_word_event_cb_t   word_cb;
+    spfy_phrase_event_cb_t phrase_cb;   /* optional; NULL disables */
+    void                  *ctx;
 } spfy_synth_callbacks_t;
 
 /* Per-call synth: text -> FE -> USel -> WSOLA -> sink. The voice is loaded

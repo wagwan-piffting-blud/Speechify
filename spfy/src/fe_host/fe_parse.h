@@ -45,6 +45,12 @@ typedef struct {
     int                  phonemes_cap;   /* allocator bookkeeping */
 } fe_parsed_word_t;
 
+/* Max phrases ({...} utterance blocks) tracked per parse. Long inputs —
+ * e.g. a NWS bulletin with a 20-item locations list — run past 30
+ * utterances; phrases beyond the cap lose their terminator (falling back
+ * to '.', the wrong prosody class for list items) and their user pause. */
+#define FE_PARSE_MAX_PHRASES 64
+
 typedef struct {
     int               pause_before_ms;
     int               pause_after_ms;
@@ -58,14 +64,14 @@ typedef struct {
      * set the correct phrase_term per-utterance (so multi-utterance
      * inputs like "Hello, world." get local_10=0 for utt 0 ',' and
      * local_10=1 for utt 1 '.'). */
-    char              phrase_terms[16];
+    char              phrase_terms[FE_PARSE_MAX_PHRASES];
     int               n_phrase_terms;
     /* Per-phrase user pause (ms), from `\!pN` embedded tags rendered by
      * build_inline_mixed_tagged as `pau(uN)` openers (the `u` unit marks a
      * USER pause, distinct from the FE's structural `pau(pN)` which is not
      * rendered as silence). phrase_lead_pause_ms[k] is extra silence to
      * inject BEFORE phrase k. Indexed by phrase_id; 0 = none. */
-    int               phrase_lead_pause_ms[16];
+    int               phrase_lead_pause_ms[FE_PARSE_MAX_PHRASES];
 } fe_parsed_t;
 
 /* Parse the FE's tagged-text output (see host/PROTOCOL.md). Returns 0

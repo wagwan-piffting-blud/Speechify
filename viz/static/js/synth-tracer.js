@@ -1,4 +1,6 @@
-/* Synthesis Tracer - Frida-powered Viterbi visualization */
+/* Synthesis Tracer - batch Viterbi/unit-selection view.
+ * Powered by spfy_synth_trace.exe (our byte-exact reimplementation) via
+ * POST /api/synth — no Frida, no Speechify.exe, concurrency-safe. */
 
 function recColor(name) {
     let hash = 0;
@@ -13,70 +15,8 @@ function recColorBright(name) {
     return `hsl(${h}, 55%, 62%)`;
 }
 
-// -- Frida state --
-async function checkFridaState() {
-    try {
-        const state = await apiJson('/api/frida/state');
-        updateFridaStatus(state);
-    } catch (e) {
-        document.getElementById('frida-status').textContent = 'Frida: error';
-    }
-}
-
-function updateFridaStatus(state) {
-    const el = document.getElementById('frida-status');
-    const btn = document.getElementById('frida-attach-btn');
-    if (!state.frida_available) {
-        el.textContent = 'Frida: not installed';
-        el.style.color = '#e07070';
-        btn.textContent = 'Unavailable';
-        btn.disabled = true;
-    } else if (state.attached) {
-        el.textContent = `Frida: attached (PID ${state.pid})`;
-        el.style.color = '#7dae80';
-        btn.textContent = 'Detach';
-        btn.onclick = detachFrida;
-    } else {
-        el.textContent = 'Frida: not attached';
-        el.style.color = '#d4a55a';
-        btn.textContent = 'Attach';
-        btn.onclick = attachFrida;
-    }
-}
-
-async function attachFrida() {
-    const btn = document.getElementById('frida-attach-btn');
-    const status = document.getElementById('frida-status');
-    btn.textContent = 'Connecting...';
-    btn.disabled = true;
-    status.textContent = 'Starting Speechify + attaching Frida...';
-    status.style.color = '#d4a55a';
-    try {
-        const resp = await fetch('/api/frida/attach', {method: 'POST'});
-        const result = await resp.json();
-        if (result.ok) {
-            const msg = result.msg || '';
-            status.textContent = msg.includes('Already')
-                ? `Frida: already attached (PID ${result.pid})`
-                : `Frida: attached (PID ${result.pid})`;
-            updateFridaStatus({frida_available: true, attached: true, pid: result.pid});
-        } else {
-            status.textContent = `Error: ${result.error}`;
-            status.style.color = '#e07070';
-            btn.textContent = 'Attach';
-        }
-    } catch (e) {
-        status.textContent = `Error: ${e.message}`;
-        status.style.color = '#e07070';
-        btn.textContent = 'Attach';
-    }
-    btn.disabled = false;
-}
-
-async function detachFrida() {
-    await fetch('/api/frida/detach', {method: 'POST'});
-    updateFridaStatus({frida_available: true, attached: false, pid: null});
-}
+// Synthesis is powered by spfy_synth_trace.exe (our byte-exact reimplementation)
+// via POST /api/synth — no Frida, no Speechify.exe, and safe to run concurrently.
 
 // -- Synthesis --
 document.getElementById('synth-btn').addEventListener('click', async () => {
@@ -119,7 +59,7 @@ function renderSynthResult(result, text) {
 
     if (units.length === 0) {
         document.getElementById('synth-timeline').innerHTML =
-            '<p style="color:#d4a55a;padding:20px">No units captured. Is Frida attached?</p>';
+            '<p style="color:#d4a55a;padding:20px">No units returned for this text.</p>';
         return;
     }
 
@@ -603,4 +543,3 @@ async function loadSynthWaveform(wavUrl, canvas, units, audioElement, wordGroups
     }
 }
 
-checkFridaState();

@@ -370,7 +370,7 @@ int spfy_fe_textnorm_run(const spfy_fe_t            *fe,
             uint32_t new_pid = cur_phrase_id + 1u;
             spfy_fe_token_t pt = {0};
             pt.name      = 0; /* synthetic — no source byte */
-            pt.phrase_id = pid;
+            pt.phrase_id = (uint16_t)pid;
             pt.fields[0] = 0; /* medial */
             spfy_fe_stream_push(delta, SPFY_STREAM_PHRASE, pt);
 
@@ -400,7 +400,7 @@ int spfy_fe_textnorm_run(const spfy_fe_t            *fe,
                     tok_arr[i].phrase_id = (uint16_t)new_pid;
                 }
             }
-            cur_phrase_id = new_pid;
+            cur_phrase_id = (uint16_t)new_pid;
         }
     }
 

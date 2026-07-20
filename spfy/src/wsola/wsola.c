@@ -193,7 +193,7 @@ static int do_ola_blend(spfy_wsola_streamer_t *s,
     float new_scale = 1.0f;
     if (energy_norm_on) {
         long double te = 0.0L, he = 0.0L;
-        for (uint32_t i = tail_pad_lead; i < eff_ola; ++i) {
+        for (uint32_t i = (uint32_t)tail_pad_lead; i < eff_ola; ++i) {
             float t = (float)s->tail[i - tail_pad_lead];
             te += (long double)t * (long double)t;
         }

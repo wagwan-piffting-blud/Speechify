@@ -88,8 +88,10 @@ static int is_phon_vowel(uint16_t pid)
 }
 
 /* ARPAbet voiced phoneme set. All vowels are voiced; voiced consonants
- * are b, d, dh, dx, g, jh, l, m, n, ng, r, v, w, y, z, zh. */
-static int is_phon_voiced(uint16_t pid)
+ * are b, d, dh, dx, g, jh, l, m, n, ng, r, v, w, y, z, zh. Retained as a
+ * documented companion to is_phon_vowel(); not currently wired into any
+ * LTS pass, hence the unused attribute to keep the zero-warning build. */
+__attribute__((unused)) static int is_phon_voiced(uint16_t pid)
 {
     if (is_phon_vowel(pid)) return 1;
     switch (pid) {
@@ -339,7 +341,7 @@ static int try_irregular(const char *t, uint32_t off, uint32_t len,
             for (size_t k = 0; k < n_phons; ++k) {
                 uint16_t ph = phons[k];
                 int iv = (ph >= PH_ii && ph <= PH_AW);
-                uint16_t pos = (k == 0) ? 0u : 1u;
+                uint16_t pos = (uint16_t)((k == 0) ? 0u : 1u);
                 emit(delta, ph, syl_id, word_id, phrase_id,
                      (uint16_t)off, (uint16_t)len, iv, pos,
                      stress ? stress[k] : 0u);
@@ -371,7 +373,7 @@ static int try_irregular(const char *t, uint32_t off, uint32_t len,
                 for (size_t k = 0; k < n1; ++k) {
                     uint16_t ph = p1[k];
                     int iv = (ph >= PH_ii && ph <= PH_AW);
-                    uint16_t pos = (k == 0) ? 0u : 1u;
+                    uint16_t pos = (uint16_t)((k == 0) ? 0u : 1u);
                     emit(delta, ph, syl_id, word_id, phrase_id,
                          (uint16_t)off, (uint16_t)split, iv, pos,
                          s1 ? s1[k] : 0u);
@@ -397,7 +399,7 @@ static int try_irregular(const char *t, uint32_t off, uint32_t len,
         for (int k = 0; w->phons[k] != 0; ++k) {
             uint16_t ph = w->phons[k];
             int iv = (ph >= PH_ii && ph <= PH_AW);
-            uint16_t pos = (k == 0) ? 0u : 1u;
+            uint16_t pos = (uint16_t)((k == 0) ? 0u : 1u);
             /* Hand-written entries don't carry stress info. Leave at 0
              * (Unstressed) -- the dict-stress post-pass is opt-in via
              * SPFY_USE_DICT_STRESS, and even when on, marking all hand
@@ -474,7 +476,7 @@ static void syllable_to_phonemes(const char *t,
             for (int k = 0; names[k] != 0; ++k) {
                 uint16_t ph = names[k];
                 int iv = (ph >= PH_ii && ph <= PH_AW);
-                uint16_t pos = (k == 0) ? 0u : 1u;
+                uint16_t pos = (uint16_t)((k == 0) ? 0u : 1u);
                 emit(delta, ph, syl_id, word_id, phrase_id,
                      (uint16_t)(off + i), 1, iv, pos, 0u);
             }

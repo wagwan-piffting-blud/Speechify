@@ -40,7 +40,7 @@ int spfy_vdb_lookup_build(const spfy_vdb_t *vdb, spfy_vdb_lookup_t *out)
     out->order = (uint32_t *)malloc(vdb->n_indx_entries * sizeof *out->order);
     if (!out->order) return SPFY_E_NOMEM;
     for (uint32_t i = 0; i < vdb->n_indx_entries; ++i) out->order[i] = i;
-    out->n_entries = vdb->n_indx_entries;
+    out->n_entries = (uint32_t)vdb->n_indx_entries;
 
     g_sort_ctx_vdb = vdb;
     qsort(out->order, out->n_entries, sizeof *out->order,

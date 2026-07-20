@@ -2996,6 +2996,30 @@ Plain text input does NOT trigger emphasis -- `word_prominence` stays at 0-2.
 
 Server log confirms activation: `Applying emphasis 3 to word transmitted`.
 
+### Per-word ToBI marks: what is live vs no-op (confirmed 2026-07-01, Exp 79)
+
+Controlled tagged-text A/B through the byte-exact reimpl (`SPFY_TAGGED_FILE`
+hook, see `EXPERIMENTS.md` Experiment 79) settled the long-standing question
+of whether the FE's per-word ToBI annotations do anything downstream:
+
+- **Accent PRESENCE (`,H*`) is live**: it feeds `syl_accent` → sp[1]
+  sylType / sp[2] sylInWord → durt/f0tr CART targets + SP cost matrices →
+  target cost. Removing the `H*` from one word re-selected that word's whole
+  unit span (audibly different). It is a *bias*, not a command — adding an
+  accent to an unaccented word changed the sp targets but the Viterbi picked
+  the same units (pool had no cheaper contoured alternative; Tom's
+  `sylInWordCosts` matrix is degenerate).
+- **Accent TYPE is a no-op**: `H*` → `L*` produced byte-identical audio. Only
+  `accent != 0` survives into the sp populator; the 6-code ToBI array built
+  by `FUN_08e8a250` is consumed solely by the disabled EMPH system above.
+- **Boundary tones (`;L-L%` / `;H-H%` …) are a no-op** in the stock 3.0.5
+  back end: flipping them is byte-identical. Their binary consumers were
+  never found (fe-decomp tier3). Final-fall vs continuation prosody actually
+  derives from the phrase terminator punctuation (`local_10` in the sp
+  populator), which correlates with — but does not read — the tone mark.
+  The reimpl's env-gated `SPFY_PROSODY_REALIZE` + `SPFY_PROSODY_BT_GAIN`
+  layer turns them into a real f0tr-target bias (selection-driven, no DSP).
+
 ---
 
 ## Lexicalizer (SWIttsLex.dll)

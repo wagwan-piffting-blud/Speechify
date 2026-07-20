@@ -45,6 +45,13 @@
 #include "../fe/prosody.h"
 #include "../fe/baked_pos.h"
 
+/* Live-trace event emitters. In the normal spfy_synth build (and the SAPI
+ * DLL) SPFY_TRACE is undefined, so every spfy_trace_eventf() below is a
+ * no-op macro that compiles away — the synth path stays byte-identical and
+ * full-speed. Only the spfy_synth_trace target builds this file with
+ * -DSPFY_TRACE=1, turning the emits into NDJSON written to the trace sink. */
+#include "../common/log.h"
+
 /* In-house FE — used when SPFY_FE_INTERNAL=1 to bypass the SWIttsFe
  * DLL drive entirely. Lets us A/B audit the new path vs the hosted FE. */
 #include "../fe_internal/fe_internal.h"
@@ -60,6 +67,32 @@
 
 #define SILENCE_SENTINEL_UID 169578u
 #define MAX_CANDS_PER_SLOT   512
+
+/* ------------------------------------------------------------------ */
+/* Diagnostic verbosity                                                */
+/* ------------------------------------------------------------------ */
+
+/* Gates the per-synth status chatter emitted by spfy_synth_to_sink (FE
+ * slot count, phrase-boundary marker, PRSL pool sizes, PostScoringAdj
+ * tally, F0-curve params, final viterbi cost). Resolved lazily on first
+ * use: verbose when SPFY_VERBOSE or SPFY_SYNTH_DEBUG is set in the
+ * environment, else quiet. The CLI's -v/--verbose and -q/--quiet flags
+ * override this by assigning it directly in main() before the first synth
+ * call (-1 = unresolved). The one-time "[spfy] FE backend: ..." banner is
+ * NOT gated — it prints in both modes.
+ *
+ * Keying off SPFY_SYNTH_DEBUG keeps the audit drivers
+ * (test/oracle/master_compare*.py, which set it) fully verbose with no
+ * change on their side, while a bare `spfy_synth` invocation stays quiet. */
+static int spfy_synth_verbose = -1;
+
+static int synth_is_verbose(void)
+{
+    if (spfy_synth_verbose < 0)
+        spfy_synth_verbose = (getenv("SPFY_VERBOSE") != NULL
+                              || getenv("SPFY_SYNTH_DEBUG") != NULL) ? 1 : 0;
+    return spfy_synth_verbose;
+}
 
 /* ------------------------------------------------------------------ */
 /* Audio helpers (mirror spfy_synth_replay.c)                          */
@@ -1459,7 +1492,32 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * downstream slot-tree pipeline directly. */
     {
         spfy_fe_utterance_t *utt_unused = NULL;
-        if (spfy_text_has_inline_markup(text)) {
+        const char *tagged_file = getenv("SPFY_TAGGED_FILE");
+        if (tagged_file) {
+            /* Experiment hook: synth from a tagged-output file verbatim,
+             * bypassing the FE text pass entirely. Lets A/B tests hand-edit
+             * ToBI accent / boundary-tone marks in otherwise identical
+             * tagged text. The positional <text> CLI arg is ignored. */
+            FILE *tf = fopen(tagged_file, "rb");
+            if (!tf) {
+                fprintf(stderr, "SPFY_TAGGED_FILE: cannot open %s\n",
+                        tagged_file);
+                rc = SPFY_E_INVAL; goto fail;
+            }
+            fseek(tf, 0, SEEK_END);
+            long tsz = ftell(tf);
+            fseek(tf, 0, SEEK_SET);
+            if (tsz < 0) { fclose(tf); rc = SPFY_E_INVAL; goto fail; }
+            char *tagged = (char *)malloc((size_t)tsz + 1u);
+            if (!tagged) { fclose(tf); rc = SPFY_E_NOMEM; goto fail; }
+            size_t trd = fread(tagged, 1, (size_t)tsz, tf);
+            fclose(tf);
+            tagged[trd] = '\0';
+            fprintf(stderr, "[spfy] FE bypass: tagged text from %s "
+                    "(%zu bytes)\n", tagged_file, trd);
+            rc = spfy_fe_synth_tagged(v->fe, tagged, &hints, &utt_unused);
+            free(tagged);
+        } else if (spfy_text_has_inline_markup(text)) {
             /* Inline pronunciation markup — `\![...]` SPR escapes and/or
              * `<pron ...>` tags — that the DLL FE can't read. Phonemize the
              * plain runs with the DLL FE, the SPR runs with
@@ -1569,6 +1627,21 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     uint32_t n_phrases = max_phrase_id + 1u;
     int first_phrase_only = (getenv("SPFY_FIRST_PHRASE_ONLY") != NULL);
     if (first_phrase_only) n_phrases = 1u;
+
+    /* [live-trace] one-shot header: sample rate (for waveform decode) plus
+     * corpus/phrase counts so the viz can size its lattice up front. */
+    spfy_trace_eventf("meta",
+        "{\"sample_rate\":%u,\"n_units\":%u,\"n_phrases\":%u}",
+        v->vdb.sample_rate, v->units.n_units, n_phrases);
+
+    /* [live-trace] global spoken-word counter (across ALL phrases), aligned
+     * with the emitted `word` events. Tagged onto each `unit` event so the viz
+     * colors every stitched slice by its true word — stable the instant a
+     * slice lands, not re-derived from partial state. -1 until the first word.
+     * Guarded so the shipped (non-trace) build's control flow is identical. */
+#ifdef SPFY_TRACE
+    int g_wseq = -1;
+#endif
 
     /* Inter-phrase silence — DEFAULT OFF as of 2026-05-19 evening.
      *
@@ -1748,20 +1821,56 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
         }
     }
-    fprintf(stdout, "FE produced %u halfphone slots for text: %s\n", n_hp, text);
-    /* Also emit a stderr marker so multi-phrase audit parsers can detect
-     * phrase boundaries reliably even when stdout/stderr buffers are
-     * flushed out-of-order through a merged pipe. JSON slot dumps and
-     * this marker share the stderr stream — guaranteed interleaved.
-     * Flush stdout first so previous stdout chunks (path debug, etc)
-     * land in the pipe BEFORE this marker; without the flush, prior
-     * stdout output appended to the start of the marker line breaks
-     * the parser's regex anchor. */
-    fflush(stdout);
-    fprintf(stderr, "\nspfy_phrase_boundary: phrase_idx=%u n_hp=%u\n",
-            phrase_idx, n_hp);
-    fflush(stderr);
+    if (synth_is_verbose()) {
+        fprintf(stdout, "FE produced %u halfphone slots for text: %s\n", n_hp, text);
+        /* Also emit a stderr marker so multi-phrase audit parsers can detect
+         * phrase boundaries reliably even when stdout/stderr buffers are
+         * flushed out-of-order through a merged pipe. JSON slot dumps and
+         * this marker share the stderr stream — guaranteed interleaved.
+         * Flush stdout first so previous stdout chunks (path debug, etc)
+         * land in the pipe BEFORE this marker; without the flush, prior
+         * stdout output appended to the start of the marker line breaks
+         * the parser's regex anchor. */
+        fflush(stdout);
+        fprintf(stderr, "\nspfy_phrase_boundary: phrase_idx=%u n_hp=%u\n",
+                phrase_idx, n_hp);
+        fflush(stderr);
+    }
     if (n_hp == 0) { rc = SPFY_E_FORMAT; goto fail; }
+
+    /* [live-trace] phrase start: emitted once n_hp is known and before any
+     * candidate scoring, so the viz gets phrase -> slots -> cands -> pick ->
+     * unit in temporal order. `t` is the output sample count at phrase entry
+     * (the phrase's audio start on the timeline). */
+    spfy_trace_eventf("phrase",
+        "{\"idx\":%u,\"n_hp\":%u,\"t\":%u}",
+        phrase_idx, n_hp, sink->n_samples_written);
+
+#ifdef SPFY_TRACE
+    /* [live-trace] Per-word phone breakdown for the Synthesis Tracer's word
+     * grouping ({text, [arpabet phones]}, keyed by phrase). `parsed` is the
+     * common FE output (populated for hosted AND in-house backends), so this
+     * works regardless of SPFY_FE_HOSTED. The whole block is #ifdef'd out of
+     * the shipped build so the buffer construction costs nothing there. */
+    for (int wi_ = 0; wi_ < parsed->n_words; ++wi_) {
+        const fe_parsed_word_t *w_ = &parsed->words[wi_];
+        if ((uint32_t)w_->phrase_id != phrase_idx) continue;
+        char wbuf[4096];
+        int wo = snprintf(wbuf, sizeof wbuf, "{\"phrase\":%u,\"text\":\"", phrase_idx);
+        for (const char *t = w_->text; *t && wo < (int)sizeof wbuf - 8; ++t) {
+            if (*t == '"' || *t == '\\') wbuf[wo++] = '\\';
+            wbuf[wo++] = *t;
+        }
+        wo += snprintf(wbuf + wo, sizeof wbuf - (size_t)wo, "\",\"phones\":[");
+        for (int pi = 0; pi < w_->n_phonemes && wo < (int)sizeof wbuf - 24; ++pi) {
+            wo += snprintf(wbuf + wo, sizeof wbuf - (size_t)wo, "%s\"%s\"",
+                           pi ? "," : "", w_->phonemes[pi].arpabet);
+        }
+        if (wo > (int)sizeof wbuf - 4) wo = (int)sizeof wbuf - 4;
+        snprintf(wbuf + wo, sizeof wbuf - (size_t)wo, "]}");
+        spfy_trace_event("word", wbuf);
+    }
+#endif
 
     /* Per-tree-slot anchor storage (populated by PSA below). */
     anchor_cands  = (uint32_t **)calloc(tree.n_slots, sizeof *anchor_cands);
@@ -1973,6 +2082,16 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             pool_n = v->bucket_n[fb_hp];
             if (pool_n > MAX_CANDS_PER_SLOT) pool_n = MAX_CANDS_PER_SLOT;
         }
+
+        /* [live-trace] slot header: the half-phone target and its final
+         * candidate-pool size (after PRSL, 92-fallback, and bucket fallback).
+         * `phone` is the hp-class centre byte; the viz labels the slot from
+         * the eventual pick's VIN metadata. Per-candidate `cand` events for
+         * this slot follow once scoring completes. */
+        spfy_trace_eventf("slot",
+            "{\"slot\":%u,\"phone\":%u,\"pool_n\":%u}",
+            hp, ctx5[2], pool_n);
+
         if (pool_n == 0) {
             cbuf[hp] = (uint32_t *)calloc(1, sizeof **cbuf);
             tbuf[hp] = (float    *)calloc(1, sizeof **tbuf);
@@ -2135,6 +2254,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             int rcs = spfy_hp_innerscorer(&v->av, &ctx_in, &sp_in, &cart,
                                           cbuf[hp][i], &c);
             tbuf[hp][i] = (rcs != SPFY_OK || isnan(c) || isinf(c)) ? 1e9f : c;
+            /* [live-trace] one event per scored candidate — the raw search
+             * space the viz shows filling in and then getting pruned by the
+             * Viterbi. Compiled out entirely when SPFY_TRACE is off. */
+            spfy_trace_eventf("cand",
+                "{\"slot\":%u,\"uid\":%u,\"tc\":%.4f}",
+                hp, cbuf[hp][i], (double)tbuf[hp][i]);
         }
 
         /* Engine FUN_08e88de0 early-exit emulation: as cands are
@@ -2332,9 +2457,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         vslots[hp].n_cands = pool_n;
         total_cands += pool_n;
     }
-    fprintf(stdout, "PRSL pools built: %u total candidates across %u hp slots "
-                    "(%u slots had empty pools)\n",
-            total_cands, n_hp, n_empty);
+    if (synth_is_verbose())
+        fprintf(stdout, "PRSL pools built: %u total candidates across %u hp slots "
+                        "(%u slots had empty pools)\n",
+                total_cands, n_hp, n_empty);
 
     /* PostScoringAdj (Word + Syl level): for each Word/Syl in the slot tree,
      * call spfy_anchor_score on the cklx postings keyed by the word text,
@@ -2977,8 +3103,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
         }   /* end psa-syl loop */
 
-        fprintf(stdout, "PostScoringAdj: %u words + %u syls processed\n",
-                psa_words, psa_syls);
+        if (synth_is_verbose())
+            fprintf(stdout, "PostScoringAdj: %u words + %u syls processed\n",
+                    psa_words, psa_syls);
     }
     free(seg_names);   /* no longer needed after PSA */
     free(psa_syl_start);
@@ -3004,11 +3131,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     jc.missing_join_cost     = 1000.0f;
     if (getenv("SPFY_NO_F0_CURVE")) jc.curve = NULL;
     if (jc.curve) {
-        fprintf(stdout, "F0-curve loaded: %d bins, sub_off=%d, "
-                        "F0_EDGE=%.2f, MISSING_JOIN=%.2f\n",
-                jc.curve_max_idx, jc.curve_sub_off,
-                (double)jc.f0_edge_change_weight,
-                (double)jc.missing_join_cost);
+        if (synth_is_verbose())
+            fprintf(stdout, "F0-curve loaded: %d bins, sub_off=%d, "
+                            "F0_EDGE=%.2f, MISSING_JOIN=%.2f\n",
+                    jc.curve_max_idx, jc.curve_sub_off,
+                    (double)jc.f0_edge_change_weight,
+                    (double)jc.missing_join_cost);
         if (getenv("SPFY_DUMP_F0_CURVE")) {
             fprintf(stderr, "{\"f0_curve\":1,\"n\":%d,\"sub_off\":%d,\"vals\":[",
                     jc.curve_max_idx, jc.curve_sub_off);
@@ -3084,9 +3212,17 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             free(path_slots_buf); free(path_uids_buf);
             rc = rc_v; free(path_uids); goto fail;
         }
-        fprintf(stdout, "viterbi[dag] total cost=%.3f path_len=%u "
-                        "(of %u tree slots; %u HP)\n",
-                (double)total, path_len, tree.n_slots, n_hp);
+        if (synth_is_verbose())
+            fprintf(stdout, "viterbi[dag] total cost=%.3f path_len=%u "
+                            "(of %u tree slots; %u HP)\n",
+                    (double)total, path_len, tree.n_slots, n_hp);
+
+        /* [live-trace] DP done: total path cost + lengths. Individual `pick`
+         * events (below) carry the chosen UID per half-phone as the path is
+         * expanded. */
+        spfy_trace_eventf("viterbi",
+            "{\"phrase\":%u,\"total\":%.4f,\"path_len\":%u,\"n_slots\":%u}",
+            phrase_idx, (double)total, path_len, tree.n_slots);
 
         /* Expand multi-UID anchor cands into per-HP UIDs. For an HP
          * slot in the path, write the chosen UID directly. For a
@@ -3102,6 +3238,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             if (k == SPFY_SK_HALFPHONE) {
                 uint32_t hp = post_to_hp[s];
                 if (hp < n_slots) path_uids[hp] = uid;
+                /* [live-trace] the Viterbi's winning candidate for this
+                 * half-phone — the viz uses this to collapse the candidate
+                 * cloud onto the chosen unit. */
+                spfy_trace_eventf("pick", "{\"slot\":%u,\"uid\":%u}", hp, uid);
                 ++expand_hps;
                 continue;
             }
@@ -3196,6 +3336,11 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * slots we've crossed a word boundary. Insert a small silence chunk
      * (~40 ms @ 8 kHz = 320 samples) so the output paces like the engine. */
     uint32_t prev_word_idx = 0xFFFFFFFFu;
+#ifdef SPFY_TRACE
+    /* [live-trace] previous word_post for the global-word tagger; resets per
+     * phrase so the first content word of each phrase ticks g_wseq. */
+    uint32_t g_wprev = 0xFFFFFFFFu;
+#endif
     static const int16_t SILENCE_BUF[320] = {0};
     /* Inter-word silence injection: default OFF (0ms). Engine does
      * NOT inject inter-word silences — speech runs continuously,
@@ -3220,6 +3365,11 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         silence_n = sizeof SILENCE_BUF / sizeof *SILENCE_BUF;
     size_t played = 0, skipped = 0, paired_same = 0, paired_cross = 0,
            interword_pauses = 0;
+
+    /* Phrase-start boundary event: fires before this phrase's first unit
+     * is pushed, at the current output sample count. */
+    if (cb && cb->phrase_cb)
+        cb->phrase_cb(cb->ctx, phrase_idx, sink->n_samples_written);
 
     uint32_t s = 0;
     while (s < n_slots) {
@@ -3330,6 +3480,26 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 }
             }
         }
+#ifdef SPFY_TRACE
+        /* [live-trace] per-slot global word index for this WSOLA push. Advances
+         * g_wseq across EVERY slot of the run (even ones the run-batch skips),
+         * so a run straddling a word boundary — e.g. the two identical "tea"
+         * halves of "TTS" batched into one span — still records both words. The
+         * frontend splits the slice's colour at these boundaries. -1 = silence. */
+        char ws_buf[1024];
+        {
+            const uint32_t (*cxg)[5] = (const uint32_t (*)[5])slice_ctx.ctx;
+            int wo = 1; ws_buf[0] = '[';
+            for (uint32_t k = s; k < s + run_n && wo < (int)sizeof ws_buf - 16; ++k) {
+                uint32_t kp = hp_to_post[k];
+                int ksil = (cxg[kp][2] == 64 || cxg[kp][2] == 65);
+                if (!ksil && hp_word_idx[k] != g_wprev) { ++g_wseq; g_wprev = hp_word_idx[k]; }
+                wo += snprintf(ws_buf + wo, sizeof ws_buf - (size_t)wo,
+                               "%s%d", k > s ? "," : "", ksil ? -1 : g_wseq);
+            }
+            ws_buf[wo++] = ']'; ws_buf[wo] = '\0';
+        }
+#endif
         if (run_n >= 2) {
             spfy_unit_record_t r_last;
             (void)spfy_unit_record_get(&v->units, path_uids[s + run_n - 1],
@@ -3338,6 +3508,14 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                           + (uint32_t)r_last.dur_like
                           - (uint32_t)r1.local_pos;
             int align = !prev_have || prev_file_idx != r1.file_idx;
+            /* [live-trace] emitted span (a run of consecutive UIDs collapsed
+             * into one WSOLA push). `t` is the output sample offset where
+             * this unit's audio begins; the viz maps it onto the waveform.
+             * Flask enriches uid -> phone/half/rec_name during relay. */
+            spfy_trace_eventf("unit",
+                "{\"slot\":%u,\"uid\":%u,\"lp\":%u,\"dur\":%u,\"t\":%u,\"align\":%d,\"run\":%u,\"ws\":%s}",
+                s, u, (unsigned)r1.local_pos, span,
+                sink->n_samples_written, align, run_n, ws_buf);
             rc = append_recording_span(&ws, r1.file_idx, r1.local_pos,
                                        span, &v->feat, &v->vdb, &v->lookup, align,
                                        prev_f0_end, r1.f0_start,
@@ -3363,6 +3541,11 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     ++paired_cross;
                 }
             }
+            /* [live-trace] single-UID push (run of 1). See run>=2 note above. */
+            spfy_trace_eventf("unit",
+                "{\"slot\":%u,\"uid\":%u,\"lp\":%u,\"dur\":%u,\"t\":%u,\"align\":%d,\"run\":1,\"ws\":%s}",
+                s, u, (unsigned)r1.local_pos, (unsigned)r1.dur_like,
+                sink->n_samples_written, align, ws_buf);
             rc = append_recording_span(&ws, r1.file_idx, r1.local_pos,
                                        r1.dur_like, &v->feat, &v->vdb, &v->lookup, align,
                                        prev_f0_end, r1.f0_start,
@@ -3452,7 +3635,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * pipeline does not size silence from structural `pau(pN)` tokens,
          * so this is where an explicit pause duration becomes real silence. */
         int npid = (int)phrase_idx + 1;
-        if (npid < 16 && parsed->phrase_lead_pause_ms[npid] > sil_ms)
+        if (npid < FE_PARSE_MAX_PHRASES
+            && parsed->phrase_lead_pause_ms[npid] > sil_ms)
             sil_ms = parsed->phrase_lead_pause_ms[npid];
         if (sil_ms > 0) {
             static const int16_t INTER_PHRASE_SILENCE[16000] = {0};
@@ -3555,7 +3739,8 @@ cleanup:
  * Consumed by the 64-bit SAPI shim to emit SPEI_WORD_BOUNDARY events
  * after the subprocess synth completes. */
 struct spfy_cli_wev_ctx {
-    FILE     *fp;
+    FILE     *fp;       /* word events (SPFY_WORD_EVENTS_FILE)     */
+    FILE     *pfp;      /* phrase events (SPFY_PHRASE_EVENTS_FILE) */
     unsigned *idx;
 };
 void spfy_cli_word_cb(void *ctx, uint32_t sample_offset);
@@ -3565,6 +3750,16 @@ void spfy_cli_word_cb(void *ctx, uint32_t sample_offset)
     if (!c || !c->fp) return;
     fprintf(c->fp, "%u\t%u\n", sample_offset, *c->idx);
     (*c->idx)++;
+}
+
+void spfy_cli_phrase_cb(void *ctx, uint32_t phrase_idx,
+                        uint32_t sample_offset);
+void spfy_cli_phrase_cb(void *ctx, uint32_t phrase_idx,
+                        uint32_t sample_offset)
+{
+    struct spfy_cli_wev_ctx *c = (struct spfy_cli_wev_ctx *)ctx;
+    if (!c || !c->pfp) return;
+    fprintf(c->pfp, "%u\t%u\n", sample_offset, phrase_idx);
 }
 
 /* The CLI main() is gated so this same .c file can be compiled into both
@@ -3605,6 +3800,29 @@ static const char *resolve_asset_tempdir(const char *argv0)
     return dir;
 }
 
+/* Read an entire text file into a malloc'd, NUL-terminated buffer, with
+ * trailing whitespace stripped (an editor / `echo` newline would otherwise
+ * ride into the final phrase). Returns NULL on open/read/OOM failure.
+ * Caller frees. Backs the -f/--file CLI option so input text can come from
+ * a file instead of a shell-quoted argv — avoids the platform quoting and
+ * command-line length limits that bite long inputs. */
+static char *read_text_file(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long sz = ftell(fp);
+    if (sz < 0) { fclose(fp); return NULL; }
+    if (fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return NULL; }
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+    buf[got] = '\0';
+    while (got > 0 && isspace((unsigned char)buf[got - 1])) buf[--got] = '\0';
+    return buf;
+}
+
 int main(int argc, char **argv)
 {
     /* Two CLI forms:
@@ -3616,45 +3834,114 @@ int main(int argc, char **argv)
      *   9-arg (legacy):      adds explicit hpclass/vocab/fe_tables_{a,b}
      *                        paths between the voice triplet and text —
      *                        kept so audit scripts that pass exact data
-     *                        paths still work. */
+     *                        paths still work.
+     *
+     * Either form accepts -f/--file <path> anywhere on the command line. It
+     * supplies the input text from a file, in which case the "<text>"
+     * positional is omitted (dropping the arg count to 4 / 8 positionals
+     * plus the flag). */
     const char *vin_path, *vdb_path, *vcf_path;
     const char *hpc_path, *vocab, *tab_a, *tab_b;
     const char *text, *out_wav;
     spfy_asset_paths_t embedded_paths = {0};
+    char *file_text = NULL;
 
-    if (argc == 6) {
-        vin_path = argv[1];
-        vdb_path = argv[2];
-        vcf_path = argv[3];
-        text     = argv[4];
-        out_wav  = argv[5];
+    /* Pull the option flags (-f/--file and its =VALUE variants, -q/--quiet,
+     * -v/--verbose) out of argv, compacting the remaining positionals down so
+     * the argc-based layout below is unchanged apart from the missing
+     * "<text>" slot. -q/-v assign the file-scope verbosity directly
+     * (last flag wins); leaving spfy_synth_verbose at -1 defers to the
+     * SPFY_VERBOSE / SPFY_SYNTH_DEBUG env vars, so an explicit flag always
+     * overrides the environment. */
+    const char *file_path_arg = NULL;
+    /* --trace-stream: emit the live NDJSON event stream to stdout. Recognised
+     * and stripped in BOTH builds so the positional layout matches; only the
+     * spfy_synth_trace target (SPFY_TRACE=1) actually installs the sink. */
+    int trace_stream = 0;
+    {
+        int w = 1;
+        for (int r = 1; r < argc; r++) {
+            const char *a = argv[r];
+            if (strcmp(a, "-f") == 0 || strcmp(a, "--file") == 0) {
+                if (r + 1 >= argc) {
+                    fprintf(stderr, "%s: %s requires a file path argument\n",
+                            argv[0], a);
+                    return 2;
+                }
+                file_path_arg = argv[++r];
+            } else if (strncmp(a, "--file=", 7) == 0) {
+                file_path_arg = a + 7;
+            } else if (strncmp(a, "-f=", 3) == 0) {
+                file_path_arg = a + 3;
+            } else if (strcmp(a, "-q") == 0 || strcmp(a, "--quiet") == 0) {
+                spfy_synth_verbose = 0;
+            } else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0) {
+                spfy_synth_verbose = 1;
+            } else if (strcmp(a, "--trace-stream") == 0) {
+                trace_stream = 1;
+            } else {
+                argv[w++] = argv[r];
+            }
+        }
+        argc = w;
+    }
+
+    int short_form;
+    if (argc == (file_path_arg ? 5 : 6)) {
+        short_form = 1;
+    } else if (argc == (file_path_arg ? 9 : 10)) {
+        short_form = 0;
+    } else {
+        fprintf(stderr,
+            "usage: %s <voice.vin> <voice.vdb> <voice.vcf> \"<text>\" <out.wav>\n"
+            "   or: %s <voice.vin> <voice.vdb> <voice.vcf> <hpclass.bin>\n"
+            "          <vocab.json> <fe_tables_a> <fe_tables_b>\n"
+            "          \"<text>\" <out.wav>          (legacy)\n"
+            "\n"
+            "  -f, --file <path>   read input text from <path> instead of the\n"
+            "                      \"<text>\" argument (which is then omitted)\n"
+            "  -q, --quiet         suppress per-synth diagnostics, keeping only\n"
+            "                      the FE-backend banner (default)\n"
+            "  -v, --verbose       print the full FE/synth pipeline diagnostics\n",
+            argv[0], argv[0]);
+        return 2;
+    }
+
+    if (file_path_arg) {
+        file_text = read_text_file(file_path_arg);
+        if (!file_text) {
+            fprintf(stderr, "%s: cannot read input file '%s'\n",
+                    argv[0], file_path_arg);
+            return 1;
+        }
+    }
+
+    {
+        int i = 1;
+        vin_path = argv[i++];
+        vdb_path = argv[i++];
+        vcf_path = argv[i++];
+        if (!short_form) {
+            hpc_path = argv[i++];
+            vocab    = argv[i++];
+            tab_a    = argv[i++];
+            tab_b    = argv[i++];
+        }
+        text     = file_path_arg ? file_text : argv[i++];
+        out_wav  = argv[i++];
+    }
+
+    if (short_form) {
         const char *tmpdir = resolve_asset_tempdir(argv[0]);
         if (spfy_assets_extract(tmpdir, &embedded_paths) != 0) {
             fprintf(stderr, "failed to extract embedded assets to %s\n", tmpdir);
+            free(file_text);
             return 1;
         }
         hpc_path = embedded_paths.hpclass;
         vocab    = embedded_paths.vocab;
         tab_a    = embedded_paths.tables_a;
         tab_b    = embedded_paths.tables_b;
-    } else if (argc == 10) {
-        vin_path = argv[1];
-        vdb_path = argv[2];
-        vcf_path = argv[3];
-        hpc_path = argv[4];
-        vocab    = argv[5];
-        tab_a    = argv[6];
-        tab_b    = argv[7];
-        text     = argv[8];
-        out_wav  = argv[9];
-    } else {
-        fprintf(stderr,
-            "usage: %s <voice.vin> <voice.vdb> <voice.vcf> \"<text>\" <out.wav>\n"
-            "   or: %s <voice.vin> <voice.vdb> <voice.vcf> <hpclass.bin>\n"
-            "          <vocab.json> <fe_tables_a> <fe_tables_b>\n"
-            "          \"<text>\" <out.wav>          (legacy)\n",
-            argv[0], argv[0]);
-        return 2;
     }
 
     /* Voice loaded once via the shared synth library; the rest of main()
@@ -3679,33 +3966,46 @@ int main(int argc, char **argv)
         };
         if ((rc = spfy_voice_load(&paths, &voice)) != SPFY_OK) {
             fprintf(stderr, "error loading voice: %s\n", spfy_strerror(rc));
+            free(file_text);
             return 1;
         }
     }
 
 
 
+    /* [live-trace] Route the NDJSON event stream to stdout when
+     * --trace-stream was given. No-op in the normal spfy_synth build
+     * (SPFY_TRACE undefined); only spfy_synth_trace installs the sink. */
+    if (trace_stream) spfy_trace_set_sink(stdout);
+
     /* Open output sink (file mode for CLI; SAPI builds a callback sink). */
     spfy_wav_writer_t wav = {0};
     if ((rc = spfy_wav_open(&wav, out_wav, voice.vdb.sample_rate)) != SPFY_OK) {
         fprintf(stderr, "error opening %s: %s\n", out_wav, spfy_strerror(rc));
         spfy_voice_free(&voice);
+        free(file_text);
         return 1;
     }
 
-    /* Optional word-events sidecar for the 64-bit SAPI shim. */
+    /* Optional word-events sidecar for the 64-bit SAPI shim, plus an
+     * optional phrase-events sidecar (analysis: exact per-utterance
+     * segmentation of multi-phrase renders). */
     FILE *wev_fp = NULL;
+    FILE *pev_fp = NULL;
     unsigned wev_word_idx = 0;
     {
         const char *wev_path = getenv("SPFY_WORD_EVENTS_FILE");
         if (wev_path && *wev_path) wev_fp = fopen(wev_path, "wb");
+        const char *pev_path = getenv("SPFY_PHRASE_EVENTS_FILE");
+        if (pev_path && *pev_path) pev_fp = fopen(pev_path, "wb");
     }
-    struct spfy_cli_wev_ctx wev_ctx = { wev_fp, &wev_word_idx };
+    struct spfy_cli_wev_ctx wev_ctx = { wev_fp, pev_fp, &wev_word_idx };
     spfy_synth_callbacks_t cb = {0};
     spfy_synth_callbacks_t *cbp = NULL;
-    if (wev_fp) {
-        cb.word_cb = spfy_cli_word_cb;
-        cb.ctx     = &wev_ctx;
+    if (wev_fp || pev_fp) {
+        if (wev_fp) cb.word_cb   = spfy_cli_word_cb;
+        if (pev_fp) cb.phrase_cb = spfy_cli_phrase_cb;
+        cb.ctx = &wev_ctx;
         cbp = &cb;
     }
 
@@ -3724,8 +4024,16 @@ int main(int argc, char **argv)
     rc = spfy_synth_to_sink(&voice, text, &wav, cbp, &stats);
 
     if (wev_fp) { fclose(wev_fp); wev_fp = NULL; }
+    if (pev_fp) { fclose(pev_fp); pev_fp = NULL; }
     spfy_wav_close(&wav);
     if (rc == SPFY_OK) {
+        /* [live-trace] terminal event — lets the viz finalize and fetch the
+         * WAV. No-op without an installed sink. */
+        spfy_trace_eventf("done", "{\"samples\":%u,\"n_phrases\":%u}",
+                          stats.samples_emitted, stats.n_phrases);
+        /* Keep stdout pure NDJSON in stream mode; the human summary would
+         * otherwise land mid-stream and break the SSE relay's JSON parse. */
+        if (!trace_stream)
         fprintf(stdout, "wrote %s: %u samples (%.2f s)  "
                         "[%zu units, %zu same-rec pairs, %zu cross-rec, "
                         "%zu skipped, %zu interword pauses, "
@@ -3740,6 +4048,7 @@ int main(int argc, char **argv)
     } else {
         fprintf(stderr, "error: %s\n", spfy_strerror(rc));
     }
+    free(file_text);
     spfy_voice_free(&voice);
     return rc == SPFY_OK ? 0 : 1;
 }

@@ -817,9 +817,9 @@ int spfy_text_normalize(const char *input,
                                     if (L > 0) {
                                         if (L >= sizeof word_text) L = sizeof word_text - 1;
                                         for (size_t j = 0; j < L; ++j) {
-                                            char c = cs[j];
-                                            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-                                            word_text[j] = c;
+                                            char ch = cs[j];
+                                            if (ch >= 'A' && ch <= 'Z') ch += 'a' - 'A';
+                                            word_text[j] = ch;
                                         }
                                         word_text[L] = '\0';
                                     }
@@ -1065,8 +1065,8 @@ int spfy_text_normalize(const char *input,
         }
 
         /* Punctuation. */
-        if (is_sentence_end(c)) { push_break(&s, SPFY_TOKEN_SENTENCE_BREAK, c); ++p; continue; }
-        if (is_phrase_break(c)) { push_break(&s, SPFY_TOKEN_PHRASE_BREAK,   c); ++p; continue; }
+        if (is_sentence_end(c)) { push_break(&s, SPFY_TOKEN_SENTENCE_BREAK, (char)c); ++p; continue; }
+        if (is_phrase_break(c)) { push_break(&s, SPFY_TOKEN_PHRASE_BREAK,   (char)c); ++p; continue; }
 
         /* Anything else: drop. */
         ++p;

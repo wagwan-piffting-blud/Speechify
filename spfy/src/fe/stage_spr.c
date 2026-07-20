@@ -154,7 +154,7 @@ static void fill_sp_features(spfy_fe_slot_t       *slots,
                               const spfy_fe_token_t *words,
                               uint32_t              n_words)
 {
-    (void)n_words;
+    (void)words; (void)n_words;
     /* Slot layout: 2 leading pau pads, then 2-per-phoneme, then 2 trailing
      * pau pads. So phon[(i/2) - 1] is the source phoneme for slot[i]
      * when i/2 ∈ [1, n_phons]; pad slots have no phoneme. */

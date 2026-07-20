@@ -740,7 +740,7 @@ static int analyze_word(const char *raw_word, word_rec_t *w)
                 size_t last_start = pl;
                 while (last_start > 0 && phon_str[last_start - 1] != ' ') last_start--;
                 char arpa_lc[8] = {0};
-                for (int j = 0; j < 7 && phon_str[last_start + j]; ++j) {
+                for (size_t j = 0; j < 7 && phon_str[last_start + j]; ++j) {
                     char c = phon_str[last_start + j];
                     if (c == '0' || c == '1' || c == '2') break;
                     if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');

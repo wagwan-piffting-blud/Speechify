@@ -21,6 +21,7 @@
         <button class="tab" data-tab="trees">Trees</button>
         <button class="tab" data-tab="vdb-explorer">VDB Explorer</button>
         <button class="tab" data-tab="synth-tracer">Synthesis Tracer</button>
+        <button class="tab" data-tab="live-tracer">Live Tracer</button>
     </nav>
 
     <main>
@@ -126,12 +127,66 @@
                 <input id="synth-text" type="text" placeholder="Enter text to synthesize..."
                        value="The weather today will be partly cloudy.">
                 <button id="synth-btn">Synthesize</button>
-                <span id="frida-status">Frida: not connected</span>
-                <button id="frida-attach-btn">Attach</button>
+                <span id="synth-tracer-status" class="lt-status">Powered by spfy_synth_trace.exe — no Frida needed</span>
             </div>
             <div id="synth-timeline"></div>
             <div id="synth-audio"></div>
             <div id="synth-details"></div>
+        </div>
+
+        <!-- Tab 5: Live Tracer (our reimplementation, streamed via SSE) -->
+        <div id="live-tracer" class="tab-content">
+            <div class="synth-controls">
+                <input id="live-text" type="text" placeholder="Enter text to synthesize..."
+                       value="The quick brown fox jumps.">
+                <button id="live-run-btn">Run Live Trace</button>
+                <span class="lt-speed-ctl">
+                    Speed
+                    <input id="live-speed" type="range" min="0.1" max="4" step="0.05" value="0.5">
+                    <span id="live-speed-val">0.50×</span>
+                </span>
+                <span class="lt-audio-ctl">
+                    Audio
+                    <button class="lt-aud-btn" data-aud="off">Off</button>
+                    <button class="lt-aud-btn active" data-aud="blips">Blips</button>
+                    <button class="lt-aud-btn" data-aud="walk">Walkthrough</button>
+                </span>
+                <button id="live-pause-btn">⏸ Pause</button>
+                <button id="live-instant-btn">⏭ Skip</button>
+                <span id="live-status" class="lt-status">…</span>
+            </div>
+
+            <div class="lt-stats">
+                <div class="lt-stat"><span class="lt-stat-val" id="live-c-slots">0</span><span class="lt-stat-lbl">Half-phone slots</span></div>
+                <div class="lt-stat"><span class="lt-stat-val" id="live-c-cands">0</span><span class="lt-stat-lbl">Candidates scored</span></div>
+                <div class="lt-stat"><span class="lt-stat-val" id="live-c-picks">0</span><span class="lt-stat-lbl">Viterbi picks</span></div>
+                <div class="lt-stat"><span class="lt-stat-val" id="live-c-units">0</span><span class="lt-stat-lbl">Units stitched</span></div>
+                <div class="lt-stat"><span class="lt-stat-val" id="live-c-cost">–</span><span class="lt-stat-lbl">Path cost</span></div>
+            </div>
+            <div class="lt-progress"><div id="live-progress-bar" class="lt-progress-bar"></div></div>
+            <div id="live-viterbi" class="lt-viterbi"></div>
+
+            <!-- Concatenation animation (source recording -> trim -> stitch) + live log -->
+            <div class="lt-main">
+                <section class="lt-stage-wrap">
+                    <canvas id="live-stage"></canvas>
+                </section>
+                <aside class="lt-ticker-wrap">
+                    <h3>Core lookups (live)</h3>
+                    <div id="live-ticker" class="lt-ticker"></div>
+                </aside>
+            </div>
+
+            <!-- Supporting: the Viterbi candidate search -->
+            <div class="lt-lattice-section">
+                <div class="lt-legend">
+                    Candidate search — each column is a half-phone; dots are units the engine
+                    scored (green = low target cost, red = high); gold = the Viterbi pick.
+                </div>
+                <div id="live-lattice" class="lt-lattice"></div>
+            </div>
+
+            <div id="live-audio" class="lt-audio"></div>
         </div>
     </main>
 
@@ -142,5 +197,6 @@
     <script src="/static/js/waveform.js"></script>
     <script src="/static/js/audio-player.js"></script>
     <script src="/static/js/synth-tracer.js"></script>
+    <script src="/static/js/live-tracer.js"></script>
 </body>
 </html>

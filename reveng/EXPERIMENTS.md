@@ -1621,3 +1621,48 @@ The Viterbi search optimizes: "find Craig units that best match TOM's predicted 
 
 See `reveng/DLL_ANALYSIS.md` for full decompilation details, struct layouts, and function maps.
 - Build pipeline proven and repeatable for new voices
+
+## Experiment 79: Per-word ToBI marks — live vs no-op A/B (2026-07-01)
+
+**Question:** are the ToBI intonation marks the FE emits per word (`,H*` pitch
+accents, `;L-L%`/`;H-H%` boundary tones) actually consumed by the back end, or
+dead annotation?
+
+**Method:** added an env-gated `SPFY_TAGGED_FILE` hook to `spfy_synth.c` that
+feeds a tagged-output file verbatim into `spfy_fe_synth_tagged`, bypassing the
+FE text pass. Captured the DLL FE's canonical tagged output for
+"The men ran to the store." (`men` = `.1,H*`, `ran` = `.1` unaccented,
+`store` = `.1,H*;L-L%`), then synthesized hand-edited variants and compared
+WAV MD5 + `SPFY_DUMP_PATH` UID paths + `SPFY_SP_TARGET_DUMP` sp vectors.
+
+| Variant | Edit | Result vs baseline |
+| --- | --- | --- |
+| v0 | none (verbatim tagged) | **byte-identical to the normal text path** (hook sanity) |
+| v1 | remove `,H*` from "men" | **DIFFERENT audio** — units for "the men" fully re-selected (50151…52451,138479,21307 → 7338…7342,100672,12254,43219,43220), path re-converges at "ran" |
+| v2 | add `,H*` to "ran" | sp targets DID change (sp[1] 2→3, sp[2] 1→3 on all 6 HP slots) but **byte-identical audio** — Viterbi optimum absorbed the bias |
+| v3 | `H*` → `L*` on "men" | **byte-identical** — accent TYPE is discarded (only `*` presence survives into `syl_accent`) |
+| v4 | `;L-L%` → `;H-H%` on "store" | **byte-identical** — boundary tones are inert in the stock 3.0.5 back end |
+| v4 + `SPFY_PROSODY_REALIZE=1 BT_GAIN=2` | same | **DIFFERENT audio** (and v0-realize ≠ v4-realize) — the gated Option A layer makes tones live |
+
+**Conclusions:**
+
+1. Pitch-accent **presence** is live: `syl_accent` → sp[1] sylType / sp[2]
+   sylInWord → durt/f0tr CART targets + SP cost matrices → target cost →
+   selection. It **biases** selection; it does not command it (v2 shows the
+   optimum can absorb a target change when the candidate pool doesn't offer a
+   cheaper contoured alternative — consistent with Tom's degenerate all-zero
+   `sylInWordCosts` matrix neutralizing sp[2]).
+2. Pitch-accent **type** (`H*` vs `L*` vs `L+H*`…) is an explicit no-op in the
+   stock path: the accent-code array built by `FUN_08e8a250` (`H*`=1…`L*+H`=6) is only
+   consumed by the EMPH system, which is `EMPH_ENABLED=0` in every shipped
+   VCF. (The FE only ever emits `H*` for plain text anyway.)
+3. Boundary tones are a no-op in the stock back end — matching the fe-decomp
+   finding that their consumers were never located in tier3. Sentence-final vs
+   continuation prosody actually comes from the phrase terminator punctuation
+   (`local_10` in the sp populator), which merely correlates with the tone mark.
+4. Expressiveness levers that DO work: `EMPH_ENABLED=1` + SSML `<emphasis>`
+   (engine-native, shifts f0tr/durt targets; audible on Tom), the
+   `SPFY_PROSODY_REALIZE`/`SPFY_PROSODY_BT_GAIN` boundary-tone bias, per-word
+   `pitch_st`/`rate_pct` markup, and now arbitrary hand-authored tagged text
+   via `SPFY_TAGGED_FILE`. All selection-driven; corpus coverage caps the
+   achievable contour depth.
