@@ -8,7 +8,8 @@
 # Outputs (in dist/):
 #   spfy_wasm.js        ES-module factory (createSpfyModule).
 #   spfy_wasm.wasm      WebAssembly bytecode.
-#   spfy_wasm.data      Preloaded virtual-FS image (voice + tables).
+#   voices/             Lazy voice assets + manifest.json (fetched on
+#                       demand by the browser; no .data sidecar).
 #
 # After build, `npm run dev` serves the demo with hot reload.
 
@@ -44,6 +45,8 @@ emmake cmake --build "$BUILD_DIR" -j
 echo
 echo "Built artifacts:"
 ls -lh dist/spfy_wasm.* 2>/dev/null || echo "  (nothing in dist/)"
+echo "Staged voices:"
+ls -1 dist/voices/*/*/ -d 2>/dev/null | sed 's/^/  /' || echo "  (none staged)"
 echo
 echo "Run the demo:"
 echo "  npm install     # one-time"

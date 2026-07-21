@@ -5,12 +5,13 @@
 // to .gz / .br when present alongside the original.
 //
 // Writes:
-//   dist/spfy_wasm.data.gz   dist/spfy_wasm.data.br
 //   dist/spfy_wasm.wasm.gz   dist/spfy_wasm.wasm.br
 //   dist/spfy_wasm.js.gz     dist/spfy_wasm.js.br
 //
-// Original files are kept (some hosts don't serve pre-compressed; they
-// gzip on the fly).
+// Voice assets under dist/voices/ are NOT compressed here: the VDBs are
+// already-compact μ-law-ish PCM that barely shrinks, and they are fetched
+// on demand rather than up front. Original files are kept (some hosts
+// don't serve pre-compressed; they gzip on the fly).
 
 import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -20,7 +21,7 @@ import zlib from "node:zlib";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir   = path.resolve(__dirname, "..", "dist");
 
-const files = ["spfy_wasm.data", "spfy_wasm.wasm", "spfy_wasm.js"];
+const files = ["spfy_wasm.wasm", "spfy_wasm.js"];
 
 // Gzip @ level 9 (max) — slow at build time, smaller payload at runtime.
 // Brotli quality is tunable via $BROTLI_QUALITY (default 6). Quality 11

@@ -1,15 +1,15 @@
 // Webpack bundling for the spfy WASM demo.
 //
-// The emscripten build (build.sh) emits three files into dist/:
+// The emscripten build (build.sh) emits into dist/:
 //   spfy_wasm.js       JS factory (ES module).
-//   spfy_wasm.wasm     WebAssembly bytecode.
-//   spfy_wasm.data     Preloaded virtual-FS image (voice + tables).
+//   spfy_wasm.wasm     WebAssembly bytecode (code + small SWIttsFe DLLs).
+//   voices/            Lazy voice assets + manifest.json.
 //
 // Webpack here just bundles the page glue (web/index.js + index.html)
-// and copies the three emscripten artifacts plus styles.css straight
-// through. We deliberately do NOT let webpack parse spfy_wasm.js (it's
-// already self-contained); we just import it dynamically and let the
-// browser fetch the sidecars at runtime.
+// and copies the emscripten artifacts + the voices/ tree + styles.css
+// straight through. We deliberately do NOT let webpack parse
+// spfy_wasm.js (it's already self-contained); we just load it via a
+// <script> tag and let the browser fetch the wasm + voices at runtime.
 
 import path        from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,11 +49,15 @@ export default (env, argv) => {
           // the dev server starts; the page surfaces a clear error when
           // it can't fetch spfy_wasm.js, prompting the user to build.
           // Production builds will fail loudly here (as they should).
+          // NB there is no .data sidecar anymore: voices load lazily.
           { from: "dist/spfy_wasm.wasm", to: "spfy_wasm.wasm",
             noErrorOnMissing: !isProd },
-          { from: "dist/spfy_wasm.data", to: "spfy_wasm.data",
-            noErrorOnMissing: !isProd },
           { from: "dist/spfy_wasm.js",   to: "spfy_wasm.js",
+            noErrorOnMissing: !isProd },
+          // Lazy voice assets + manifest (dist/voices/, produced by
+          // stage_voices.py). Each file is <100 MB so it deploys cleanly
+          // to GitHub Pages; the browser fetches only the chosen voice.
+          { from: "dist/voices", to: "voices",
             noErrorOnMissing: !isProd },
         ],
       }),

@@ -1,0 +1,18 @@
+{
+  "_comment": "Voices hosted OFF-site (their files are not in the repo and are fetched from an absolute, CORS-enabled URL instead of Pages). stage_voices.py appends these to voices/manifest.json verbatim, so CI produces the full catalog without needing the (gitignored / oversized) source files. Sizes are fixed and used only for the download progress bar; keep them in sync if a voice is re-exported. REQUIRED on the host: each file must be served with an 'Access-Control-Allow-Origin' header (e.g. '*') or the browser fetch is blocked by CORS; serving it 'application/octet-stream' with a long immutable Cache-Control is recommended.",
+  "voices": [
+    {
+      "id": "paulina",
+      "display": "Paulina",
+      "lang": "es-MX",
+      "prefix": "paulina",
+      "large": true,
+      "baseUrl": "https://wagspuzzle.space/assets/paulina/",
+      "files": [
+        { "name": "paulina.vin",  "bytes": 45378864  },
+        { "name": "paulina8.vdb", "bytes": 264278522 },
+        { "name": "paulina.vcf",  "bytes": 45126     }
+      ]
+    }
+  ]
+}

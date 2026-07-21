@@ -1,8 +1,11 @@
 # Build the in-browser spfy WASM demo and deploy it to GitHub Pages.
 #
-# The demo lives under spfy/wasm/. It compiles the pure-C synth core
-# (in-house FE + USel + WSOLA) to WebAssembly via Emscripten and bakes
-# Tom's voice corpus into a preloaded virtual FS (~90 MB .data file).
+# The demo lives under spfy/wasm/. It compiles the synth core
+# (emulator-backed SWIttsFe + USel + WSOLA) to WebAssembly via Emscripten.
+# Voices are NOT baked in: stage_voices.py lays each shipped voice's
+# vin/vdb/vcf out under dist/voices/ (splitting any file >90 MiB into
+# <100 MB parts for Pages' per-file limit) and the browser fetches only
+# the voice the visitor selects.
 #
 # Triggers:
 #   * push to main, filtered to paths that actually affect the wasm
@@ -17,12 +20,12 @@
 # Asset paths in the bundle are relative, so the demo works under any
 # subpath (no PUBLIC_URL / base-path rewriting needed).
 #
-# Notes on size: GitHub Pages serves .wasm with the right MIME but does
-# NOT do content-encoding negotiation for .wasm / .data — the 90 MB
-# preloaded-FS sidecar ships uncompressed on cold loads. emscripten's
-# IndexedDB preload cache (--use-preload-cache, set in CMakeLists.txt)
-# makes repeat visits ~free. The .br/.gz siblings produced by
-# `npm run pack` are unused on Pages; we skip that step here.
+# Notes on size: the module is ~14 MB (code + the three small SWIttsFe
+# DLLs). Voice corpora ship as separate objects under voices/ and are
+# fetched on demand — a visitor only downloads the voice(s) they pick, and
+# the browser HTTP cache makes repeat loads free. Pages does not
+# content-encode .wasm / .vdb, so those ship uncompressed; that is
+# inherent to the (already-compact) audio data.
 
 name: Deploy WASM demo to Pages
 
@@ -33,8 +36,10 @@ on:
       - "spfy/wasm/**"
       - "spfy/src/**"
       - "spfy/include/**"
-      - "spfy/data/tom_hpclass.bin"
       - "en-US/tom/**"
+      - "en-US/jill/**"
+      - "es-MX/javier/**"
+      - "fr-CA/felix/**"
       - ".github/workflows/deploy-wasm-pages.yml"
   workflow_dispatch:
 
@@ -86,10 +91,10 @@ jobs:
         working-directory: spfy/wasm
         run: npm ci
 
-      # Compile C → wasm. Emits spfy/wasm/dist/spfy_wasm.{js,wasm,data}.
-      # The .data sidecar is the preloaded virtual FS (voice + tables);
-      # CMakeLists.txt stages only the four files the runtime actually
-      # opens (tom.vin, tom8.vdb, tom.vcf, tom_hpclass.bin).
+      # Compile C → wasm. Emits spfy/wasm/dist/spfy_wasm.{js,wasm} and
+      # stages the lazy voice assets + manifest under dist/voices/ (only
+      # the voices whose files are present in the checkout — the gitignored
+      # large voices like Paulina are simply omitted from the manifest).
       - name: Build WASM module
         working-directory: spfy/wasm
         # Invoke via `bash` rather than `./build.sh` — the script may
@@ -110,6 +115,27 @@ jobs:
 
       - name: List bundle contents
         run: ls -lh spfy/wasm/build/web/
+
+      # Real-browser smoke test — the deploy gate. Drives headless Chrome
+      # (pre-installed on ubuntu-latest; Selenium Manager auto-provisions
+      # the matching chromedriver) through the built bundle: loads Tom,
+      # switches to Felix (fresh module + a real network fetch), and
+      # synthesizes each. If the loader or synth path is broken the step
+      # exits non-zero and the deploy job (needs: build) never runs.
+      #
+      # Paulina is skipped (--no-paulina): CI must not depend on the
+      # external voice host being up, nor pull her 253 MB every run.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install smoke-test deps
+        run: pip install "selenium>=4.11"
+
+      - name: Smoke test the built demo (headless Chrome)
+        working-directory: spfy/wasm
+        run: python tools/smoke_test.py --no-paulina
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v4

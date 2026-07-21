@@ -11,12 +11,19 @@
             <header>
                 <h1>Speechify WASM Demo</h1>
                 <p class="sub">
-                    In-house pure-C front-end + unit-selection synth, compiled to
-                    WebAssembly. The Tom voice corpus (~92&nbsp;MB) is loaded once
-                    from a preloaded virtual filesystem.
+                    Emulator-backed SWIttsFe front-end + unit-selection synth,
+                    compiled to WebAssembly. Voices are downloaded on demand — pick
+                    one and its corpus streams into the browser; nothing is bundled
+                    up front.
                 </p>
             </header>
             <section id="status-section">
+                <div class="voice-row">
+                    <label for="voice-select">Voice</label>
+                    <select id="voice-select" disabled>
+                        <option>Loading…</option>
+                    </select>
+                </div>
                 <div id="status" class="status">Loading WebAssembly module...</div>
                 <progress id="load-progress" max="100" value="0"></progress>
             </section>
@@ -37,13 +44,16 @@
             </section>
             <footer>
                 <p>
-                    Building blocks: Tom 3.0.5 voice corpus, in-house pure-C FE
-                    (POS tagging, syllabification, prosody), USel viterbi DP, WSOLA
-                    concatenative synth. No network calls after the initial asset
-                    load; all synthesis is local in the browser.
+                    Building blocks: Speechify 3.0.5 voice corpora, emulator-backed
+                    SWIttsFe front-end (POS tagging, syllabification, prosody), USel
+                    viterbi DP, WSOLA concatenative synth. A voice is fetched once,
+                    then cached by the browser; all synthesis runs locally — no
+                    network calls after a voice is loaded.
                 </p>
             </footer>
         </main>
-        <script src="./index.js" type="module"></script>
+        <!-- The page bundle is injected by HtmlWebpackPlugin (entry:
+             web/index.js). No manual <script src="./index.js"> — that
+             would 404 in the built output. -->
     </body>
 </html>

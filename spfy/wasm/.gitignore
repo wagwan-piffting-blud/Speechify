@@ -2,5 +2,8 @@ node_modules/
 build/
 dist/
 *.log
+# The repo-root .gitignore has a broad `*.json*` rule; re-include the
+# JSON files under spfy/wasm/ that must be tracked.
 !package.json
 !package-lock.json
+!external_voices.json

@@ -46,6 +46,32 @@ header .sub {
   margin-bottom: 1.25rem;
 }
 
+.voice-row {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  margin-bottom: .85rem;
+}
+
+.voice-row label {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+#voice-select {
+  flex: 1 1 auto;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .5rem .6rem;
+  font: inherit;
+  font-size: .9rem;
+  cursor: pointer;
+}
+#voice-select:focus  { outline: none; border-color: var(--accent); }
+#voice-select:disabled { opacity: .5; cursor: progress; }
+
 .status {
   font-variant-numeric: tabular-nums;
   font-size: .95rem;

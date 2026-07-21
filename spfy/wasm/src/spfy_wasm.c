@@ -1,11 +1,26 @@
 /* spfy_wasm.c — WebAssembly entry layer for the in-browser demo.
  *
- * Exposes four C functions to JavaScript via EMSCRIPTEN_KEEPALIVE:
+ * Exposes C functions to JavaScript via EMSCRIPTEN_KEEPALIVE:
  *
- *   spfy_wasm_init(const char *voice_dir)  -> int   (SPFY_OK or SPFY_E_*)
- *       Loads Tom's voice triplet from voice_dir on the emscripten
- *       virtual FS (we mount /voice/ via --preload-file). Idempotent:
- *       a second call while already loaded returns 0 without re-loading.
+ *   spfy_wasm_init(const char *voice_dir,
+ *                  const char *prefix)     -> int   (SPFY_OK or SPFY_E_*)
+ *       Loads a voice triplet <prefix>.vin / <prefix>8.vdb / <prefix>.vcf
+ *       from voice_dir on the emscripten virtual FS. JS fetches those
+ *       files over the network and writes them into the FS (see
+ *       web/index.js) BEFORE calling this — nothing is baked into the
+ *       module's .data anymore. The hp_class table is derived from the
+ *       VIN (exact for every voice), so no hpclass.bin is needed.
+ *
+ *       Reloadable: calling it with a DIFFERENT prefix frees the current
+ *       voice and loads the new one; calling it with the SAME prefix that
+ *       is already loaded is a no-op that returns SPFY_OK. NB the emulator
+ *       backend boots ONE FE DLL per module instance (first voice's
+ *       language wins), so switching LANGUAGE must be done by tearing the
+ *       whole module down and creating a fresh one — JS handles that.
+ *
+ *   spfy_wasm_free_voice()                 -> void
+ *       Drops the loaded voice (frees vin/vdb/vcf state). Same-language
+ *       reload path; JS may call it before a fresh init.
  *
  *   spfy_wasm_synth(const char *text)      -> int   (SPFY_OK or SPFY_E_*)
  *       Synthesizes text. On success the resulting int16 mono PCM lives
@@ -18,9 +33,10 @@
  *   spfy_wasm_sample_rate()                -> uint32_t
  *   spfy_wasm_reset()                      -> void
  *
- * SPFY_FE_INTERNAL is implicit: spfy_voice_load() picks the in-house
- * pure-C FE when the hosted FE isn't compiled in (this build excludes
- * src/fe_host's PE-loader and links the stub instead). */
+ * The default build drives the emulator-backed hosted FE (the unmodified
+ * SWIttsFe-<lang>.dll bytes run through src/host_emu/); spfy_voice_load()
+ * picks the FE DLL for the voice's VCF language from the embedded
+ * registry. -DSPFY_WASM_INHOUSE_FE=ON swaps in the pure-C FE instead. */
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -38,6 +54,7 @@
 static struct {
     spfy_voice_t  voice;
     int           loaded;
+    char          prefix[64]; /* which voice is loaded (e.g. "tom") */
     int16_t      *pcm;
     size_t        pcm_n;       /* used samples */
     size_t        pcm_cap;     /* allocated samples */
@@ -75,37 +92,62 @@ static void join_path(char *out_buf, size_t cap, const char *dir, const char *na
 /* ------------------- exported API ---------------------------------- */
 
 EMSCRIPTEN_KEEPALIVE
-int spfy_wasm_init(const char *voice_dir)
+void spfy_wasm_free_voice(void)
 {
-    if (g_state.loaded) return SPFY_OK;
+    if (g_state.loaded) {
+        spfy_voice_free(&g_state.voice);
+        memset(&g_state.voice, 0, sizeof g_state.voice);
+        g_state.loaded = 0;
+        g_state.prefix[0] = '\0';
+    }
+}
 
-    char p_vin[256], p_vdb[256], p_vcf[256], p_hpc[256];
-    join_path(p_vin, sizeof p_vin, voice_dir, "tom.vin");
-    join_path(p_vdb, sizeof p_vdb, voice_dir, "tom8.vdb");
-    join_path(p_vcf, sizeof p_vcf, voice_dir, "tom.vcf");
-    join_path(p_hpc, sizeof p_hpc, voice_dir, "tom_hpclass.bin");
+EMSCRIPTEN_KEEPALIVE
+int spfy_wasm_init(const char *voice_dir, const char *prefix)
+{
+    if (!prefix || !*prefix) prefix = "tom";
+
+    /* Same voice already loaded -> no-op. Different voice -> reload. */
+    if (g_state.loaded) {
+        if (strncmp(g_state.prefix, prefix, sizeof g_state.prefix) == 0)
+            return SPFY_OK;
+        spfy_wasm_free_voice();
+    }
+
+    char f_vin[80], f_vdb[80], f_vcf[80];
+    char p_vin[256], p_vdb[256], p_vcf[256];
+    snprintf(f_vin, sizeof f_vin, "%s.vin",  prefix);
+    snprintf(f_vdb, sizeof f_vdb, "%s8.vdb", prefix);
+    snprintf(f_vcf, sizeof f_vcf, "%s.vcf",  prefix);
+    join_path(p_vin, sizeof p_vin, voice_dir, f_vin);
+    join_path(p_vdb, sizeof p_vdb, voice_dir, f_vdb);
+    join_path(p_vcf, sizeof p_vcf, voice_dir, f_vcf);
 
     spfy_voice_paths_t paths = {
         .vin         = p_vin,
         .vdb         = p_vdb,
         .vcf         = p_vcf,
-        .hpclass     = p_hpc,
-        /* In-house pure-C FE is in-process; vocab + fe_tables are unused. */
+        /* hpclass empty -> derived from the VIN (exact for every voice). */
+        .hpclass     = "",
+        /* Emulator-backed hosted FE is in-process; vocab + fe_tables
+         * come from the embedded DLL, not on-disk files. */
         .vocab       = "",
         .fe_tables_a = "",
         .fe_tables_b = "",
     };
 
-    fprintf(stderr, "spfy_wasm_init: loading voice from %s\n",
-            voice_dir ? voice_dir : "(null)");
+    fprintf(stderr, "spfy_wasm_init: loading voice '%s' from %s\n",
+            prefix, voice_dir ? voice_dir : "(null)");
     int rc = spfy_voice_load(&paths, &g_state.voice);
     if (rc != SPFY_OK) {
         fprintf(stderr, "spfy_voice_load failed: %d (%s)\n",
                 rc, spfy_strerror(rc));
+        memset(&g_state.voice, 0, sizeof g_state.voice);
         return rc;
     }
     g_state.sample_rate = g_state.voice.vdb.sample_rate;
     g_state.loaded = 1;
+    snprintf(g_state.prefix, sizeof g_state.prefix, "%s", prefix);
     fprintf(stderr,
         "voice loaded: %u units, %u feat entries, sample_rate=%u\n",
         g_state.voice.units.n_units,
