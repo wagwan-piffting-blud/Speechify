@@ -171,7 +171,19 @@ int spfy_cart_load_durt(const spfy_vin_t *vin, spfy_cart_t *out)
 {
     if (!vin || !out) return SPFY_E_INVAL;
     if (!vin->durt || vin->durt_n == 0) return SPFY_E_FORMAT;
-    return load_chunk(vin->durt, vin->durt_n, 47u, out);
+    /* One durt tree per phone label. The count is the durt chunk's OWN
+     * trhd label count, which is not a fixed 47 -- that is only Tom's
+     * (46 phones + a trailing empty label). Jill/Felix have 46, and the
+     * es-MX voices have 31. */
+    int rc = load_chunk(vin->durt, vin->durt_n, 0u, out);
+    if (rc != SPFY_OK) return rc;
+    if (out->n_trees != out->n_labels) {
+        spfy_log_err("durt: %u trees but trhd declares %u labels",
+                     out->n_trees, out->n_labels);
+        spfy_cart_free(out);
+        return SPFY_E_FORMAT;
+    }
+    return SPFY_OK;
 }
 
 void spfy_cart_free(spfy_cart_t *c)

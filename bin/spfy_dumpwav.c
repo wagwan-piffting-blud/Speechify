@@ -16,6 +16,7 @@
 //   --rawdump     Dump raw callback bytes to stderr
 
 #define _CRT_SECURE_NO_WARNINGS
+#include <winsock2.h>   /* must precede windows.h */
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -162,6 +163,215 @@ static void bal_to_spr(const char *input, char *output, int maxlen) {
 
     *out = '\0';
     #undef MAX_TOKS
+}
+
+// Case-insensitive substring search (used to skip a <pron> element body).
+static const char *find_ci(const char *hay, const char *needle) {
+    size_t nl = strlen(needle);
+    if (nl == 0) return hay;
+    for (; *hay; hay++) {
+        size_t i = 0;
+        while (i < nl && hay[i] &&
+               tolower((unsigned char)hay[i]) == tolower((unsigned char)needle[i]))
+            i++;
+        if (i == nl) return hay;
+    }
+    return NULL;
+}
+
+// Case-insensitive equality of the first n characters of a and b.
+static int ci_eqn(const char *a, const char *b, int n) {
+    for (int i = 0; i < n; i++)
+        if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i]))
+            return 0;
+    return 1;
+}
+
+// Extract attribute `name` (case-insensitive) from an open tag's attribute
+// range [ts, te). Copies the quoted value into val (NUL-terminated). Returns 1
+// on success. Requires a whitespace/tag-start boundary before the name so a
+// substring of another attribute's value cannot match.
+static int get_attr(const char *ts, const char *te, const char *name,
+                    char *val, int vlen) {
+    int nl = (int)strlen(name);
+    for (const char *a = ts; a + nl <= te; a++) {
+        if (a != ts && !isspace((unsigned char)a[-1])) continue;
+        if (!ci_eqn(a, name, nl)) continue;
+        const char *e = a + nl;
+        while (e < te && isspace((unsigned char)*e)) e++;
+        if (e >= te || *e != '=') continue;
+        e++;
+        while (e < te && isspace((unsigned char)*e)) e++;
+        if (e >= te || (*e != '"' && *e != '\'')) continue;
+        char q = *e++;
+        int i = 0;
+        while (e < te && *e != q && i < vlen - 1) val[i++] = *e++;
+        val[i] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+static int clamp_int(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// SSML break "time" ("500ms", "0.75s", "500") -> milliseconds (1..32767).
+static int break_to_ms(const char *t) {
+    while (isspace((unsigned char)*t)) t++;
+    double v = atof(t);
+    const char *u = t;
+    while (*u == '+' || *u == '-' || *u == '.' || isdigit((unsigned char)*u)) u++;
+    while (isspace((unsigned char)*u)) u++;
+    if ((*u == 's' || *u == 'S') && (u[1] != 'm' && u[1] != 'M'))
+        v *= 1000.0;                       // seconds (not "ms")
+    return clamp_int((int)(v + 0.5), 1, 32767);
+}
+
+// SAPI rate absspeed/speed (-10..10) -> Speechify rate percent (33..300):
+// round(100 * 3^(S/10)), which lines the SAPI slider up with the guide's
+// documented "1/3 to 3x" rate range. Tabled to avoid pulling in <math.h>.
+static int sapi_rate_to_pct(int s) {
+    static const int tbl[21] = {
+        33, 37, 42, 47, 52, 58, 65, 72, 80, 90, 100,
+        112, 125, 139, 155, 173, 192, 215, 240, 268, 300
+    };
+    return tbl[clamp_int(s, -10, 10) + 10];
+}
+
+// Expand Balabolka / SAPI 5 / SSML control tags into Speechify inline \! codes,
+// which the engine speaks directly (the \! notation already works; this just
+// accepts the friendlier markup). Applied to CLI text and each --batch line.
+// Recognized case-insensitively, anywhere in the text; the element body is
+// kept and spoken normally except for <pron> (whose body is a display
+// fallback and is dropped):
+//   <pron sym="ph"/> | <pron sym="ph">word</pron>   -> \![SPR]   (body dropped)
+//   <silence msec="N"/>                              -> \!pN      (pause)
+//   <break time="500ms"|"0.5s"/>                     -> \!pN
+//   <bookmark mark="X"/> | <mark name="X"/>          -> \!bmX
+//   <volume level="N"> .. </volume>                  -> \!vdN .. \!vdr
+//   <rate absspeed|speed="S"> .. </rate>  (S -10..10)-> \!rdPCT .. \!rdr
+//   <prosody rate="N%" volume="M%"> .. </prosody>    -> \!rdN\!vdM .. resets
+//   <spell> .. </spell> ,
+//   <say-as interpret-as="characters"> .. </say-as>  -> \!tsc .. \!ts0
+//   <emph>/<emphasis>/<pitch ...>                      stripped (no engine tag)
+// Unrecognized "<...>" is copied through verbatim. The \!eos / \!ny / \!di
+// tags have no common Balabolka markup; use their \! forms directly.
+static void expand_tags(const char *in, char *out, size_t maxlen) {
+    const char *p = in;
+    char *o = out, *oend = out + maxlen - 1;
+    int pros_rate = 0, pros_vol = 0;   // attrs the most recent <prosody> set
+    int sayas_spell = 0;               // most recent <say-as> was spell-ish
+    char val[1024];
+    // Emit a \! code padded with spaces. The engine requires a tag be preceded
+    // by whitespace and NOT followed by an alphanumeric, so a code glued to
+    // adjacent text (e.g. <volume level="80">loud) would be treated as one
+    // unknown tag and swallow the word. Extra/leading spaces collapse harmlessly.
+    #define EMIT(...) do {                                          \
+            if (o < oend) *o++ = ' ';                               \
+            o += _snprintf(o, (size_t)(oend - o), __VA_ARGS__);     \
+            if (o < oend) *o++ = ' ';                               \
+        } while (0)
+    while (*p && o < oend) {
+        if (*p != '<') { *o++ = *p++; continue; }
+        const char *gt = strchr(p, '>');
+        if (!gt) { *o++ = *p++; continue; }
+        const char *nm = p + 1;
+        int closing = 0;
+        if (*nm == '/') { closing = 1; nm++; }
+        const char *ne = nm;
+        while (isalnum((unsigned char)*ne) || *ne == '-') ne++;
+        int nl = (int)(ne - nm);
+        if (nl == 0) { *o++ = *p++; continue; }   // "<" not starting a tag name
+        const char *bb = gt - 1;
+        while (bb > nm && isspace((unsigned char)*bb)) bb--;
+        int selfclose = (*bb == '/');
+        const char *ts = ne, *te = gt;            // attribute range
+        #define TAG(s) (nl == (int)(sizeof(s) - 1) && ci_eqn(nm, s, nl))
+        int handled = 1;
+        if (TAG("pron")) {
+            if (!closing) {
+                if (get_attr(ts, te, "sym", val, sizeof val) && val[0]) {
+                    char spr[4096];
+                    bal_to_spr(val, spr, sizeof spr);
+                    EMIT("\\![%s]", spr);
+                }
+                if (!selfclose) {                 // drop the display-fallback body
+                    const char *c = find_ci(gt + 1, "</pron>");
+                    p = c ? c + 7 : gt + 1;
+                    continue;
+                }
+            }
+        } else if (TAG("silence")) {
+            if (!closing && get_attr(ts, te, "msec", val, sizeof val))
+                EMIT("\\!p%d", clamp_int(atoi(val), 1, 32767));
+        } else if (TAG("break")) {
+            if (!closing && get_attr(ts, te, "time", val, sizeof val))
+                EMIT("\\!p%d", break_to_ms(val));
+        } else if (TAG("bookmark") || TAG("mark")) {
+            const char *an = TAG("bookmark") ? "mark" : "name";
+            if (!closing && get_attr(ts, te, an, val, sizeof val) && val[0])
+                EMIT("\\!bm%s", val);
+        } else if (TAG("volume")) {
+            if (closing)
+                EMIT("\\!vdr");
+            else if (get_attr(ts, te, "level", val, sizeof val))
+                EMIT("\\!vd%d", clamp_int(atoi(val), 0, 500));
+        } else if (TAG("rate")) {
+            if (closing)
+                EMIT("\\!rdr");
+            else {
+                int s = 0;
+                if (get_attr(ts, te, "absspeed", val, sizeof val) ||
+                    get_attr(ts, te, "speed", val, sizeof val))
+                    s = atoi(val);
+                EMIT("\\!rd%d", sapi_rate_to_pct(s));
+            }
+        } else if (TAG("prosody")) {
+            if (closing) {
+                if (pros_rate) EMIT("\\!rdr");
+                if (pros_vol)  EMIT("\\!vdr");
+                pros_rate = pros_vol = 0;
+            } else {
+                if (get_attr(ts, te, "rate", val, sizeof val) &&
+                    isdigit((unsigned char)val[0])) {
+                    EMIT("\\!rd%d", clamp_int(atoi(val), 33, 300));
+                    pros_rate = 1;
+                }
+                if (get_attr(ts, te, "volume", val, sizeof val) &&
+                    isdigit((unsigned char)val[0])) {
+                    EMIT("\\!vd%d", clamp_int(atoi(val), 0, 500));
+                    pros_vol = 1;
+                }
+            }
+        } else if (TAG("spell")) {
+            EMIT("%s", closing ? "\\!ts0" : "\\!tsc");
+        } else if (TAG("say-as")) {
+            if (closing) {
+                if (sayas_spell) EMIT("\\!ts0");
+                sayas_spell = 0;
+            } else {
+                int spell = 0;
+                if (get_attr(ts, te, "interpret-as", val, sizeof val))
+                    spell = (find_ci(val, "char") != NULL) ||
+                            (find_ci(val, "spell") != NULL);
+                if (spell) {
+                    EMIT("\\!tsc");
+                    sayas_spell = 1;
+                }
+                // other interpret-as: strip the tag, keep the body
+            }
+        } else if (TAG("emph") || TAG("emphasis") || TAG("pitch")) {
+            // No Speechify \! equivalent -> strip the tag, keep any body text.
+        } else {
+            handled = 0;
+        }
+        #undef TAG
+        if (handled) { p = gt + 1; continue; }
+        *o++ = *p++;   // unrecognized tag: copy '<' literally and keep scanning
+    }
+    #undef EMIT
+    *o = '\0';
 }
 
 // --------------------------------------------------------------------------
@@ -335,9 +545,10 @@ typedef struct {
 static SWIttsResult SWIAPI cb(SWIttsPort port, int status, void *data, void *user) {
     Ctx *ctx = (Ctx*)user;
 
-    // Debug/log message from engine
+    // Debug/log message from engine -- only surfaced in --rawdump mode, since
+    // it is noise (and often uninitialized garbage) on a failed connect.
     if (port == (SWIttsPort)-1) {
-        if (data) {
+        if (data && ctx && ctx->rawDump) {
             fwprintf(stderr, L"DEBUG (status=%d): %hs\n", status, (char*)data);
         }
         return 0;
@@ -426,11 +637,111 @@ static SWIttsResult SWIAPI cb(SWIttsPort port, int status, void *data, void *use
     return 0;
 }
 
+// Quick TCP reachability probe against the local Speechify server. Returns 1
+// if 127.0.0.1:port accepts a connection within timeout_ms, else 0. Used to
+// fail fast with a clear message instead of loading the client DLL and
+// leaving a header-only WAV plus engine debug noise on stderr. If winsock
+// itself is unavailable we return 1 (don't block on a probe we can't run).
+static int server_reachable(unsigned short port, int timeout_ms) {
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+    int ok = 0;
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s != INVALID_SOCKET) {
+        u_long nb = 1;
+        ioctlsocket(s, FIONBIO, &nb);              // non-blocking connect
+        struct sockaddr_in a;
+        memset(&a, 0, sizeof a);
+        a.sin_family = AF_INET;
+        a.sin_port = htons(port);
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        connect(s, (struct sockaddr *)&a, sizeof a);   // returns WSAEWOULDBLOCK
+        fd_set wf;
+        FD_ZERO(&wf);
+        FD_SET(s, &wf);
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        if (select(0, NULL, &wf, NULL, &tv) > 0) {
+            int err = 0, len = (int)sizeof err;
+            getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&err, &len);
+            ok = (err == 0);
+        }
+        closesocket(s);
+    }
+    WSACleanup();
+    return ok;
+}
+
+// Read an entire text file into a malloc'd, NUL-terminated UTF-8 buffer (no
+// length cap beyond available memory). Accepts UTF-8 (a leading BOM is
+// stripped) and UTF-16 LE (converted). Returns NULL on error; caller frees.
+static char *read_file_utf8(const wchar_t *path) {
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    char *buf = (char *)malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+    // UTF-16 LE (Windows "Unicode" .txt) -> UTF-8.
+    if (rd >= 2 && (unsigned char)buf[0] == 0xFF && (unsigned char)buf[1] == 0xFE) {
+        const wchar_t *w = (const wchar_t *)(buf + 2);
+        int wn = (int)((rd - 2) / 2);
+        int un = WideCharToMultiByte(CP_UTF8, 0, w, wn, NULL, 0, NULL, NULL);
+        char *u8 = (char *)malloc((size_t)(un > 0 ? un : 1) + 1);
+        if (!u8) { free(buf); return NULL; }
+        WideCharToMultiByte(CP_UTF8, 0, w, wn, u8, un, NULL, NULL);
+        u8[un > 0 ? un : 0] = '\0';
+        free(buf);
+        return u8;
+    }
+    // Strip a UTF-8 BOM if present.
+    if (rd >= 3 && (unsigned char)buf[0] == 0xEF &&
+        (unsigned char)buf[1] == 0xBB && (unsigned char)buf[2] == 0xBF) {
+        memmove(buf, buf + 3, rd - 3 + 1);
+    }
+    return buf;
+}
+
 static void print_usage(const wchar_t *exe) {
     fwprintf(stderr,
         L"usage: %ls [options] \"text to speak\" out.wav\n"
+        L"       %ls [options] -f input.txt out.wav   (read text from a file)\n"
+        L"\n"
+        L"Text may be any length; -f/--file reads a whole file (UTF-8 or\n"
+        L"UTF-16 LE) with no size cap. CLI arg text is limited only by the OS\n"
+        L"command line.\n"
+        L"\n"
+        L"The input text (CLI arg or a --batch line) may contain inline\n"
+        L"Balabolka/SAPI/SSML control tags, expanded to Speechify \\! codes:\n"
+        L"  <pron sym=\"f r ay 1 d ey 2\"/> or <pron sym=..>friday</pron>  \\![SPR]\n"
+        L"  <silence msec=\"300\"/>  <break time=\"0.5s\"/>                  pause \\!p\n"
+        L"  <bookmark mark=\"X\"/>  <mark name=\"X\"/>                       \\!bmX\n"
+        L"  <volume level=\"80\">text</volume>                            \\!vd80..\\!vdr\n"
+        L"  <rate absspeed=\"5\">text</rate>  (SAPI -10..10)              \\!rd..\\!rdr\n"
+        L"  <prosody rate=\"150%%\" volume=\"80%%\">text</prosody>           \\!rd/\\!vd\n"
+        L"  <spell>abc</spell>  <say-as interpret-as=\"characters\">..     \\!tsc..\\!ts0\n"
+        L"pron sym uses Balabolka/ARPAbet (stress digit AFTER the vowel).\n"
+        L"Non-tag text is spoken normally, so a mix works. \\!eos/\\!ny/\\!di\n"
+        L"have no common markup -- use their \\! forms directly.\n"
         L"\n"
         L"Options:\n"
+        L"  --batch DIR     Read \"<id>\\t<text>\" lines from stdin; write\n"
+        L"                  DIR\\<id>.wav per line and print \"DONE <id>\".\n"
+        L"                  ~50x faster than re-invoking per phrase. Each\n"
+        L"                  utterance gets a fresh port so engine session\n"
+        L"                  state cannot leak between them.\n"
+        L"  --batch-shared-port\n"
+        L"                  Keep ONE port for the whole batch. Faster, but\n"
+        L"                  the engine then carries state across utterances\n"
+        L"                  and Frida traces differ. Audio only.\n"
+        L"  --graceful-term Call SWIttsTerm() on exit (adds ~4.6 s; only\n"
+        L"                  needed to debug a suspected resource leak)\n"
         L"  --phonemes      Write phoneme timing to .phn file alongside WAV\n"
         L"  --pron \"...\"    Synthesize raw SPR phonemes (see symbol table below)\n"
         L"  --g2p           Print phoneme sequence for text (ARPAbet + SPR)\n"
@@ -449,7 +760,166 @@ static void print_usage(const wchar_t *exe) {
         L"  Stress:  1=primary 2=secondary 0=none  Syllable: . (period)\n"
         L"\n"
         L"Example: --pron \".0Dx.1wE.0DR\" synthesizes \"the weather\"\n",
-        exe);
+        exe, exe);
+}
+
+// Exit without running DLL_PROCESS_DETACH.
+//
+// Skipping SWIttsTerm() is not enough on its own: SWItts.dll does the
+// same ~4.6 s of cleanup from its detach handler, so a normal return from
+// wmain() (or exit()/_exit(), both of which route through ExitProcess and
+// therefore still notify loaded DLLs) pays the cost anyway. Only
+// TerminateProcess bypasses detach entirely.
+//
+// Safe here because every file this tool owns is fclose'd before the
+// call, the WAV is fully finalized on disk, and the server-side port was
+// already released by SWIttsClosePort. Use --graceful-term to take the
+// slow, fully-unwound path instead.
+static void fast_exit(int code) {
+    fflush(stdout);
+    fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), (UINT)code);
+}
+
+// Synthesize one utterance on an already-open port and write it to
+// outPath as a complete WAV. Resets the per-utterance callback state so
+// the same Ctx/port can be reused across a whole batch. Returns 0 on ok.
+static int synth_one(SWIttsAPI *api, SWIttsPort port, Ctx *ctx,
+                     const char *speakText, const wchar_t *outPath,
+                     uint32_t sampleRate) {
+    FILE *f = _wfopen(outPath, L"wb+");
+    if (!f) {
+        fwprintf(stderr, L"ERROR: cannot open %ls\n", outPath);
+        return -1;
+    }
+    write_wav_header(f, sampleRate, 16, 1, 0);
+
+    ctx->out          = f;
+    ctx->bytesWritten = 0;
+    ctx->g2pCount     = 0;
+    InterlockedExchange(&ctx->gotAudio, 0);
+    InterlockedExchange(&ctx->done, 0);
+    ResetEvent(ctx->doneEvent);
+
+    const char *contentType = "text/plain;charset=utf-8";
+    if (strncmp(speakText, "<speak", 6) == 0 || strncmp(speakText, "<?xml", 5) == 0)
+        contentType = "application/synthesis+ssml";
+
+    int rc = 0;
+    if (api->Speak(port, (const unsigned char *)speakText,
+                   (unsigned)strlen(speakText), contentType) != 0) {
+        fprintf(stderr, "SWIttsSpeak failed\n");
+        rc = -1;
+    } else {
+        // Scale the wait with the utterance length (60 s floor + ~10 ms/char,
+        // capped at 24 h) so long lines are not truncated.
+        unsigned long long wl = 60000ULL + (unsigned long long)strlen(speakText) * 10ULL;
+        if (wl > 86400000ULL) wl = 86400000ULL;
+        WaitForSingleObject(ctx->doneEvent, (DWORD)wl);
+    }
+
+    // Patch the RIFF/data sizes now that the length is known.
+    fflush(f);
+    uint32_t dataBytes = ctx->bytesWritten;
+    uint32_t riffSize  = 36 + dataBytes;
+    fseek(f, 4,  SEEK_SET); fwrite(&riffSize,  4, 1, f);
+    fseek(f, 40, SEEK_SET); fwrite(&dataBytes, 4, 1, f);
+    fclose(f);
+    ctx->out = NULL;
+    return rc;
+}
+
+// Batch driver: read "<id>\t<text>" lines from stdin, synthesize each to
+// <outDir>/<id>.wav on ONE port, and print "DONE <id>" to stdout after
+// each. Reading a line at a time makes it lock-step, so a Frida capture
+// can drain its hook ring between utterances.
+//
+// This exists because SWIttsTerm() costs ~4.6 s while the synthesis
+// itself takes ~90 ms: spawning one process per phrase spent 98% of the
+// wall clock on library teardown.
+//
+// By default each utterance gets a FRESH port (close + reopen between
+// lines). That is not paranoia: reusing one port across utterances lets
+// the engine carry session state, and a Frida capture of "text_002"
+// then yields 259 trace events instead of the 276 it emits on a virgin
+// port -- the audio is byte-identical, but the trace the oracle audit
+// consumes is not. Reopening costs ~60 ms and restores exact
+// one-process-per-phrase semantics; the ~4.6 s we are avoiding was
+// SWIttsTerm/DLL-detach, which still happens only once.
+//
+// --batch-shared-port opts into a single port for the whole run. Use it
+// only when you want audio and nothing else.
+// `portInOut` is updated as ports are cycled so the caller always closes
+// the live one.
+static int run_batch(SWIttsAPI *api, SWIttsPort *portInOut, Ctx *ctx,
+                     const wchar_t *outDir, uint32_t sampleRate,
+                     int freshPort, int enablePhonemes) {
+    char line[65536];
+    int n = 0, failed = 0;
+    SWIttsPort port = *portInOut;
+    const char *openParams = "hostname=127.0.0.1;hostport=5555";
+
+    while (fgets(line, sizeof line, stdin)) {
+        // Cycle the port before every utterance except the first, which
+        // already has the virgin port opened by main().
+        if (freshPort && n > 0) {
+            api->ClosePort(port);
+            port = SWITTS_INVALID_PORT;
+            if (api->OpenPortEx(&port, openParams, NULL, cb, ctx) != 0
+                || port == SWITTS_INVALID_PORT) {
+                fprintf(stderr, "ERROR: batch could not reopen port\n");
+                *portInOut = port;
+                return 1;
+            }
+            *portInOut = port;
+            char mimetype[64];
+            _snprintf(mimetype, sizeof mimetype, "audio/L16;rate=%u", sampleRate);
+            api->SetParameter(port, "tts.audioformat.mimetype", mimetype);
+            if (enablePhonemes) {
+                api->SetParameter(port, "tts.marks.phoneme", "true");
+                api->SetParameter(port, "tts.marks.word", "true");
+            }
+        }
+
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        if (len == 0) continue;
+
+        char *tab = strchr(line, '\t');
+        if (!tab) {
+            fprintf(stderr, "ERROR: batch line %d has no TAB separator\n", n);
+            failed++;
+            continue;
+        }
+        *tab = '\0';
+        const char *id   = line;
+        const char *text = tab + 1;
+
+        wchar_t wid[256], outPath[MAX_PATH];
+        MultiByteToWideChar(CP_UTF8, 0, id, -1, wid, 256);
+        _snwprintf(outPath, MAX_PATH, L"%ls\\%ls.wav", outDir, wid);
+
+        // Expand any Balabolka/SAPI/SSML control tags in the line's text to
+        // inline \! codes before synthesis (same as the CLI path).
+        char expanded[65536];
+        expand_tags(text, expanded, sizeof(expanded));
+
+        if (synth_one(api, port, ctx, expanded, outPath, sampleRate) != 0)
+            failed++;
+        n++;
+
+        // The capture driver blocks on this line, so it must be flushed.
+        printf("DONE %s\n", id);
+        fflush(stdout);
+    }
+
+    fwprintf(stderr, L"INFO: batch complete: %d utterance%hs, %d failed "
+                     L"(%hs port)\n",
+             n, n == 1 ? "" : "s", failed,
+             freshPort ? "fresh-per-utterance" : "shared");
+    *portInOut = port;   // caller closes it
+    return failed ? 1 : 0;
 }
 
 int wmain(int argc, wchar_t **wargv) {
@@ -457,15 +927,33 @@ int wmain(int argc, wchar_t **wargv) {
     int enablePhonemes = 0;
     int rawDump = 0;
     int g2pMode = 0;
+    int batchMode = 0;
+    int batchSharedPort = 0;
+    int gracefulTerm = 0;
     uint32_t sampleRate = 8000;
     const wchar_t *pronPhonemes = NULL;
     const wchar_t *wtext = NULL;
     const wchar_t *woutPath = NULL;
     const wchar_t *dictPath = NULL;
+    const wchar_t *batchOutDir = NULL;
+    const wchar_t *inputFile = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (wcscmp(wargv[i], L"--phonemes") == 0) {
             enablePhonemes = 1;
+        } else if (wcscmp(wargv[i], L"--batch") == 0) {
+            // --batch <outdir>: read "<id>\t<text>" lines from stdin.
+            if (i + 1 < argc) {
+                batchMode   = 1;
+                batchOutDir = wargv[++i];
+            } else {
+                fwprintf(stderr, L"ERROR: --batch requires an output directory\n");
+                return 2;
+            }
+        } else if (wcscmp(wargv[i], L"--batch-shared-port") == 0) {
+            batchSharedPort = 1;
+        } else if (wcscmp(wargv[i], L"--graceful-term") == 0) {
+            gracefulTerm = 1;
         } else if (wcscmp(wargv[i], L"--g2p") == 0) {
             g2pMode = 1;
             enablePhonemes = 1;
@@ -545,6 +1033,15 @@ int wmain(int argc, wchar_t **wargv) {
                 fwprintf(stderr, L"ERROR: --dictionary requires a file path argument\n");
                 return 2;
             }
+        } else if (wcscmp(wargv[i], L"-f") == 0 || wcscmp(wargv[i], L"--file") == 0) {
+            // Read the text to speak from a file (no length cap). The single
+            // positional argument is then the output WAV path.
+            if (i + 1 < argc) {
+                inputFile = wargv[++i];
+            } else {
+                fwprintf(stderr, L"ERROR: -f/--file requires a file path\n");
+                return 2;
+            }
         } else if (wcscmp(wargv[i], L"--rawdump") == 0) {
             rawDump = 1;
             enablePhonemes = 1;  // need to enable marks to get callbacks
@@ -560,19 +1057,29 @@ int wmain(int argc, wchar_t **wargv) {
         }
     }
 
-    // --pron doesn't need separate text argument; first positional arg is the output file
-    if (pronPhonemes && !woutPath) {
-        if (wtext) {
-            woutPath = wtext;  // the positional arg is actually the output path
-            wtext = L"";
-        }
-    }
-    if (pronPhonemes && !wtext) {
+    // --pron and -f/--file get their text from elsewhere, so the sole
+    // positional argument is the output WAV path (not the text).
+    if ((pronPhonemes || inputFile) && !woutPath && wtext) {
+        woutPath = wtext;
         wtext = L"";
     }
-    if (!wtext || (!woutPath && !g2pMode)) {
+    // Batch mode takes its work from stdin, so it needs neither text nor an
+    // output positional. Otherwise a text source (positional text, -f, or
+    // --pron) and an output (WAV path, unless --g2p) are required.
+    int haveText = pronPhonemes || inputFile || (wtext && wtext[0]);
+    if (!batchMode && (!haveText || (!woutPath && !g2pMode))) {
         print_usage(wargv[0]);
         return 2;
+    }
+
+    // Fail fast if the Speechify server is not up. Without this the client DLL
+    // still loads, the OpenPortEx fails deep inside it (spraying "DEBUG
+    // (status=...)" garbage), and a header-only WAV is left behind.
+    if (!server_reachable(5555, 1500)) {
+        fwprintf(stderr,
+                 L"ERROR: Speechify server not reachable at 127.0.0.1:5555 -- "
+                 L"is it running?  (start it with bin\\Speechify.exe)\n");
+        return 9;
     }
 
     // Load substitution dictionary if requested
@@ -585,41 +1092,77 @@ int wmain(int argc, wchar_t **wargv) {
         fwprintf(stderr, L"INFO: Loaded %d dictionary entries from %ls\n", nd, dictPath);
     }
 
-    // Build the text to send
-    char utf8buf[8192];
-    if (pronPhonemes) {
-        // Wrap phonemes in SPR inline tag: \![phonemes]
-        // SPR uses single-char symbols (not ARPAbet), see Language Supplement
-        // Syllable boundaries: period (.), stress: 1=primary 0=unstressed
-        // Example: \![.1Sa.0kIG] = "shocking"
-        char pronUtf8[4096];
-        WideCharToMultiByte(CP_UTF8, 0, pronPhonemes, -1, pronUtf8, sizeof(pronUtf8), NULL, NULL);
-        _snprintf(utf8buf, sizeof(utf8buf), "\\![%s]", pronUtf8);
+    // Build the text to send. Non-batch input is heap-allocated to the exact
+    // size needed, so there is no length cap -- the text may be a whole file
+    // (-f, bounded only by memory) or the positional CLI argument. Batch mode
+    // gets its text per line from stdin inside run_batch.
+    char *speakBuf = NULL;   // owned; the final UTF-8 text handed to Speak()
+    if (batchMode) {
+        // nothing to build up front
+    } else if (pronPhonemes) {
+        // Wrap raw SPR phonemes in the inline tag: \![phonemes]. Example:
+        // \![.1Sa.0kIG] = "shocking".
+        int pn = WideCharToMultiByte(CP_UTF8, 0, pronPhonemes, -1, NULL, 0, NULL, NULL);
+        char *pronUtf8 = (char *)malloc((size_t)(pn > 0 ? pn : 1));
+        if (pronUtf8) {
+            WideCharToMultiByte(CP_UTF8, 0, pronPhonemes, -1, pronUtf8, pn, NULL, NULL);
+            size_t cap = strlen(pronUtf8) + 8;
+            speakBuf = (char *)malloc(cap);
+            if (speakBuf) _snprintf(speakBuf, cap, "\\![%s]", pronUtf8);
+            free(pronUtf8);
+        }
     } else {
-        WideCharToMultiByte(CP_UTF8, 0, wtext, -1, utf8buf, sizeof(utf8buf), NULL, NULL);
+        // Get the raw UTF-8 input -- from a file (unlimited) or the CLI arg --
+        // then expand any Balabolka/SAPI/SSML control tags (<pron>, <silence>,
+        // <volume>, <rate>, <bookmark>, <spell>, ...) to inline \! codes.
+        char *rawtext = NULL;
+        if (inputFile) {
+            rawtext = read_file_utf8(inputFile);
+            if (!rawtext) {
+                fwprintf(stderr, L"ERROR: could not read input file %ls\n", inputFile);
+                return 8;
+            }
+        } else {
+            int rn = WideCharToMultiByte(CP_UTF8, 0, wtext, -1, NULL, 0, NULL, NULL);
+            rawtext = (char *)malloc((size_t)(rn > 0 ? rn : 1));
+            if (rawtext) WideCharToMultiByte(CP_UTF8, 0, wtext, -1, rawtext, rn, NULL, NULL);
+        }
+        if (rawtext) {
+            // Tag expansion stays well under 2x the input plus a fixed slack.
+            size_t ecap = strlen(rawtext) * 2 + 4096;
+            speakBuf = (char *)malloc(ecap);
+            if (speakBuf) expand_tags(rawtext, speakBuf, ecap);
+            free(rawtext);
+        }
+    }
+    if (!batchMode && !speakBuf) {
+        fprintf(stderr, "ERROR: out of memory building the speak text\n");
+        return 8;
     }
 
-    // Apply the substitution dictionary to plain text (not to raw --pron phonemes).
-    // Replacements can expand the text, so use a separate, generously sized buffer.
-    char *speakBuf = utf8buf;
-    if (!pronPhonemes && g_dictCount > 0) {
-        size_t cap = strlen(utf8buf) * 32 + 4096;
-        char *db = (char*)malloc(cap);
+    // Apply the substitution dictionary to plain text (not to raw --pron
+    // phonemes). Replacements can expand the text, so use a separate buffer.
+    if (!pronPhonemes && speakBuf && g_dictCount > 0) {
+        size_t cap = strlen(speakBuf) * 32 + 4096;
+        char *db = (char *)malloc(cap);
         if (db) {
-            int subs = dict_apply(utf8buf, db, cap);
+            int subs = dict_apply(speakBuf, db, cap);
             fwprintf(stderr, L"INFO: Dictionary applied (%d substitution%hs)\n",
                      subs, subs == 1 ? "" : "s");
             if (subs > 0)
                 fprintf(stderr, "INFO: Rewritten text: %s\n", db);
-            speakBuf = db;
+            speakBuf = db;   // old buffer intentionally leaked; process is short-lived
         } else {
             fwprintf(stderr, L"WARNING: dictionary buffer alloc failed; using original text\n");
         }
     }
 
-    // Open output WAV (skip for g2p-only mode)
+    // Open output WAV (skip for g2p-only and batch modes; batch opens one
+    // per utterance inside synth_one)
     FILE *f = NULL;
-    if (woutPath) {
+    if (batchMode) {
+        f = NULL;
+    } else if (woutPath) {
         f = _wfopen(woutPath, L"wb+");
         if (!f) { fprintf(stderr, "failed to open output\n"); return 3; }
         write_wav_header(f, sampleRate, 16, 1, 0);
@@ -644,7 +1187,7 @@ int wmain(int argc, wchar_t **wargv) {
         if (!phnFile) {
             fwprintf(stderr, L"WARNING: Could not open %ls for phoneme output\n", phnPath);
         } else {
-            fprintf(phnFile, "# Phoneme timing for: %s\n", utf8buf);
+            fprintf(phnFile, "# Phoneme timing for: %s\n", speakBuf ? speakBuf : "");
             fprintf(phnFile, "# Format: start_sample\\tend_sample\\tphoneme\\tstress\n");
             fprintf(phnFile, "# Sample rate: %u Hz  (values are in samples, not bytes)\n", sampleRate);
             fwprintf(stderr, L"Phoneme output: %ls\n", phnPath);
@@ -674,7 +1217,8 @@ int wmain(int argc, wchar_t **wargv) {
     const char *params = "hostname=127.0.0.1;hostport=5555";
 
     if (api.OpenPortEx(&port, params, NULL, cb, &ctx) != 0 || port == SWITTS_INVALID_PORT) {
-        fprintf(stderr, "SWIttsOpenPortEx failed\n");
+        fwprintf(stderr, L"ERROR: could not open a Speechify port on "
+                         L"127.0.0.1:5555 (server unreachable or busy).\n");
         api.Term(cb, &ctx);
         return 6;
     }
@@ -695,6 +1239,21 @@ int wmain(int argc, wchar_t **wargv) {
     }
 
 
+    // Batch mode: drive every utterance on THIS port, then fall through
+    // to the shared teardown below.
+    if (batchMode) {
+        int brc = run_batch(&api, &port, &ctx, batchOutDir, sampleRate,
+                            !batchSharedPort, enablePhonemes);
+        CloseHandle(ctx.doneEvent);
+        api.ClosePort(port);
+        // See the teardown note below: SWIttsTerm costs ~4.6 s and is
+        // pure client-side cleanup, so it is skipped by default.
+        if (gracefulTerm) api.Term(cb, &ctx);
+        if (phnFile) fclose(phnFile);
+        if (!gracefulTerm) fast_exit(brc);
+        return brc;
+    }
+
     // Speak
     const unsigned char *bytes = (const unsigned char*)speakBuf;
     unsigned len = (unsigned)strlen(speakBuf);
@@ -710,14 +1269,27 @@ int wmain(int argc, wchar_t **wargv) {
         fprintf(stderr, "SWIttsSpeak failed\n");
     }
 
-    // Wait for completion (event-based, no polling delay)
-    WaitForSingleObject(ctx.doneEvent, 60000);
+    // Wait for completion (event-based, no polling delay). Scale the timeout
+    // with the text length so a large -f file is not truncated: a 60 s floor
+    // plus ~10 ms per input character (a generous ceiling on synthesis time --
+    // it only fires if the engine actually stalls), capped at 24 hours.
+    unsigned long long wl = 60000ULL + (unsigned long long)len * 10ULL;
+    if (wl > 86400000ULL) wl = 86400000ULL;
+    WaitForSingleObject(ctx.doneEvent, (DWORD)wl);
     CloseHandle(ctx.doneEvent);
 
     fwprintf(stderr, L"INFO: Done. Closing port.\n");
 
     api.ClosePort(port);
-    api.Term(cb, &ctx);
+
+    // SWIttsTerm() costs ~4.6 SECONDS while ClosePort is instant and the
+    // synthesis itself takes ~90 ms -- it dominated 98% of every
+    // invocation. ClosePort has already released the server-side port, and
+    // the TCP connection is torn down when this process exits, so Term is
+    // purely client-side library cleanup that the OS is about to do for
+    // us anyway. Skipped by default; --graceful-term restores it if a
+    // leak is ever suspected.
+    if (gracefulTerm) api.Term(cb, &ctx);
 
     // Finalize WAV
     fflush(f);
@@ -732,9 +1304,19 @@ int wmain(int argc, wchar_t **wargv) {
         fclose(phnFile);
     }
 
+    int rc = 0;
     if (!g2pMode) {
-        fprintf(stderr, "Wrote %u bytes of audio (%u samples at %u Hz)\n",
-                dataBytes, dataBytes / 2, sampleRate);
+        if (dataBytes == 0) {
+            // Port opened but nothing came back -- server up but not producing
+            // audio (voice not loaded / unhealthy, or returned junk).
+            fwprintf(stderr, L"ERROR: no audio produced -- the port opened but "
+                             L"synthesis returned nothing (is the voice loaded "
+                             L"and the server healthy?).\n");
+            rc = 10;
+        } else {
+            fprintf(stderr, "Wrote %u bytes of audio (%u samples at %u Hz)\n",
+                    dataBytes, dataBytes / 2, sampleRate);
+        }
     }
 
     // G2P output: print phoneme sequences
@@ -761,7 +1343,8 @@ int wmain(int argc, wchar_t **wargv) {
         printf("\n");
     }
 
-    if (speakBuf != utf8buf) free(speakBuf);
+    free(speakBuf);   // always heap-allocated now (NULL only in batch mode)
 
-    return 0;
+    if (!gracefulTerm) fast_exit(rc);   // skips the ~4.6 s DLL detach
+    return rc;
 }

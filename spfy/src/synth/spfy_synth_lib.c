@@ -9,6 +9,8 @@
 #include "spfy_synth_lib.h"
 
 #include "../fe/phoneset.h"
+#include "../voice/phone_order.h"
+#include "../common/log.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -53,7 +55,10 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
 {
     int rc;
     if (!paths || !v) return SPFY_E_INVAL;
-    if (!paths->vin || !paths->vdb || !paths->vcf || !paths->hpclass
+    /* paths->hpclass is optional: when NULL or empty the table is derived
+     * from the VIN itself (see phone_order.h), which is exact for every
+     * voice and removes the Frida-capture dependency. */
+    if (!paths->vin || !paths->vdb || !paths->vcf
         || !paths->vocab || !paths->fe_tables_a || !paths->fe_tables_b)
         return SPFY_E_INVAL;
 
@@ -69,15 +74,31 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
     if ((rc = spfy_feat_table_load(&v->vin, &v->feat))              != SPFY_OK) goto fail;
     if ((rc = spfy_vdb_lookup_build(&v->vdb, &v->lookup))           != SPFY_OK) goto fail;
     if ((rc = spfy_ccos_load(&v->vin, &v->ccos))                    != SPFY_OK) goto fail;
-    if ((rc = spfy_voice_maps_build(&v->ccos, &v->maps))            != SPFY_OK) goto fail;
+    if ((rc = spfy_voice_maps_build_from_vin(&v->vin, &v->ccos,
+                                             &v->maps))             != SPFY_OK) goto fail;
     if ((rc = spfy_proscost_load(&v->vcf, v->pros))                 != SPFY_OK) goto fail;
     if ((rc = spfy_hash_load(&v->vin, &v->hash))                    != SPFY_OK) goto fail;
     if ((rc = spfy_prsl_load(&v->vin, &v->prsl))                    != SPFY_OK) goto fail;
     if ((rc = spfy_cart_load_durt(&v->vin, &v->durt_cart))          != SPFY_OK) goto fail;
     if ((rc = spfy_cart_load_f0tr(&v->vin, &v->f0tr_cart))          != SPFY_OK) goto fail;
     if ((rc = spfy_chunk_tables_load(&v->vin, &v->chunks))          != SPFY_OK) goto fail;
-    if ((rc = spfy_anchor_hpclass_load(paths->hpclass,
-                                       &v->hpc, &v->hpc_n))         != SPFY_OK) goto fail;
+    /* Always needed: the feat/labl permutation feeds the ccos S-cost and
+     * the durt tree index, not just the hp_class table. */
+    if ((rc = spfy_phone_order_build(&v->vin, &v->phone_order))      != SPFY_OK) goto fail;
+
+    if (paths->hpclass && paths->hpclass[0]) {
+        if ((rc = spfy_anchor_hpclass_load(paths->hpclass,
+                                           &v->hpc, &v->hpc_n))     != SPFY_OK) goto fail;
+        if (v->hpc_n != v->units.n_units) {
+            spfy_log_err("hpclass %s has %u entries but the voice has %u "
+                         "units", paths->hpclass, v->hpc_n,
+                         v->units.n_units);
+            rc = SPFY_E_FORMAT; goto fail;
+        }
+    } else {
+        if ((rc = spfy_phone_order_hpclass(&v->phone_order, &v->units,
+                                           &v->hpc, &v->hpc_n))     != SPFY_OK) goto fail;
+    }
 
     /* Build per-HP-class candidate fallback index (lifted verbatim). */
     v->bucket_n   = (uint32_t *)calloc(v->hpc_buckets, sizeof *v->bucket_n);
@@ -109,12 +130,52 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
     v->av.proscost = v->pros;
     v->av.hpclass_table = v->hpc;
     v->av.hpclass_n     = v->hpc_n;
-    spfy_anchor_voice_set_default_weights(&v->av);
+    v->av.feat_to_labl  = v->phone_order.feat_to_labl;
+    v->av.n_feat_phones = v->phone_order.n_phones;
+    spfy_anchor_voice_set_weights_from_vcf(&v->av, &v->vcf);
 
-    /* FE host: opens vocab + fe_tables, sets per-voice VCF. */
-    if ((rc = spfy_fe_open(paths->vocab, paths->fe_tables_a,
-                            paths->fe_tables_b, &v->fe))            != SPFY_OK) goto fail;
+    /* v100005 voices (Paulina) ship no on-disk ccos phone context; derive it
+     * from recording adjacency exactly as the engine does post-load. No-op
+     * (ctx4 stays NULL) for v100006/8, which keep their raw on-disk bytes. */
+    if ((rc = spfy_anchor_build_ctx4(&v->av, &v->ctx4_buf)) != SPFY_OK) goto fail;
+
+    v->hp_prune_thresh = spfy_vcf_f32(&v->vcf, "HALFPHONE_CAND_PRUNE_THRESH",
+                                      0.8f);
+    v->hp_prune_slope  = spfy_vcf_f32(&v->vcf, "HALFPHONE_CAND_PRUNE_SLOPE",
+                                      0.005f);
+
+    /* FE host: hosts the SWIttsFe image for THIS voice's language, then
+     * sets the per-voice VCF. The VCF is already parsed above, so the
+     * language tag is available before the FE is created -- which it has
+     * to be, since the DLL is chosen at open time. */
+    {
+        const char *lang = spfy_vcf_str(&v->vcf, "language");
+        if ((rc = spfy_fe_open_lang(lang, paths->vocab, paths->fe_tables_a,
+                                    paths->fe_tables_b, &v->fe)) != SPFY_OK)
+            goto fail;
+    }
     if ((rc = spfy_fe_set_voice_vcf(v->fe, paths->vcf))             != SPFY_OK) goto fail;
+    /* Give the FE this voice's own phone-symbol -> engine-id table
+     * (feat["name"] order, the same numbering hp_class uses). Replaces
+     * the compiled-in en-US ARPAbet table, which left fr-CA/es-MX phones
+     * unmapped and falling back to VCF ids. Verified a no-op for en-US:
+     * that table is exactly this order. v->phone_order owns the strings
+     * and outlives v->fe. */
+    spfy_fe_set_phone_names(v->fe, v->phone_order.phone_names,
+                            v->phone_order.n_phones);
+
+    /* Enable the FE's ESPR mode so it emits the engine's fully-reduced
+     * phones (ix/dx) directly, from THIS voice's VCF config. This replaces
+     * the R1/R3/flap heuristic entirely (the hosted backend turns the
+     * heuristic off on success). Values are the VCF's own tts.voiceCfg.*:
+     * phoneset "swi_plus_ix" for en-US carries the barred-i; the es-MX/
+     * fr-CA voices use "swi". On backends without a hosted DLL (in-house
+     * FE / emulator / wasm) this declines and the heuristic stays on. */
+    spfy_fe_set_espr_config(v->fe,
+                            spfy_vcf_str(&v->vcf, "name"),
+                            spfy_vcf_str(&v->vcf, "gender"),
+                            spfy_vcf_str(&v->vcf, "phoneset"),
+                            spfy_vcf_str(&v->vcf, "version"));
 
     /* Engine-faithful voicing table — see [[project_voicing_gate_2026_05_12]]
      * and the in-line comment in spfy_synth.c for the rationale (the
@@ -207,11 +268,13 @@ void spfy_voice_free(spfy_voice_t *v)
     free(v->bucket_n);
     free(v->bucket_cap);
     free(v->voicing_buf);
+    free(v->ctx4_buf);
     spfy_cart_free(&v->durt_cart);
     spfy_cart_free(&v->f0tr_cart);
     spfy_chunk_tables_free(&v->chunks);
     if (v->fe) spfy_fe_close(v->fe);
     spfy_anchor_hpclass_free(v->hpc);
+    spfy_phone_order_free(&v->phone_order);
     spfy_prsl_free(&v->prsl);
     spfy_hash_free(&v->hash);
     spfy_proscost_free(v->pros);

@@ -46,6 +46,33 @@ int spfy_fe_open(const char *vocab_json,
     return 0;
 }
 
+/* This stub hosts no SWIttsFe image at all, so there is nothing to select
+ * per language -- `lang` is accepted and ignored. Present so callers
+ * (spfy_voice_load) need not branch on which FE backend is compiled in. */
+int spfy_fe_open_lang(const char *lang,
+                      const char *vocab_json,
+                      const char *tables_a_dir,
+                      const char *tables_b_dir,
+                      spfy_fe_t **out) {
+    (void)lang;
+    return spfy_fe_open(vocab_json, tables_a_dir, tables_b_dir, out);
+}
+
+/* Likewise: this stub resolves phone ids through its own phoneset, so the
+ * VIN-derived table is accepted and ignored (mirrors src/fe/fe.c). */
+int spfy_fe_set_phone_names(spfy_fe_t *fe, char *const *names, uint32_t n) {
+    (void)fe; (void)names; (void)n;
+    return 0;
+}
+
+/* No hosted Eloquence DLL here, so no ESPR mode -- decline. */
+int spfy_fe_set_espr_config(spfy_fe_t *fe, const char *name,
+                            const char *gender, const char *phoneset,
+                            const char *version) {
+    (void)fe; (void)name; (void)gender; (void)phoneset; (void)version;
+    return -1;
+}
+
 void spfy_fe_close(spfy_fe_t *opaque) {
     if (!opaque) return;
     native_fe_t *fe = (native_fe_t *)opaque;
@@ -83,7 +110,11 @@ static int parse_into_slots(native_fe_t *fe,
     if (ps) {
         spfy_fe_slot_t *slots = NULL;
         uint32_t n_slots = 0;
-        int rc = fe_parsed_to_full_slots(&fe->last_parsed, ps,
+        /* NULL phone-names table: this stub has no VIN to source engine
+         * phone ids from, so ids fall back to the compiled-in ARPAbet
+         * table -- the documented pre-Exp-89 behaviour, and correct for
+         * the en-US-only WASM path. */
+        int rc = fe_parsed_to_full_slots(&fe->last_parsed, ps, NULL,
                                          &slots, &n_slots);
         if (rc != 0) return rc;
         u->slots = slots; u->n_slots = n_slots;

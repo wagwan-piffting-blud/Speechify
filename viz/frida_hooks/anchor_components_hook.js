@@ -107,10 +107,20 @@ var stats = {
 /* Single-threaded engine: one active anchor frame at a time. */
 var frame = null;
 
+/* Page-keyed cache -- see viterbi_dp_hook.js. Dropped by reset() each
+ * utterance so validity is never assumed across the engine's per-phrase
+ * free/realloc of the anchor arenas. */
+var _rangeCache = {};
+
 function rangeOK(addr) {
     try {
+        var key = addr.shr(12).shl(12).toString();
+        var hit = _rangeCache[key];
+        if (hit !== undefined) return hit;
         var r = Process.findRangeByAddress(addr);
-        return r !== null && r.protection.indexOf('r') !== -1;
+        var ok = r !== null && r.protection.indexOf('r') !== -1;
+        _rangeCache[key] = ok;
+        return ok;
     } catch (e) { return false; }
 }
 
@@ -322,6 +332,7 @@ rpc.exports = {
             ccos_calls: 0, sp_calls: 0, d_calls: 0, f0_calls: 0,
             read_errors: 0, ptr_invalid: 0
         };
+        _rangeCache = {};
         frame = null;
     }
 };

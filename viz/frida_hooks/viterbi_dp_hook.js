@@ -57,10 +57,28 @@ var TOTAL_CAP = 100;            /* utterances captured per session */
 var stats = { calls: 0, sent: 0, dropped: 0,
               ptr_invalid: 0, read_errors: 0 };
 
+/* Page-keyed cache for rangeOK. Process.findRangeByAddress walks the
+ * target's memory map on EVERY call, and dumpGraph issues one read per
+ * candidate -- thousands per utterance. Measured 2026-07-20: this hook
+ * alone was 53% of master-capture wall clock (13.8 s of 26.2 s over 10
+ * phrases) almost entirely inside findRangeByAddress.
+ *
+ * The DP structures live in a handful of heap regions, so caching by 4 KB
+ * page collapses those thousands of lookups to a few. The try/catch in
+ * the readers below is the real protection and is untouched: if a cached
+ * page is later unmapped, the read still fails safe into read_errors.
+ * Cleared by reset() between utterances. */
+var _rangeCache = {};
+
 function rangeOK(addr) {
     try {
+        var key = addr.shr(12).shl(12).toString();
+        var hit = _rangeCache[key];
+        if (hit !== undefined) return hit;
         var r = Process.findRangeByAddress(addr);
-        return r !== null && r.protection.indexOf('r') !== -1;
+        var ok = r !== null && r.protection.indexOf('r') !== -1;
+        _rangeCache[key] = ok;
+        return ok;
     } catch (e) { return false; }
 }
 function safeReadU32(addr) {
@@ -249,6 +267,9 @@ rpc.exports = {
     reset: function () {
         stats = { calls: 0, sent: 0, dropped: 0,
                   ptr_invalid: 0, read_errors: 0 };
+        /* Drop the page cache too: the engine frees and reallocates the
+         * DP arenas between utterances, so validity must be re-proven. */
+        _rangeCache = {};
     }
 };
 

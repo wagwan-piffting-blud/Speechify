@@ -33,8 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern const unsigned char swittsfe_dll_data[];
-extern const size_t        swittsfe_dll_size;
+#include "swittsfe_registry.h"
 
 /* Vtable slots — same numbering the native path uses. */
 #define SLOT_RELEASE       2
@@ -60,9 +59,37 @@ typedef struct spfy_fe_s {
     uint32_t          vtable_va;          /* cached: iobj_va -> +0 */
     spfy_phoneset_t   phoneset;
     int               phoneset_loaded;
+    fe_phone_names_t  phone_names;      /* voice feat["name"] order */
     fe_parsed_t       last_parsed;
     int               last_parsed_valid;
+    int               espr_enabled;      /* ESPR mode header is set */
+    char              espr_header[512];  /* \!SWIcv... \!SWIespr1 header */
 } hosted_fe_t;
+
+/* UTF-8 / Latin-1 tolerant transcode to Latin-1 (the FE's input codepage).
+ * Identical logic to fe_host.c::text_to_latin1 -- see the full rationale
+ * there. Duplicated rather than shared to keep the two backends' guest/
+ * host memory handling independent. */
+static void text_to_latin1(const char *in, char *out, size_t out_n) {
+    size_t o = 0;
+    const unsigned char *p = (const unsigned char *)in;
+    while (*p && o + 1 < out_n) {
+        unsigned c = *p;
+        if (c < 0x80) { out[o++] = (char)c; ++p; continue; }
+        int need = ((c & 0xE0) == 0xC0) ? 1
+                 : ((c & 0xF0) == 0xE0) ? 2
+                 : ((c & 0xF8) == 0xF0) ? 3 : 0;
+        int ok = need > 0;
+        for (int k = 1; k <= need && ok; ++k)
+            if ((p[k] & 0xC0) != 0x80) ok = 0;
+        if (!ok) { out[o++] = (char)c; ++p; continue; }
+        unsigned cp = c & (0x7Fu >> need);
+        for (int k = 1; k <= need; ++k) cp = (cp << 6) | (p[k] & 0x3F);
+        out[o++] = (cp <= 0xFF) ? (char)cp : '?';
+        p += need + 1;
+    }
+    out[o] = '\0';
+}
 
 /* --- internal helpers --- */
 
@@ -170,7 +197,10 @@ static int parse_fe_output_into_slots(hosted_fe_t *fe,
     if (ps) {
         spfy_fe_slot_t *slots = NULL;
         uint32_t n_slots = 0;
-        int rc = fe_parsed_to_full_slots(&fe->last_parsed, ps, &slots, &n_slots);
+        int rc = fe_parsed_to_full_slots(&fe->last_parsed, ps,
+                                        fe->phone_names.names
+                                          ? &fe->phone_names : NULL,
+                                        &slots, &n_slots);
         if (rc != 0) return rc;
         u->slots   = slots;
         u->n_slots = n_slots;
@@ -197,7 +227,23 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
         fprintf(stderr, "[fe_host_emu] err_flag latched before synth — bailing\n");
         return NULL;
     }
-    feed_text(fe, text);
+
+    /* ESPR mode: feed the voice's control header first (see fe_host.c for
+     * the full rationale). Same feedConfigA(slot5)+feedConfigB(slot6) pair
+     * as the text, driven through the emulator. */
+    if (fe->espr_enabled) {
+        feed_text(fe, fe->espr_header);
+        uint32_t hdr_empty_va = spfy_dll_emu_alloc(1, 1);
+        uint32_t hdrB_args[1] = { hdr_empty_va };
+        call_vfn(fe, SLOT_FEED_CONFIG_B, hdrB_args, 1);
+    }
+
+    /* The FE wants Latin-1, not UTF-8; convert before feeding. */
+    char *latin1 = (char *)malloc(strlen(text) + 1);
+    if (!latin1) return NULL;
+    text_to_latin1(text, latin1, strlen(text) + 1);
+    feed_text(fe, latin1);
+    free(latin1);
 
     /* feedConfigB takes a pointer to a single NUL byte (the empty cfg). */
     uint32_t empty_va = spfy_dll_emu_alloc(1, 1);
@@ -222,15 +268,48 @@ int spfy_fe_open(const char *vocab_json,
                  const char *tables_a_dir,
                  const char *tables_b_dir,
                  spfy_fe_t **out) {
+    return spfy_fe_open_lang(NULL, vocab_json, tables_a_dir, tables_b_dir,
+                             out);
+}
+
+int spfy_fe_open_lang(const char *lang,
+                      const char *vocab_json,
+                      const char *tables_a_dir,
+                      const char *tables_b_dir,
+                      spfy_fe_t **out) {
     (void)vocab_json; (void)tables_a_dir; (void)tables_b_dir;
     if (!out) return -1;
     *out = NULL;
 
+    const spfy_fe_dll_entry_t *img = spfy_fe_dll_for_lang(lang);
+    if (!img) {
+        if (spfy_fe_n_dlls == 0) {
+            fprintf(stderr, "[fe_host_emu] no FE DLL images embedded\n");
+            return -2;
+        }
+        if (lang && *lang) {
+            fprintf(stderr,
+                    "[fe_host_emu] no embedded FE for language '%s' — "
+                    "falling back to '%s'\n", lang, spfy_fe_dlls[0].lang);
+        }
+        img = &spfy_fe_dlls[0];
+    }
+
+    /* fr-CA liaison stress inheritance (see fe_host.c / fe_parse). No-op for
+     * en-US/es-MX, which never emit bare-leading words. */
+    fe_parse_set_liaison_inherit(img->lang && strcmp(img->lang, "fr-CA") == 0);
+
     hosted_fe_t *fe = (hosted_fe_t *)calloc(1, sizeof(*fe));
     if (!fe) return -1;
 
-    if (spfy_dll_emu_boot(swittsfe_dll_data, (uint32_t)swittsfe_dll_size) != 0) {
-        fprintf(stderr, "[fe_host_emu] spfy_dll_emu_boot failed\n");
+    /* NB: the emulator maps ONE image for the life of the process
+     * (spfy_dll_emu_boot is idempotent and returns 0 if already booted),
+     * so switching language mid-process is not supported on this backend
+     * -- the first voice opened wins. The native PE backend has the same
+     * practical constraint. */
+    if (spfy_dll_emu_boot(img->data, (uint32_t)*img->size) != 0) {
+        fprintf(stderr, "[fe_host_emu] spfy_dll_emu_boot(%s) failed\n",
+                img->lang);
         free(fe); return -2;
     }
 
@@ -360,6 +439,48 @@ void spfy_fe_utterance_free(spfy_fe_utterance_t *u) {
 /* ============================================================
  * Public API — voice + stats
  * ============================================================ */
+
+int spfy_fe_set_phone_names(spfy_fe_t *opaque, char *const *names,
+                            uint32_t n) {
+    if (!opaque) return -1;
+    hosted_fe_t *fe = (hosted_fe_t *)opaque;
+    /* Borrowed: spfy_voice_t owns the strings via its
+     * spfy_phone_order_t, which outlives the FE. */
+    fe->phone_names.names = names;
+    fe->phone_names.n     = names ? n : 0u;
+    return 0;
+}
+
+/* ESPR mode on the emulator backend. Mirrors fe_host.c::
+ * spfy_fe_set_espr_config -- the emulator hosts the same DLL, so the same
+ * control header switches it into ESPR output. See that function and
+ * reference_reduced_vowel_is_a_rule for the full derivation. */
+int spfy_fe_set_espr_config(spfy_fe_t *opaque, const char *name,
+                            const char *gender, const char *phoneset,
+                            const char *version) {
+    if (!opaque) return -1;
+    hosted_fe_t *fe = (hosted_fe_t *)opaque;
+
+    if (getenv("SPFY_FE_HOST_NO_ESPR")) { fe->espr_enabled = 0; return -1; }
+
+    if (!name || !*name)         name     = "Tom";
+    if (!gender || !*gender)     gender   = "male";
+    if (!phoneset || !*phoneset) phoneset = "swi_plus_ix";
+    if (!version || !*version)   version  = "3.0.0.0";
+
+    /* FOUR real backslash bytes per token (`\\\\` in C = one byte). */
+    int n = snprintf(fe->espr_header, sizeof fe->espr_header,
+        "\\\\\\\\!SWIcv%s \\\\\\\\!SWIcg%s \\\\\\\\!SWIcn%s "
+        "\\\\\\\\!SWIcl%s \\\\\\\\!SWIespr1 \\\\\\\\!SWIwd0",
+        version, gender, name, phoneset);
+    if (n < 0 || (size_t)n >= sizeof fe->espr_header) {
+        fe->espr_enabled = 0;
+        return -1;
+    }
+    fe->espr_enabled = 1;
+    fe_parse_set_refine(0);
+    return 0;
+}
 
 int spfy_fe_set_voice_vcf(spfy_fe_t *opaque, const char *vcf_path) {
     if (!opaque || !vcf_path) return -1;

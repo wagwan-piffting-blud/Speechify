@@ -10,9 +10,11 @@
  *        -> WAV.
  *
  * Usage:
+ *   spfy_synth <voice.vin> <voice.vdb> <voice.vcf> "<text>" <out.wav>
+ *
  *   spfy_synth <voice.vin> <voice.vdb> <voice.vcf> <hpclass.bin>
  *              <vocab.json> <fe_tables_a> <fe_tables_b>
- *              "<text>" <out.wav>
+ *              "<text>" <out.wav>                          (legacy)
  *
  * This is the minimum-viable wiring: any bit-exact gaps (CART, full
  * post-scoring adjustment) are deferred -- the path produces audible
@@ -191,21 +193,34 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
 /* CART feature kernels (durt + f0tr)                                  */
 /* ------------------------------------------------------------------ */
 
-/* Tom phone-pair swap: 9->10, 10->11, 11->9; 14<->15. (Mirrors
- * tom_swap_label in src/usel/anchor_score.c.) */
-static uint32_t tom_swap(uint32_t label)
+/* feat-order phone -> ccos labl index. Mirrors phone_feat_to_labl in
+ * src/usel/anchor_score.c; see voice/phone_order.h for where the table
+ * comes from. Was a hardcoded Tom swap (9->10, 10->11, 11->9; 14<->15),
+ * which silently mis-indexed the durt tree forest on every other voice. */
+static uint32_t phone_to_labl(const spfy_voice_t *v, uint32_t phone)
 {
-    if (label == 9)  return 10;
-    if (label == 10) return 11;
-    if (label == 11) return 9;
-    if (label == 14) return 15;
-    if (label == 15) return 14;
-    return label;
+    if (!v || !v->phone_order.feat_to_labl ||
+        phone >= v->phone_order.n_phones) return phone;
+    uint8_t lab = v->phone_order.feat_to_labl[phone];
+    return (lab == SPFY_PHONE_NONE) ? phone : lab;
+}
+
+/* Is this slice ctx[2] one of the voice's two `pau` half-phone classes?
+ * Was hardcoded to 64/65 -- Tom's pau sits at feat index 32, but felix's
+ * is 35 (70/71) and javier's 24 (48/49), so the literal silently
+ * mis-classified silence on every non-Tom voice. */
+static int ctx_is_silence(const spfy_voice_t *v, uint32_t ctx2)
+{
+    uint32_t pau = v ? spfy_phone_order_index(&v->phone_order, "pau")
+                     : SPFY_PHONE_NONE;
+    uint32_t l = (pau == SPFY_PHONE_NONE) ? 64u : pau * 2u;
+    return ctx2 == l || ctx2 == l + 1u;
 }
 
 typedef struct {
     const spfy_fe_slot_t *slot;
     uint32_t              q5;
+    const spfy_voice_t   *voice;    /* for the feat->labl phone permutation */
     int                   is_f0tr;  /* if 1, q3/q4/q5/q9 are clamped to 0
                                        per engine's f0tr CART convention
                                        (cart_walker_args trace shows these
@@ -248,8 +263,10 @@ static int32_t cart_feat(uint32_t q_type, void *user)
     switch (q_type) {
         case 1: v = (int32_t)c->slot->sp[1]; break;
         case 2: v = (int32_t)c->slot->sp[0]; break;
-        case 3: v = (int32_t)tom_swap((uint32_t)c->slot->ctx[1] >> 1); break;
-        case 4: v = (int32_t)tom_swap((uint32_t)c->slot->ctx[3] >> 1); break;
+        case 3: v = (int32_t)phone_to_labl(c->voice,
+                                           (uint32_t)c->slot->ctx[1] >> 1); break;
+        case 4: v = (int32_t)phone_to_labl(c->voice,
+                                           (uint32_t)c->slot->ctx[3] >> 1); break;
         case 5: v = (int32_t)c->q5; break;
         case 7: v = (int32_t)c->slot->sp[2]; break;
         case 8: v = (int32_t)c->slot->sp[3]; break;
@@ -569,6 +586,14 @@ typedef struct {
     float                    f0_edge_change_weight;
     float                    missing_join_cost;
 } join_ctx_t;
+
+/* NB: the VCF's JOIN_COST_WEIGHT / JOIN_COST_OFFSET are deliberately NOT
+ * applied to a hash-HIT cell. Tested 2026-07-20 as `cost = w*cell + off`
+ * with each voice's own VCF values: Tom 100% -> 93.2% and Jill 93.8% ->
+ * 89.7% path UID. Both voices get worse, so the hash cells are already
+ * baked with whatever weighting the voice build applied. This matches the
+ * note in spfy_viterbi_replay.c that an earlier attempt to apply
+ * JOIN_COST_WEIGHT here was a bug. */
 
 /* Parse VIN `hist` sub-chunks (head + data) and populate the curve params.
  * On any malformed-chunk error returns a "no curve" state (legacy miss). */
@@ -1575,12 +1600,15 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
 #if defined(SPFY_FE_EMU)
                 fprintf(stderr,
                     "[spfy] FE backend: EMULATED DLL "
-                    "(SWIttsFe-en-US.dll via host_emu, "
-                    "100%% engine UID match, portable to arm64/wasm)\n");
+                    "(SWIttsFe-<lang> via host_emu, portable to "
+                    "arm64/wasm). The image is picked from the voice's "
+                    "VCF language -- see the [fe_host] line above.\n");
 #elif defined(SPFY_FE_HOSTED)
                 fprintf(stderr,
                     "[spfy] FE backend: NATIVE DLL "
-                    "(SWIttsFe-en-US.dll, 100%% engine UID match, 32-bit x86 only)\n");
+                    "(SWIttsFe-<lang>, 32-bit x86 only). The image is "
+                    "picked from the voice's VCF language -- see the "
+                    "[fe_host] line above.\n");
 #else
                 fprintf(stderr,
                     "[spfy] FE backend: IN-HOUSE pure-C "
@@ -1738,7 +1766,11 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     if ((rc = spfy_build_graph(&fe_utt, &tree)) != SPFY_OK) {
         free(seg_names); goto fail;
     }
-    if ((rc = spfy_derive_slice_ctx(&tree, seg_names, n_segs_arr, &slice_ctx))
+    /* Pass THIS voice's phone inventory: ctx[] is in engine phone-id
+     * (feat["name"]) numbering, which differs per voice. */
+    if ((rc = spfy_derive_slice_ctx(&tree, seg_names, n_segs_arr,
+                                    v->phone_order.phone_names,
+                                    v->phone_order.n_phones, &slice_ctx))
         != SPFY_OK
         || (rc = spfy_derive_sp_targets(&tree, &fe_utt,
                 getenv("SPFY_NO_SENTENCE_IDX_PARA") ? 0 : sentence_idx_in_para,
@@ -2002,21 +2034,28 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         /* PRSL pool query: triphone context = ctx[1]*10000+ctx[2]*100+ctx[3].
          *
          * Engine fallback on exact-key miss (empirical 2026-05-14,
-         * project_prsl_92_fallback): substitute 92 (the silence/boundary
-         * marker) for the side that represents "same phone, other half" —
-         * for a LEFT-half slot (side 0), substitute right; for a RIGHT-half
+         * project_prsl_92_fallback): substitute the boundary marker for
+         * the side that represents "same phone, other half" — for a
+         * LEFT-half slot (side 0), substitute right; for a RIGHT-half
          * slot (side 1), substitute left. Verified across all 20 pool_n=0
          * cases in phn_001/003/023/039 + mp_031/038: every engine-returned
-         * UID-set is exactly the contents of the 92-substituted key.
+         * UID-set is exactly the contents of the substituted key.
+         *
+         * The marker is one past the last hp_class, i.e. n_phones*2 — 92
+         * for Tom's 46 phones, which is where the old hardcoded 92 came
+         * from. It is 62 for the 31-phone es-MX voices, so the literal
+         * pointed at a nonexistent class for them.
          * SPFY_NO_PRSL_92_FALLBACK=1 disables. */
+        uint32_t hp_bound = v->phone_order.n_phones
+                              ? v->phone_order.n_phones * 2u : 92u;
         uint32_t ck = spfy_prsl_context_key(ctx5[1], ctx5[2], ctx5[3]);
         const uint32_t *pool = NULL;
         uint32_t pool_n = 0;
         spfy_prsl_lookup(&v->prsl, ck, &pool, &pool_n);
         if (pool_n == 0 && !getenv("SPFY_NO_PRSL_92_FALLBACK")) {
             uint32_t side = ctx5[2] & 1u;
-            uint32_t l_fb = side ? 92u : ctx5[1];
-            uint32_t r_fb = side ? ctx5[3] : 92u;
+            uint32_t l_fb = side ? hp_bound : ctx5[1];
+            uint32_t r_fb = side ? ctx5[3] : hp_bound;
             uint32_t ck_fb = spfy_prsl_context_key(l_fb, ctx5[2], r_fb);
             spfy_prsl_lookup(&v->prsl, ck_fb, &pool, &pool_n);
         }
@@ -2035,10 +2074,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             /* Plan 03-04: silence-pad CART traversal for the debug-JSON
              * emit path. The audit harness reads this output;
              * SPFY_NO_SILENCE_CART=1 reverts to old skip-on-silence. */
-            int silence_slot_dbg = (ctx5[2] == 64 || ctx5[2] == 65);
-            cart_feat_ctx_t cfc_dbg = { &adapter, q5, 0 };
+            int silence_slot_dbg = ctx_is_silence(v, ctx5[2]);
+            cart_feat_ctx_t cfc_dbg = { &adapter, q5, v, 0 };
             if (!silence_slot_dbg || !getenv("SPFY_NO_SILENCE_CART")) {
-                uint32_t didx = tom_swap(ctx5[2] >> 1);
+                uint32_t didx = phone_to_labl(v, ctx5[2] >> 1);
                 if (didx < v->durt_cart.n_trees)
                     spfy_cart_traverse(&v->durt_cart, didx, cart_feat, &cfc_dbg,
                                        &dm_dbg, &dv_dbg);
@@ -2132,7 +2171,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         spfy_anchor_sp_target_t sp_in;
         for (int i = 0; i < 5; ++i) sp_in.sp[i] = sp5[i];
 
-        cart_feat_ctx_t cfc = { &adapter, q5, 0 };
+        cart_feat_ctx_t cfc = { &adapter, q5, v, 0 };
         spfy_anchor_cart_t cart = {0};
         /* Silence-pad CART traversal: engine emits durt-CART leaf statistics
          * for silence slots (ctx5[2] in {64, 65} = HP_PAU_L/R) the same way
@@ -2142,9 +2181,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * None). Plan 03-03/03-04 removes the gate so spfy_cart_traverse
          * runs on silence slots too. SPFY_NO_SILENCE_CART=1 reverts to the
          * old behaviour for diagnostic isolation. */
-        int silence_slot = (ctx5[2] == 64 || ctx5[2] == 65);
+        int silence_slot = ctx_is_silence(v, ctx5[2]);
         if (!silence_slot || !getenv("SPFY_NO_SILENCE_CART")) {
-            uint32_t durt_idx = tom_swap(ctx5[2] >> 1);
+            uint32_t durt_idx = phone_to_labl(v, ctx5[2] >> 1);
             if (durt_idx < v->durt_cart.n_trees) {
                 if (spfy_cart_traverse(&v->durt_cart, durt_idx, cart_feat, &cfc,
                                        &cart.durt_mean, &cart.durt_var) == SPFY_OK)
@@ -2262,32 +2301,49 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 hp, cbuf[hp][i], (double)tbuf[hp][i]);
         }
 
-        /* Engine FUN_08e88de0 early-exit emulation: as cands are
-         * processed left-to-right in pool order, engine tracks
-         * `best_so_far` and caps any cand with TC > best_so_far +
-         * fVar4 to 1e4 (0x461c4000). fVar4 is voice config weight at
-         * offset +0x4c. The cap puts capped cands into histogram bin
-         * 39 so they're filtered out by FUN_08e88830's threshold walk.
+        /* Engine FUN_08e88de0 running-min early exit (decompiled
+         * 2026-07-20). The engine pre-sets every candidate's cost to the
+         * 10000.0f sentinel (`MOV [..+4],0x461c4000`), then accumulates
+         * the components in stages -- SP+flag, ccos, D, F0 -- re-testing
+         * `cost <= bound` after each and abandoning the candidate the
+         * moment it exceeds. Only a candidate that clears all four stages
+         * is stored, and only then:
          *
-         * SPFY_HP_EARLY_EXIT_VAL=<float> overrides fVar4 (default 0).
-         * Setting it to 0 disables the cap (current behavior).
+         *     if (cost < running_min) {
+         *         running_min = cost;
+         *         bound = slack + cost;      // local_50 = fVar4 + fVar14
+         *     }
          *
-         * 2026-05-14: for Tom, fVar4 value is TBD via decomp of voice
-         * config loader. Empirically test_002 needs fVar4 < 0.746 to
-         * cap uid=50038 at HP=4 (TC=0.933, best=0.187). */
-        const char *eev = getenv("SPFY_HP_EARLY_EXIT_VAL");
-        if (eev) {
-            float fvar4 = (float)atof(eev);
-            if (fvar4 > 0.0f) {
-                /* Iterate in pool order; track best_so_far; cap. */
-                float best_so_far = 1e30f;
-                for (uint32_t i = 0; i < pool_n; ++i) {
-                    float t = tbuf[hp][i];
-                    if (t > best_so_far + fvar4) {
-                        tbuf[hp][i] = 10000.0f;
-                    } else if (t < best_so_far) {
-                        best_so_far = t;
+         * with `running_min` and `bound` both starting at 10000.0f, and
+         * `slack` read from cfg+0x4c -- which is the SAME field the prune
+         * takes as its THRESH, i.e. HALFPHONE_CAND_PRUNE_THRESH. No new
+         * constant. `running_min` is then what gets passed to
+         * FUN_08e88830 as `best`.
+         *
+         * Staged bail-out is equivalent to a single post-hoc test here:
+         * every component is non-negative, so the partial sums are
+         * monotonic and `partial > bound` implies `full > bound`. What
+         * matters is that the bound tightens IN POOL ORDER, so this must
+         * run as a left-to-right sweep and not as a min-then-filter.
+         *
+         * SPFY_NO_HP_EARLY_EXIT=1 disables; SPFY_HP_EARLY_EXIT_VAL
+         * overrides the slack for A/B work. */
+        if (!getenv("SPFY_NO_HP_EARLY_EXIT")) {
+            float slack = v->hp_prune_thresh;
+            const char *eev = getenv("SPFY_HP_EARLY_EXIT_VAL");
+            if (eev && *eev) slack = (float)atof(eev);
+
+            float running_min = 10000.0f;   /* engine local_30 */
+            float bound       = 10000.0f;   /* engine local_50 */
+            for (uint32_t i = 0; i < pool_n; ++i) {
+                float t = tbuf[hp][i];
+                if (t <= bound) {
+                    if (t < running_min) {
+                        running_min = t;
+                        bound = slack + t;
                     }
+                } else {
+                    tbuf[hp][i] = 10000.0f;
                 }
             }
         }
@@ -2322,12 +2378,18 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         /* HP cand histogram_prune (FUN_08e88830). Engine-faithful core;
          * scoring-time running-min gating in FUN_08e88de0 not yet
          * implemented (engine prunes tighter than histogram alone).
-         * Constants from Tom VCF + engine globals: THRESH=0.8,
-         * SLOPE=0.005, MAX=50, BIN_WIDTH=0.025, SCALE=40.
-         * SPFY_NO_HP_PRUNE=1 disables. */
+         * THRESH/SLOPE come from the voice's VCF (Tom 0.8/0.005, Jill
+         * 1.0/0.005); MAX=50, BIN_WIDTH=0.025, SCALE=40 are engine
+         * globals, not per-voice. SPFY_NO_HP_PRUNE=1 disables. */
+        /* NB: a "skip the prune for pools smaller than N" guard was tested
+         * 2026-07-20 (engine traces show large kept-deltas at small pool
+         * sizes on both voices) and REJECTED: N=3 already costs Tom
+         * 8532->8525 while gaining Jill only 1983->1988, and larger N is
+         * far worse (N=13: Tom 95.1%). Whatever the engine does at small
+         * pools, a flat pool-size cutoff is not it. */
         if (pool_n > 1 && !getenv("SPFY_NO_HP_PRUNE")) {
-            const float HP_THRESH    = 0.8f;
-            const float HP_SLOPE     = 0.005f;
+            const float HP_THRESH    = v->hp_prune_thresh;
+            const float HP_SLOPE     = v->hp_prune_slope;
             const float HP_BIN_WIDTH = 0.025f;
             const float HP_SCALE     = 40.0f;
             const uint32_t HP_MAX    = 50u;
@@ -2375,50 +2437,117 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
              * for iteration k is (k+1)*HP_BIN_WIDTH not k*HP_BIN_WIDTH.
              * After break: threshold = bin_dist + best.
              *
-             * Precision note (2026-05-14): the LHS must be stored to a
-             * float local before the comparison. On 32-bit x86 with
-             * x87-FPU the inline expression keeps 80-bit register
-             * precision and produces a strict-less-than where engine
-             * (SSE2 / 32-bit precision) produces equality (no break).
-             * Without this, our prune is one bin tighter than engine
-             * exactly at the boundary, dropping cands like mp_050 HP=3
-             * uid 156406 (delta=0.778 from best, threshold=0.8). Set
-             * SPFY_PRUNE_X87=1 to restore the old (x87-extended)
-             * comparison for A/B audit. */
+             * Precision history (superseded 2026-07-20): a 2026-05-14 fix
+             * stored the LHS to a float local before comparing, on the
+             * theory that the engine compared at 32-bit precision. The
+             * disassembly (08e888c6..08e888ee) shows otherwise -- BOTH
+             * sides stay in x87 registers and only the final
+             * `bd + best` is rounded, by a single FSTP. The old fix and
+             * its SPFY_PRUNE_X87 escape hatch are gone; see below. */
+            /* Bin index the scan broke at; 40 == ran to completion. The
+             * engine gates the whole filter on this (see below). */
+            int break_k = 40;
+            /* Both sides of the break test are evaluated at x87 EXTENDED
+             * precision in the engine and never rounded to 32-bit floats
+             * (FUN_08e88830 @ 08e888c6..08e888ee):
+             *
+             *   FILD (k+1) ; FMUL BIN_WIDTH        -> bd,  extended
+             *   FILD cum   ; FMUL SLOPE ; FSUBR THRESH -> lhs, extended
+             *   FCOMPP                              -> break when bd > lhs
+             *
+             * The rounding only happens later, once, when best is added
+             * and the result is stored (FADD ; FSTP dword). Getting this
+             * wrong flips the k=38 boundary: at cum=5, THRESH=1.0 the two
+             * sides are 0.9750000005588 and 0.9750000145286 -- distinct in
+             * extended, but they round to the SAME float, so a rounded
+             * comparison sees equality and fails to break.
+             *
+             * long double is 80-bit on this 32-bit x86 target, matching
+             * the FPU registers exactly. */
+            long double bd_x = 40.0L * (long double)HP_BIN_WIDTH;
             for (int k = 0; k < 40; ++k) {
                 cum += bins[k];
-                float bd = (float)(k + 1) * HP_BIN_WIDTH;
-                float lhs = HP_THRESH - (float)cum * HP_SLOPE;
-                int break_now;
-                if (getenv("SPFY_PRUNE_X87")) {
-                    break_now = ((uint32_t)cum > HP_MAX
-                        || (HP_THRESH - (float)cum * HP_SLOPE) < bd);
-                } else {
-                    break_now = ((uint32_t)cum > HP_MAX || lhs < bd);
-                }
-                if (break_now) { bin_dist = bd; break; }
-            }
-            float thresh = best + bin_dist;
-            uint32_t kept = 0;
-            for (uint32_t i = 0; i < pool_n; ++i) {
-                if (tbuf[hp][i] <= thresh) {
-                    cbuf[hp][kept] = cbuf[hp][i];
-                    tbuf[hp][kept] = tbuf[hp][i];
-                    cand_c68[hp][kept] = cand_c68[hp][i];
-                    cand_c6c[hp][kept] = cand_c6c[hp][i];
-                    cand_c70[hp][kept] = cand_c70[hp][i];
-                    cand_c78[hp][kept] = cand_c78[hp][i];
-                    ++kept;
+                long double cur_bd = (long double)(k + 1)
+                                   * (long double)HP_BIN_WIDTH;
+                long double lhs_x  = (long double)HP_THRESH
+                                   - (long double)cum * (long double)HP_SLOPE;
+                if ((uint32_t)cum > HP_MAX || lhs_x < cur_bd) {
+                    bd_x = cur_bd; break_k = k; break;
                 }
             }
-            /* Sort kept cands by target_cost ascending. Engine does
-             * this in FUN_08e88830 (shell-sort); we use selection sort
-             * (cand counts are small post-prune). +0.2 pp UID match
-             * over no-sort with current bit-exact TC + join cost. */
+            bin_dist = (float)bd_x;   /* for the debug dump only */
+            /* Engine: FADD best onto the still-extended bd, then ONE
+             * FSTP to a 32-bit float. Rounding bd first and then adding
+             * would round twice. */
+            float thresh = (float)(bd_x + (long double)best);
+            /* The engine gates the entire threshold filter on the break
+             * bin: `if (iVar7 < 0x27)` in FUN_08e88830. If the scan broke
+             * at bin 39 or ran off the end, NO candidate is dropped --
+             * only the sort and the HP_MAX cap below still run.
+             *
+             * This is not a corner case, it is the whole sparse-pool
+             * story. The break needs THRESH - cum*SLOPE < (k+1)*0.025,
+             * and cum >= 1 always (best sits in bin 0), so:
+             *   Tom  THRESH=0.8: lhs <= 0.795 -> breaks by k=31, always
+             *                    < 39, so Tom ALWAYS prunes (this guard
+             *                    is provably a no-op for him).
+             *   Jill THRESH=1.0: lhs <= 0.995 -> needs (k+1)*0.025 >
+             *                    0.995, i.e. k=39 -> NO prune whenever
+             *                    the pool is sparse enough that cum stays
+             *                    low through the scan.
+             * Without the guard we cut Jill's sparse slots to best+1.0 and
+             * drop units the engine kept (text_004 uid 145844 at
+             * best+1.883, which is on the engine's chosen run).
+             *
+             * This guard is only HALF the engine's candidate reduction --
+             * it MUST be paired with the running-min early exit above.
+             * Enabled alone it overshoots badly (Jill 93.8% -> 92.6%,
+             * survivor mean 13.92 -> 17.33 vs an engine mean of 14.66),
+             * because our tighter histogram cut had been standing in for
+             * the missing early exit. SPFY_NO_HP_PRUNE_BIN39_GUARD=1
+             * reverts to the old always-filter behaviour for A/B. */
+            uint32_t kept;
+            if (break_k < 39 || getenv("SPFY_NO_HP_PRUNE_BIN39_GUARD")) {
+                kept = 0;
+                for (uint32_t i = 0; i < pool_n; ++i) {
+                    if (tbuf[hp][i] <= thresh) {
+                        cbuf[hp][kept] = cbuf[hp][i];
+                        tbuf[hp][kept] = tbuf[hp][i];
+                        cand_c68[hp][kept] = cand_c68[hp][i];
+                        cand_c6c[hp][kept] = cand_c6c[hp][i];
+                        cand_c70[hp][kept] = cand_c70[hp][i];
+                        cand_c78[hp][kept] = cand_c78[hp][i];
+                        ++kept;
+                    }
+                }
+            } else {
+                kept = pool_n;
+            }
+            /* Sort kept cands by target_cost ascending, ties broken by
+             * DESCENDING uid. The engine uses a shell sort whose swap
+             * predicate decodes (iVar12 = j, iVar9 = j+gap) to
+             *
+             *   cost_j >= cost_jg && (cost_j != cost_jg || uid_j <= uid_jg)
+             *
+             * -- i.e. on equal cost it moves the LARGER uid earlier. The
+             * int at cand+0 is the uid (FUN_08e88de0 indexes the unit
+             * table with it). Ordering matters downstream because the
+             * DP's predecessor scan and the early-exit bound both walk
+             * candidates in array order.
+             *
+             * We use a selection sort (counts are small post-prune); with
+             * a TOTAL comparator the result is identical to the engine's
+             * shell sort regardless of algorithm, since uids are unique
+             * within a pool so no two entries compare equal.
+             * SPFY_NO_HP_SORT_UID_TIE=1 reverts to cost-only for A/B. */
+            int sort_uid_tie = (getenv("SPFY_NO_HP_SORT_UID_TIE") == NULL);
             for (uint32_t a = 0; a + 1 < kept; ++a) {
                 uint32_t mn = a;
                 for (uint32_t b = a + 1; b < kept; ++b) {
-                    if (tbuf[hp][b] < tbuf[hp][mn]) mn = b;
+                    if (tbuf[hp][b] < tbuf[hp][mn]
+                        || (sort_uid_tie
+                            && tbuf[hp][b] == tbuf[hp][mn]
+                            && cbuf[hp][b] > cbuf[hp][mn])) mn = b;
                 }
                 if (mn != a) {
                     float    tt = tbuf[hp][a];
@@ -2445,9 +2574,16 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             if (getenv("SPFY_PRUNE_DEBUG")) {
                 fprintf(stderr, "{\"prune\":1,\"hp\":%u,\"pool_n_in\":%u,"
                                 "\"kept\":%u,\"best\":%.9f,\"bin_dist\":%.6f,"
-                                "\"thresh\":%.9f}\n",
+                                "\"thresh\":%.9f,\"break_k\":%d,"
+                                "\"filtered\":%d,\"kept_uids\":[",
                         hp, pool_n, kept, (double)best, (double)bin_dist,
-                        (double)(best + bin_dist));
+                        (double)(best + bin_dist), break_k, break_k < 39);
+                /* cbuf[0..kept-1] is the compacted survivor set; entries
+                 * past `kept` are stale leftovers, so only the survivors
+                 * are meaningful here. */
+                for (uint32_t i = 0; i < kept; ++i)
+                    fprintf(stderr, "%s%u", i ? "," : "", cbuf[hp][i]);
+                fprintf(stderr, "]}\n");
             }
             pool_n = kept;
         }
@@ -2603,7 +2739,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             for (uint32_t k = 0; k < span_n; ++k) {
                 uint32_t hp = first_hp_idx + k;
                 uint32_t post = hp_to_post[hp];
-                cart_feat_ctx_t cfc = {NULL, q5_per_slot[post], 0};
+                cart_feat_ctx_t cfc = {NULL, q5_per_slot[post], v, 0};
                 spfy_fe_slot_t adapter = {0};
                 for (int i = 0; i < 5; ++i) {
                     adapter.ctx[i] = (int32_t)slice_ctx.ctx[post][i];
@@ -2613,10 +2749,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 /* Plan 03-04: silence-pad CART traversal — see primary
                  * spfy_cart_traverse call site for rationale.
                  * SPFY_NO_SILENCE_CART=1 reverts. */
-                int silence = (slice_ctx.ctx[post][2] == 64
-                               || slice_ctx.ctx[post][2] == 65);
+                int silence = ctx_is_silence(v, slice_ctx.ctx[post][2]);
                 if (!silence || !getenv("SPFY_NO_SILENCE_CART")) {
-                    uint32_t didx = tom_swap(slice_ctx.ctx[post][2] >> 1);
+                    uint32_t didx = phone_to_labl(v, slice_ctx.ctx[post][2] >> 1);
                     if (didx < v->durt_cart.n_trees) {
                         if (spfy_cart_traverse(&v->durt_cart, didx, cart_feat, &cfc,
                               &cart_per[k].durt_mean, &cart_per[k].durt_var) == SPFY_OK)
@@ -2889,7 +3024,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             for (uint32_t k = 0; k < span_n; ++k) {
                 uint32_t hp = first_hp_idx + k;
                 uint32_t post = hp_to_post[hp];
-                cart_feat_ctx_t cfc = {NULL, q5_per_slot[post], 0};
+                cart_feat_ctx_t cfc = {NULL, q5_per_slot[post], v, 0};
                 spfy_fe_slot_t adapter = {0};
                 for (int i = 0; i < 5; ++i) {
                     adapter.ctx[i] = (int32_t)slice_ctx.ctx[post][i];
@@ -2899,10 +3034,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 /* Plan 03-04: silence-pad CART traversal — see primary
                  * spfy_cart_traverse call site for rationale.
                  * SPFY_NO_SILENCE_CART=1 reverts. */
-                int silence = (slice_ctx.ctx[post][2] == 64
-                               || slice_ctx.ctx[post][2] == 65);
+                int silence = ctx_is_silence(v, slice_ctx.ctx[post][2]);
                 if (!silence || !getenv("SPFY_NO_SILENCE_CART")) {
-                    uint32_t didx = tom_swap(slice_ctx.ctx[post][2] >> 1);
+                    uint32_t didx = phone_to_labl(v, slice_ctx.ctx[post][2] >> 1);
                     if (didx < v->durt_cart.n_trees) {
                         if (spfy_cart_traverse(&v->durt_cart, didx, cart_feat, &cfc,
                               &cart_per[k].durt_mean, &cart_per[k].durt_var) == SPFY_OK)
@@ -3123,12 +3257,15 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     /* F0-prob curve (VIN hist chunk + voice+0xc8). Tom's curve is
      * V-shaped (100 entries, sub_off=-50, min at idx 49, max ~10.96). */
     load_f0_hist_curve(&v->vin, &jc);
-    jc.f0_edge_change_weight = 0.6f;     /* Tom VCF F0_EDGE_CHANGE_WEIGHT */
+    /* Tom 0.6; Jill 1.5, Felix 0.9, Javier 0.1, Paulina 0.5. */
+    jc.f0_edge_change_weight =
+        spfy_vcf_f32(&v->vcf, "F0_EDGE_CHANGE_WEIGHT", 0.6f);
     /* MISSING_JOIN_COST = 1000.0 from FE-init default (FUN_08e90dc0
      * sets param_3[0x21] = 0x447a0000 = 1000.0 before VCF override;
-     * Tom VCF doesn't override). Huge by design — makes the DP almost
+     * no shipped VCF overrides it). Huge by design — makes the DP almost
      * exclusively use same-rec runs and v->hash hits. */
-    jc.missing_join_cost     = 1000.0f;
+    jc.missing_join_cost     =
+        spfy_vcf_f32(&v->vcf, "MISSING_JOIN_COST", 1000.0f);
     if (getenv("SPFY_NO_F0_CURVE")) jc.curve = NULL;
     if (jc.curve) {
         if (synth_is_verbose())
@@ -3394,8 +3531,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * halfphone slots. */
         uint32_t this_post = hp_to_post[s];
         const uint32_t (*ctx_arr)[5] = (const uint32_t (*)[5])slice_ctx.ctx;
-        int this_is_silence = (ctx_arr[this_post][2] == 64
-                               || ctx_arr[this_post][2] == 65);
+        int this_is_silence = ctx_is_silence(v, ctx_arr[this_post][2]);
         uint32_t this_word_idx = hp_word_idx[s];
         if (silence_n > 0 && prev_have
             && prev_word_idx != 0xFFFFFFFFu
@@ -3492,7 +3628,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             int wo = 1; ws_buf[0] = '[';
             for (uint32_t k = s; k < s + run_n && wo < (int)sizeof ws_buf - 16; ++k) {
                 uint32_t kp = hp_to_post[k];
-                int ksil = (cxg[kp][2] == 64 || cxg[kp][2] == 65);
+                int ksil = ctx_is_silence(v, cxg[kp][2]);
                 if (!ksil && hp_word_idx[k] != g_wprev) { ++g_wseq; g_wprev = hp_word_idx[k]; }
                 wo += snprintf(ws_buf + wo, sizeof ws_buf - (size_t)wo,
                                "%s%d", k > s ? "," : "", ksil ? -1 : g_wseq);
@@ -3828,20 +3964,26 @@ int main(int argc, char **argv)
     /* Two CLI forms:
      *   5-arg (preferred):   <voice.vin> <voice.vdb> <voice.vcf>
      *                        "<text>" <out.wav>
-     *     hpclass + vocab + fe_tables_{a,b} are embedded in the binary
-     *     (see spfy/tools/embed_assets.py) and extracted to a tempdir
-     *     on first invocation.
+     *     vocab + fe_tables_{a,b} are embedded in the binary (see
+     *     spfy/tools/embed_assets.py) and extracted to a tempdir on
+     *     first invocation; hp_class is derived from the voice's own
+     *     VIN, so this form works for EVERY voice, not just Tom.
      *   9-arg (legacy):      adds explicit hpclass/vocab/fe_tables_{a,b}
      *                        paths between the voice triplet and text —
      *                        kept so audit scripts that pass exact data
-     *                        paths still work.
+     *                        paths still work. An EMPTY hpclass argument
+     *                        selects VIN derivation, same as the 5-arg
+     *                        form.
      *
      * Either form accepts -f/--file <path> anywhere on the command line. It
      * supplies the input text from a file, in which case the "<text>"
      * positional is omitted (dropping the arg count to 4 / 8 positionals
      * plus the flag). */
     const char *vin_path, *vdb_path, *vcf_path;
-    const char *hpc_path, *vocab, *tab_a, *tab_b;
+    /* hpc_path MUST default to NULL: the short form never assigns it, and
+     * spfy_voice_load reads paths->hpclass[0] to decide load-vs-derive. */
+    const char *hpc_path = NULL;
+    const char *vocab, *tab_a, *tab_b;
     const char *text, *out_wav;
     spfy_asset_paths_t embedded_paths = {0};
     char *file_text = NULL;
@@ -3938,7 +4080,10 @@ int main(int argc, char **argv)
             free(file_text);
             return 1;
         }
-        hpc_path = embedded_paths.hpclass;
+        /* hpc_path deliberately stays NULL: spfy_voice_load then derives
+         * the hp_class table from THIS voice's VIN. Baking Tom's table in
+         * here made the short form reject every other voice on the
+         * unit-count check (jill 185475 units vs tom's 169579). */
         vocab    = embedded_paths.vocab;
         tab_a    = embedded_paths.tables_a;
         tab_b    = embedded_paths.tables_b;

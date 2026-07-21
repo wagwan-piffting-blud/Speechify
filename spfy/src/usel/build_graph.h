@@ -214,14 +214,32 @@ void spfy_slice_ctx_table_free(spfy_slice_ctx_table_t *t);
  * names in utterance order (= fe.syl_segs flattened). Length must
  * equal tree->n_halfphone / 2 == fe.n_segs.
  *
+ * `phone_names` is the VOICE's own phone inventory in VIN feat["name"]
+ * order, where the array index IS the engine phone id -- the same
+ * numbering hp_class and the FE's engine_phone_id() use. Pass
+ * spfy_phone_order_t.phone_names / .n_phones. It is a plain array rather
+ * than the struct so usel/ keeps no dependency on voice/, matching
+ * fe_phone_names_t in fe_parse.h.
+ *
+ * Passing NULL falls back to the hardcoded TOM table (see
+ * spfy_tom_phone_to_label). That is ONLY correct for Tom: every other
+ * voice has a different inventory, and for a non-en-US voice most
+ * symbols miss entirely, leaving ctx all-zero -- which collapses the
+ * PRSL pool onto phone id 0 for every affected slot. Synthesis must
+ * always pass the real table; the NULL path exists for the Tom-only
+ * replay harnesses.
+ *
  * Returns SPFY_OK on success. */
 int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
                           const char         **fe_segments_in_order,
                           uint32_t              n_segments,
+                          char *const          *phone_names,
+                          uint32_t              n_phones,
                           spfy_slice_ctx_table_t *out);
 
 /* Lookup a phoneme name -> label idx for Tom. Returns UINT32_MAX if
- * the name isn't in the table. */
+ * the name isn't in the table. Tom-only; prefer the voice's own
+ * feat["name"] order via spfy_derive_slice_ctx's phone_names. */
 uint32_t spfy_tom_phone_to_label(const char *name);
 
 /* --------------------------------------------------------------------- */

@@ -117,6 +117,26 @@ const spfy_fe_tables_t *spfy_fe_tables(const spfy_fe_t *fe)
     return fe ? &fe->tables : NULL;
 }
 
+/* The in-house FE resolves phone ids through its own phoneset, so the
+ * VIN-derived table is not consulted here. Accepted and ignored so
+ * callers need not branch on which backend is compiled in. */
+int spfy_fe_set_phone_names(spfy_fe_t *fe, char *const *names, uint32_t n)
+{
+    (void)fe; (void)names; (void)n;
+    return 0;
+}
+
+/* The in-house FE is not the hosted Eloquence DLL, so it has no ESPR mode.
+ * Accept-and-decline: returns nonzero, leaving the built-in refinement
+ * heuristic in force. */
+int spfy_fe_set_espr_config(spfy_fe_t *fe, const char *name,
+                            const char *gender, const char *phoneset,
+                            const char *version)
+{
+    (void)fe; (void)name; (void)gender; (void)phoneset; (void)version;
+    return -1;
+}
+
 const spfy_phoneset_t *spfy_fe_phoneset(const spfy_fe_t *fe)
 {
     if (!fe || !fe->voice_loaded) return NULL;

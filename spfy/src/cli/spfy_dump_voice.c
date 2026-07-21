@@ -20,9 +20,11 @@
 #include "../voice/vcf_matrix.h"
 #include "../voice/ccos.h"
 #include "../voice/feat_table.h"
+#include "../voice/phone_order.h"
 #include "../voice/vdb_lookup.h"
 #include "../usel/prsl.h"
 #include "../usel/hash.h"
+#include "../fe/phoneset.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -391,6 +393,149 @@ done:
     return rc == SPFY_OK ? 0 : 1;
 }
 
+/* Derive the per-unit hp_class table from the VIN alone and, when a
+ * reference file is supplied, diff it against that. The reference is a
+ * Frida-dumped hpclass.bin (one byte per unit); an exact match proves the
+ * derivation can replace the capture. */
+static int do_hpclass(const char *vin_path, const char *ref_path)
+{
+    spfy_vin_t vin = {0};
+    int rc = spfy_vin_load(vin_path, &vin);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "vin_load: %s\n", spfy_strerror(rc));
+        return 1;
+    }
+    spfy_unit_table_t units = {0};
+    rc = spfy_unit_table_load(&vin, &units);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "unit_table_load: %s\n", spfy_strerror(rc));
+        spfy_vin_free(&vin); return 1;
+    }
+    spfy_phone_order_t po = {0};
+    rc = spfy_phone_order_build(&vin, &po);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "phone_order_build: %s\n", spfy_strerror(rc));
+        spfy_vin_free(&vin); return 1;
+    }
+
+    printf("unit version %u  rec_size %u  n_units %u\n",
+           units.version, units.rec_size, units.n_units);
+    printf("phones %u  labels %u\n", po.n_phones, po.n_labels);
+    printf("labl -> feat permutation (non-identity entries):\n");
+    uint32_t n_swapped = 0;
+    for (uint32_t i = 0; i < po.n_labels; ++i) {
+        if (po.labl_to_feat[i] == (uint8_t)i) continue;
+        printf("  [%2u] %.*s -> %u\n", i,
+               (int)((po.labl_to_feat[i] < po.n_phones)
+                     ? po.phone_name_len[po.labl_to_feat[i]] : 0),
+               (po.labl_to_feat[i] < po.n_phones)
+                   ? po.phone_names[po.labl_to_feat[i]] : "",
+               po.labl_to_feat[i]);
+        ++n_swapped;
+    }
+    if (n_swapped == 0) printf("  (identity)\n");
+
+    uint8_t *hp = NULL;
+    uint32_t hp_n = 0;
+    rc = spfy_phone_order_hpclass(&po, &units, &hp, &hp_n);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "hpclass derive: %s\n", spfy_strerror(rc));
+        spfy_phone_order_free(&po); spfy_vin_free(&vin); return 1;
+    }
+    uint32_t max_hp = 0;
+    for (uint32_t i = 0; i < hp_n; ++i) if (hp[i] > max_hp) max_hp = hp[i];
+    printf("derived hp_class: %u entries, max %u\n", hp_n, max_hp);
+
+    int failed = 0;
+    if (ref_path) {
+        uint8_t *ref = NULL;
+        size_t   ref_n = 0;
+        if (spfy_slurp_file(ref_path, &ref, &ref_n) != SPFY_OK) {
+            fprintf(stderr, "read %s failed\n", ref_path);
+            failed = 1;
+        } else if (ref_n != hp_n) {
+            printf("MISMATCH: reference is %zu bytes, derived %u\n",
+                   ref_n, hp_n);
+            failed = 1;
+        } else {
+            uint32_t bad = 0, first = 0;
+            for (uint32_t i = 0; i < hp_n; ++i) {
+                if (ref[i] != hp[i]) {
+                    if (bad == 0) first = i;
+                    ++bad;
+                }
+            }
+            if (bad == 0) {
+                printf("EXACT MATCH vs %s (%u units)\n", ref_path, hp_n);
+            } else {
+                printf("MISMATCH: %u/%u differ, first at uid %u "
+                       "(ref %u, derived %u)\n",
+                       bad, hp_n, first, ref[first], hp[first]);
+                failed = 1;
+            }
+        }
+        free(ref);
+    }
+
+    spfy_phone_order_hpclass_free(hp);
+    spfy_phone_order_free(&po);
+    spfy_vin_free(&vin);
+    return failed;
+}
+
+/* List the voice's phone inventory in feat["name"] order -- the engine's
+ * phone-id numbering, and the numbering hp_class and the FE's ctx[] are
+ * both built on. Prints the VCF phoneset alongside it so a symbol the FE
+ * emits but the VIN does not carry is visible at a glance. */
+static int do_phones(const char *vin_path, const char *vcf_path)
+{
+    spfy_vin_t vin = {0};
+    int rc = spfy_vin_load(vin_path, &vin);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "vin_load: %s\n", spfy_strerror(rc));
+        return 1;
+    }
+    spfy_phone_order_t po = {0};
+    rc = spfy_phone_order_build(&vin, &po);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "phone_order_build: %s\n", spfy_strerror(rc));
+        spfy_vin_free(&vin); return 1;
+    }
+
+    printf("VIN feat[\"name\"] phone order: %u phones "
+           "(hp_class = id*2 + half, max %u)\n",
+           po.n_phones, po.n_phones ? po.n_phones * 2u - 1u : 0u);
+    for (uint32_t i = 0; i < po.n_phones; ++i)
+        printf("  %3u  %-8s  hp_class %u/%u\n", i, po.phone_names[i],
+               i * 2u, i * 2u + 1u);
+
+    if (vcf_path) {
+        spfy_vcf_t vcf = {0};
+        if (spfy_vcf_load(vcf_path, &vcf) == SPFY_OK) {
+            spfy_phoneset_t ps = {0};
+            if (spfy_phoneset_load_from_vcf(&vcf, &ps) == SPFY_OK) {
+                printf("\nVCF phoneset: %u phones, silence id %u\n",
+                       ps.n_phones, ps.silence_phone_id);
+                for (uint32_t i = 0; i < ps.n_phones; ++i) {
+                    /* Flag any VCF symbol with no VIN counterpart: those
+                     * are exactly the ones the FE cannot map to an engine
+                     * phone id. */
+                    const char *sym = ps.entries[i].name;
+                    int in_vin = (spfy_phone_order_index(&po, sym) != 0xff);
+                    printf("  %3u  %-8s  %s\n", i, sym,
+                           in_vin ? "" : "<-- NOT IN VIN feat[\"name\"]");
+                }
+            }
+            spfy_phoneset_free(&ps);
+            spfy_vcf_free(&vcf);
+        }
+    }
+
+    spfy_phone_order_free(&po);
+    spfy_vin_free(&vin);
+    return 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -401,8 +546,11 @@ static void usage(const char *argv0)
         "       %s --proscost <voice.vcf>\n"
         "       %s --prsl <voice.vin> <context_key>\n"
         "       %s --ccos <voice.vin> <hp_class> <slot>\n"
-        "       %s --resolve <voice.vin> <voice.vdb> <unit_id>\n",
-        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+        "       %s --resolve <voice.vin> <voice.vdb> <unit_id>\n"
+        "       %s --hpclass <voice.vin> [reference_hpclass.bin]\n"
+        "       %s --phones <voice.vin> [voice.vcf]\n",
+        argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0,
+        argv0);
 }
 
 int main(int argc, char **argv)
@@ -413,6 +561,10 @@ int main(int argc, char **argv)
         return do_roundtrip(argv[2], argv[3]);
     if (argc == 4 && strcmp(argv[1], "--unit") == 0)
         return do_unit(argv[2], (uint32_t)strtoul(argv[3], NULL, 10));
+    if ((argc == 3 || argc == 4) && strcmp(argv[1], "--hpclass") == 0)
+        return do_hpclass(argv[2], argc == 4 ? argv[3] : NULL);
+    if ((argc == 3 || argc == 4) && strcmp(argv[1], "--phones") == 0)
+        return do_phones(argv[2], argc == 4 ? argv[3] : NULL);
     if (argc == 5 && strcmp(argv[1], "--hash") == 0) {
         spfy_vin_t vin = {0};
         if (spfy_vin_load(argv[2], &vin) != SPFY_OK) {

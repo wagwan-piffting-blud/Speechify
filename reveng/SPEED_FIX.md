@@ -49,7 +49,15 @@ A polling loop with 10ms sleep. Fixed by replacing with a proper Win32 Event (`W
 | Server DLL patch only | 5.5s | 7.5x |
 | DLL patch + client Event fix | 2.9s | 14.2x |
 
-The ~2.9s floor with both fixes is IPC overhead (each `spfy_dumpwav.exe` invocation establishes a new TCP connection to `Speechify.exe` on port 5555). This is a fixed cost per request, not per word.
+The ~2.9s floor with both fixes is a fixed cost per request, not per word.
+
+> **Superseded 2026-07-20 — the floor was NOT IPC.** This section previously
+> attributed the floor to "each invocation establishes a new TCP connection
+> to `Speechify.exe`". Direct phase timing disproves that: connecting and
+> opening a port costs **61 ms**, and synthesis completes at **88 ms**.
+> The entire remaining ~4.6 s is `SWIttsTerm()` plus `SWItts.dll`'s
+> `DLL_PROCESS_DETACH` — pure client-side teardown, after the server port
+> has already been released. See "Teardown, not IPC" below.
 
 ## The Fix
 
@@ -119,3 +127,71 @@ This design made sense for SpeechWorks' original use case (streaming audio to a 
 7. Binary patch: 7-byte NOP at file offset 0x123DA
 8. Client fix: Event-based wait replaces polling loop
 9. Final result: 41.2s -> 5.5s (DLL only) or 2.9s (both fixes)
+
+---
+
+## Teardown, not IPC (2026-07-20)
+
+The "~2.9s IPC floor" above was a misattribution. Phase-timing a single
+`spfy_dumpwav.exe` run against the live server shows where the time
+actually goes:
+
+| phase | elapsed |
+|---|---|
+| `SWIttsInit` + `SWIttsOpenPortEx` (TCP connect + session) | 61 ms |
+| `SWIttsSpeak` + audio fully received | **88 ms** |
+| `SWIttsClosePort` | 0 ms |
+| `SWIttsTerm` | **4,585 ms** |
+
+Connecting is cheap and synthesis is cheap. **98% of every invocation was
+client-side library teardown**, paid after the server had already
+released the port. Measured mean over the 235-phrase corpus before the
+fix: **4,683 ms per phrase, with a standard deviation of ~10 ms and no
+correlation to text length** — 2 characters cost the same as 44, which is
+the signature of a fixed cost rather than work.
+
+### Two fixes
+
+1. **Skip `SWIttsTerm()`** (`--graceful-term` restores it). `ClosePort`
+   has already freed the server-side port; `Term` is client-side cleanup
+   the OS is about to do anyway.
+2. **Exit via `TerminateProcess`, not `return`/`exit()`.** Skipping
+   `Term` alone changes nothing measurable: `SWItts.dll` performs the
+   same ~4.6 s of cleanup from its `DLL_PROCESS_DETACH` handler, and
+   `ExitProcess` (which `return` from `wmain` and `exit()`/`_exit()` all
+   route through) still notifies loaded DLLs. Only `TerminateProcess`
+   bypasses detach. Safe because every file the tool owns is `fclose`d
+   and the WAV is finalized on disk before the call.
+
+### `--batch` mode
+
+For corpus work the per-process cost can be amortized entirely. `--batch
+<outdir>` reads `<id>\t<text>` lines from stdin, synthesizes each on ONE
+port, and prints `DONE <id>` after each. Reading a line at a time keeps
+it lock-step, so a Frida capture can drain its hook ring between
+utterances.
+
+### Results
+
+| mode | per phrase | 235-phrase corpus |
+|---|---|---|
+| stock (before) | 4,683 ms | 18.3 min |
+| single-shot, fast exit | 92 ms | 21.6 s |
+| `--batch` (one port) | **34 ms** | **8.1 s** |
+
+**51x** on single-shot, **138x** on batch.
+
+### Correctness checks
+
+- Output is **byte-identical** (SHA-256) to the pre-change binary, both
+  for single-shot and for batch — so reusing one port across a whole
+  corpus does not perturb synthesis. That matters for oracle capture:
+  the existing Tom traces were taken one-process-per-phrase.
+- **120-invocation soak, 0 failures.** `tts.server.numPorts` is 100, so
+  a leaked port per run would have started failing around iteration 101.
+  It does not: the server reaps the port when the TCP connection dies
+  with the process.
+
+Rebuild with `bin\build_dumpwav.bat` (MSVC x86 — must be 32-bit, it
+`LoadLibrary`s the 32-bit `SWItts.dll`).
+

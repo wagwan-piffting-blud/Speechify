@@ -1,6 +1,7 @@
 /* Public API surface for voice loading + introspection. */
 
 #include "voice.h"
+#include "unit_table.h"
 #include "../../include/spfy/spfy.h"
 #include "../../include/spfy/spfy_voice.h"
 
@@ -43,10 +44,13 @@ void spfy_voice_close(spfy_voice *v)
 
 size_t spfy_voice_n_units(const spfy_voice *v)
 {
-    /* Populated once vin_loader parses the unit chunk. */
+    /* Record size is version-dependent (24/29/30), and unit_n covers the
+     * whole chunk including its {vers,data} sub-chunk headers -- so this
+     * has to go through the real parser rather than a plain division. */
     if (!v || !v->vin.unit) return 0;
-    /* unit chunk: 29 bytes per record. */
-    return v->vin.unit_n / 29u;
+    spfy_unit_table_t t;
+    if (spfy_unit_table_load(&v->vin, &t) != SPFY_OK) return 0;
+    return t.n_units;
 }
 
 size_t spfy_voice_n_recordings(const spfy_voice *v)

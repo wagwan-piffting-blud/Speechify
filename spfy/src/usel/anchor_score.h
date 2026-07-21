@@ -113,6 +113,19 @@ typedef struct {
      * 169579 bytes for Tom; one byte per unit. */
     const uint8_t                   *hpclass_table;
     uint32_t                         hpclass_n;
+    /* feat-order phone index -> ccos labl index (the engine's voice+0x608
+     * permutation, minus the side term). NULL means identity, which is
+     * correct for Jill/Felix/Javier but NOT for Tom or Paulina. Owned by
+     * the caller's spfy_phone_order_t; see voice/phone_order.h. */
+    const uint8_t                   *feat_to_labl;
+    uint32_t                         n_feat_phones;
+    /* Derived per-unit ccos context columns for v100005 voices (Paulina),
+     * which ship no on-disk phone_ctx. 4 bytes per unit, already remapped
+     * to ccos-labl space so the column code consumes them exactly like a
+     * v100006 unit's raw on-disk phone_ctx. NULL for every other version
+     * (v100006/8 keep their on-disk bytes). Built by spfy_anchor_build_ctx4;
+     * owned by the caller. See anchor_score.c for the derivation. */
+    const uint8_t                   *ctx4;
     /* Per-hp_class voicing flag (voice+0x5fc). 2*n_labels entries.
      * 0 = voiceless (skip f0tr), nonzero = walk f0tr. */
     const uint32_t                  *voicing;
@@ -172,8 +185,27 @@ int spfy_anchor_hpclass_load(const char *path,
                               uint8_t **out_data, uint32_t *out_n);
 void spfy_anchor_hpclass_free(uint8_t *data);
 
+/* Build the derived ccos phone-context array for v100005 voices (the
+ * voice+0xc4 equivalent). v100005 unit records carry no on-disk phone
+ * context; the engine derives each unit's 4-cell context from recording
+ * adjacency at load time (FUN_08e91c30) and remaps every neighbour's
+ * hp_class through the feat->labl table at ccos time (FUN_08e8adc0). This
+ * bakes the remap in so the ccos column code consumes av->ctx4 raw.
+ *
+ * Needs av->units, av->hpclass_table and av->ccos populated first. On a
+ * v100005 voice sets av->ctx4 and *out_owned (caller frees). On any other
+ * version it is a no-op: av->ctx4 = NULL, *out_owned = NULL, returns OK.
+ * SPFY_NO_V100005_CTX4 in the environment forces the no-op (A/B). */
+int spfy_anchor_build_ctx4(spfy_anchor_voice_t *av, uint8_t **out_owned);
+
 /* Initialize default cost weights from Frida-captured Tom values. */
 void spfy_anchor_voice_set_default_weights(spfy_anchor_voice_t *av);
+
+/* Same, then override from the voice's own VCF. This is what any non-Tom
+ * voice needs: Jill weights JOIN_COST at 1.75 vs Tom's 0.7, STRESS
+ * mismatch at 0.5 vs 0.05, and PHONE_IN_SYL at 0.3 vs Tom's 0. */
+void spfy_anchor_voice_set_weights_from_vcf(spfy_anchor_voice_t *av,
+                                            const spfy_vcf_t *vcf);
 
 /* Per-HP InnerScorer (FUN_08e88de0 = USelNetworkSlice::all_half_phone_costs).
  *

@@ -2,8 +2,12 @@ add_executable(spfy_dump_voice spfy_dump_voice.c)
 target_include_directories(spfy_dump_voice
     PRIVATE ${CMAKE_SOURCE_DIR}/src/common
             ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/fe      # phoneset.h, for --phones
 )
-target_link_libraries(spfy_dump_voice PRIVATE spfy_voice spfy_usel spfy_common)
+# spfy_fe supplies phoneset.c under BOTH configs (src/fe_host/ pulls in
+# src/fe/phoneset.c; src/fe/ compiles it directly).
+target_link_libraries(spfy_dump_voice
+    PRIVATE spfy_voice spfy_usel spfy_fe spfy_common)
 
 # M1 acceptance harness: replay captured CART walks against C trees.
 add_executable(spfy_cart_replay spfy_cart_replay.c)
@@ -90,10 +94,16 @@ target_link_libraries(spfy_hp_score_test PRIVATE spfy_usel spfy_voice spfy_commo
 #
 # Embedded assets: spfy/tools/embed_assets.py generates a C source +
 # header at configure time that bakes the (otherwise external)
-# hpclass + fe_symbol_table.json + fe_tables_a + fe_tables blobs
-# straight into spfy_synth.exe. That lets the CLI accept a 5-arg form
+# fe_symbol_table.json + fe_tables_a + fe_tables blobs straight into
+# spfy_synth.exe. That lets the CLI accept a 5-arg form
 # (vin/vdb/vcf/text/out) instead of the legacy 9-arg form — the
 # extractor writes the bundled assets to a tempdir on startup.
+#
+# The hp_class table is NOT embedded: it is per-voice, so baking Tom's
+# copy in made the 5-arg form reject every other voice on the unit-count
+# check. It is derived from the VIN at load time instead. The on-disk
+# data/tom_hpclass.bin is kept as the reference that derivation is
+# checked against (spfy_dump_voice --hpclass), not as a build input.
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(EMBED_OUT_C "${CMAKE_CURRENT_BINARY_DIR}/embedded_assets.c")
 set(EMBED_OUT_H "${CMAKE_CURRENT_BINARY_DIR}/embedded_assets.h")
@@ -101,16 +111,14 @@ add_custom_command(
     OUTPUT  "${EMBED_OUT_C}" "${EMBED_OUT_H}"
     COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_SOURCE_DIR}/tools/embed_assets.py"
-            --hpclass  "${CMAKE_SOURCE_DIR}/data/tom_hpclass.bin"
             --vocab    "${CMAKE_SOURCE_DIR}/build/fe_symbol_table.json"
             --tables-a "${CMAKE_SOURCE_DIR}/data/fe_tables_a"
             --tables-b "${CMAKE_SOURCE_DIR}/data/fe_tables"
             --out-c    "${EMBED_OUT_C}"
             --out-h    "${EMBED_OUT_H}"
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/embed_assets.py"
-            "${CMAKE_SOURCE_DIR}/data/tom_hpclass.bin"
             "${CMAKE_SOURCE_DIR}/build/fe_symbol_table.json"
-    COMMENT "Embedding hpclass + fe_symbol_table + fe_tables into spfy_synth")
+    COMMENT "Embedding fe_symbol_table + fe_tables into spfy_synth")
 
 add_executable(spfy_synth spfy_synth.c "${EMBED_OUT_C}")
 target_include_directories(spfy_synth

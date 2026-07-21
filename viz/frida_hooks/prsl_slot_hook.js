@@ -69,10 +69,22 @@ function tryU32(addr) { try { return addr.readU32(); } catch(e) { return null; }
 /* Validate that addr is in a readable mapped range before reading. The
  * try/catch alone is not reliable on Windows -- some AVs trap inside the
  * trampoline before Frida's signal handler runs. */
+/* Page-keyed cache -- findRangeByAddress walks the whole memory map per
+ * call. The AV concern above still holds: each 4 KB page is still proven
+ * readable once, and the cache is dropped by reset() every utterance, so
+ * a page can never be trusted across the free/realloc boundary between
+ * phrases. See viterbi_dp_hook.js for measurements. */
+var _rangeCache = {};
+
 function rangeOK(addr) {
     try {
+        var key = addr.shr(12).shl(12).toString();
+        var hit = _rangeCache[key];
+        if (hit !== undefined) return hit;
         var r = Process.findRangeByAddress(addr);
-        return r !== null && r.protection.indexOf('r') !== -1;
+        var ok = r !== null && r.protection.indexOf('r') !== -1;
+        _rangeCache[key] = ok;
+        return ok;
     } catch(e) { return false; }
 }
 
@@ -169,6 +181,7 @@ rpc.exports = {
         flush();
         stats = { calls: 0, sent: 0, dropped: 0, ptr_invalid: 0,
                   read_errors: 0 };
+        _rangeCache = {};
     }
 };
 

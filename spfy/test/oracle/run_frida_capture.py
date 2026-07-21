@@ -116,6 +116,7 @@ HOOK_JS = {
     "wsola_unit_probe":  HOOK_DIR / "wsola_unit_probe_hook.js",   # 2026-05-14: WsolaUnit + sub-unit + pmark struct dump at FUN_08EE2960 entry (PSOLA port scoping)
     "userdict_lookup":   HOOK_DIR / "userdict_lookup_hook.js",    # 2026-05-20: dump (dict, key, value) at UserDict::lookup. Used to extract engine's disambigDict contents byte-exact for fe_internal POS port.
     "probe_fe_module":   HOOK_DIR / "probe_fe_module.js",         # 2026-05-20: one-shot diag — list FE/engine module bases in target process.
+    "fe_feedconfig":     HOOK_DIR / "fe_feedconfig_hook.js",      # 2026-07-20 ESPR: dump exact string engine feeds FE via feedConfigA (TTSFrontEnd::speak) — recovers the \!SWIespr1 header + real values + escaping.
 }
 
 # ---------------------------------------------------------------------------
@@ -341,6 +342,21 @@ def parse_args() -> argparse.Namespace:
                     help="throwaway dir for synthesis output WAVs")
     ap.add_argument("--quiet-rpc", action="store_true",
                     help="suppress RPC failure warnings during reset/flush")
+    ap.add_argument("--batch-synth", action="store_true",
+                    help="keep ONE spfy_dumpwav.exe alive and feed it "
+                         "utterances, instead of spawning one per phrase. "
+                         "OFF by default: measured 2789 vs 2804 ms/entry, "
+                         "i.e. no gain, because under Frida instrumentation "
+                         "the hooked synthesis (~2.5 s) dominates and the "
+                         "per-process teardown it saves was already fixed in "
+                         "spfy_dumpwav itself. Batch is worth using for "
+                         "UNinstrumented bulk synthesis (34 vs 92 ms).")
+    ap.add_argument("--timing", action="store_true",
+                    help="print per-entry reset/synth/drain timings")
+    ap.add_argument("--settle", type=float, default=0.3,
+                    help="seconds to wait for in-flight Frida send() messages "
+                         "after each utterance (default: 0.3). Dominates "
+                         "wall-clock once batch synthesis is enabled.")
     ap.add_argument("--master-unified-out", type=Path,
                     default=PROJECT_ROOT / "spfy" / "test" / "oracle" /
                             "traces_master",
@@ -465,6 +481,72 @@ def synth_one(dumpwav: Path, entry: dict, scratch: Path) -> tuple[bool, str]:
     return True, str(out_wav)
 
 
+class BatchSynth:
+    """Keep ONE spfy_dumpwav.exe alive and feed it utterances lock-step.
+
+    Spawning a process per phrase costs ~4.7 s of SWIttsTerm/DLL-detach
+    teardown for ~90 ms of actual synthesis (see reveng/SPEED_FIX.md,
+    "Teardown, not IPC"). Batch mode amortizes that to ~34 ms per phrase.
+
+    Lock-step matters for capture: we write one line, block until the
+    client reports `DONE <id>`, and only then drain the Frida hook ring,
+    so events cannot bleed across entries. Output is byte-identical to
+    the per-process path -- verified by SHA-256 over the corpus.
+    """
+
+    def __init__(self, dumpwav: Path, scratch: Path) -> None:
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.scratch = scratch
+        self.proc = subprocess.Popen(
+            [str(dumpwav), "--batch", str(scratch)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
+            bufsize=1)
+
+    def synth(self, entry: dict) -> tuple[bool, str]:
+        if self.proc.poll() is not None:
+            return False, f"batch client exited rc={self.proc.returncode}"
+
+        if entry["mode"] == "text":
+            text = entry["text"]
+        elif entry["mode"] == "spr":
+            # Same inline-SPR wrapper that --pron applies internally.
+            text = "\\![" + entry["text"] + "]"
+        else:
+            return False, f"unknown mode {entry['mode']!r}"
+
+        # A literal tab or newline would desync the line protocol.
+        text = text.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+        try:
+            self.proc.stdin.write(f"{entry['id']}\t{text}\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            return False, f"batch write failed: {exc}"
+
+        want = f"DONE {entry['id']}"
+        while True:
+            line = self.proc.stdout.readline()
+            if not line:
+                return False, "batch client closed stdout"
+            line = line.strip()
+            if line == want:
+                return True, str(self.scratch / f"{entry['id']}.wav")
+            if line.startswith("DONE "):
+                return False, f"out-of-order ack {line!r} (wanted {want!r})"
+
+    def close(self) -> None:
+        try:
+            if self.proc.poll() is None:
+                self.proc.stdin.close()
+                self.proc.wait(timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+
+
 def write_jsonl(path: Path, events: list[dict]) -> int:
     """Flatten any '<X>_batch' event with a 'samples' array into per-sample
     lines of type '<X>'; pass other events through verbatim. Returns number
@@ -513,15 +595,31 @@ def main() -> int:
     print(f"attaching frida to {TARGET} with hook '{args.hook}' ...")
     sess = HookSession(args.hook, quiet_rpc=args.quiet_rpc)
 
+    batch = None
+    if args.batch_synth:
+        batch = BatchSynth(args.dumpwav, args.scratch)
+        print("synth: batch mode (one client process, fresh port per phrase)")
+
     n_run = n_ok = 0
     try:
         for entry in entries:
             if flt and not flt.search(entry["id"]):
                 continue
             n_run += 1
+            _t0 = time.time()
             sess.reset_events()
-            ok, msg = synth_one(args.dumpwav, entry, args.scratch)
-            events = sess.flush_and_collect(settle_s=0.3)
+            _t1 = time.time()
+            if batch is not None:
+                ok, msg = batch.synth(entry)
+            else:
+                ok, msg = synth_one(args.dumpwav, entry, args.scratch)
+            _t2 = time.time()
+            events = sess.flush_and_collect(settle_s=args.settle)
+            _t3 = time.time()
+            if args.timing:
+                print(f"    [timing] reset={_t1-_t0:.3f}s "
+                      f"synth={_t2-_t1:.3f}s drain={_t3-_t2:.3f}s "
+                      f"total={_t3-_t0:.3f}s")
             status = "ok " if ok else "FAIL"
             tail = "" if ok else f"  ({msg})"
             if is_master:
@@ -540,6 +638,8 @@ def main() -> int:
             if ok:
                 n_ok += 1
     finally:
+        if batch is not None:
+            batch.close()
         sess.detach(timeout_s=5.0)
 
     if is_master:

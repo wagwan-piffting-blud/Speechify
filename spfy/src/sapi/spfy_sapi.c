@@ -892,18 +892,19 @@ static HRESULT load_voice_from_token(SpfyEngineImpl *impl,
         return E_FAIL;
 
     char vin[MAX_PATH], vdb[MAX_PATH], vcf[MAX_PATH];
-    char hpc[MAX_PATH], vocab[MAX_PATH], tab_a[MAX_PATH], tab_b[MAX_PATH];
+    char vocab[MAX_PATH], tab_a[MAX_PATH], tab_b[MAX_PATH];
     _snprintf(vin,   MAX_PATH - 1, "%s\\en-US\\%s\\%s.vin",  root, voice_name, voice_name);
     _snprintf(vdb,   MAX_PATH - 1, "%s\\en-US\\%s\\%s8.vdb", root, voice_name, voice_name);
     _snprintf(vcf,   MAX_PATH - 1, "%s\\en-US\\%s\\%s.vcf",  root, voice_name, voice_name);
-    _snprintf(hpc,   MAX_PATH - 1, "%s\\spfy\\data\\tom_hpclass.bin",   root);
     _snprintf(vocab, MAX_PATH - 1, "%s\\spfy\\build\\fe_symbol_table.json", root);
     _snprintf(tab_a, MAX_PATH - 1, "%s\\spfy\\data\\fe_tables_a", root);
     _snprintf(tab_b, MAX_PATH - 1, "%s\\spfy\\data\\fe_tables",   root);
 
+    /* hpclass NULL -> derived from this voice's VIN. Previously pinned to
+     * data/tom_hpclass.bin, which made every non-Tom token fail to load. */
     spfy_voice_paths_t paths = {
         .vin = vin, .vdb = vdb, .vcf = vcf,
-        .hpclass = hpc, .vocab = vocab,
+        .hpclass = NULL, .vocab = vocab,
         .fe_tables_a = tab_a, .fe_tables_b = tab_b,
     };
     if (impl->voice_loaded) {

@@ -97,7 +97,8 @@ int main(int argc, char **argv)
     }
     uint32_t sp_cand[5] = {
         cand.sp_syl_in_phrase, cand.sp_syl_type,
-        cand.sp_word_in_phrase, cand.sp_syl_in_word, 6
+        cand.sp_word_in_phrase, cand.sp_syl_in_word,
+        cand.sp_phone_in_syl   /* 6 unless the record is v100008 */
     };
     /* Default mismatch weights from VCF (Tom). */
     float w_sp[5] = {0.1f, 0.1f, 0.0f, 0.0f, 0.0f};

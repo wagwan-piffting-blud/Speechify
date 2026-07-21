@@ -87,10 +87,23 @@ var addrConstSent = false;
  * (matrix 0 row, matrix 1 row, ..., matrix 4 row). */
 var SP_FIELD_OFFSETS = [0x2c, 0x28, 0x34, 0x38, 0x3c];
 
+/* Page-keyed cache for rangeOK -- see viterbi_dp_hook.js for the full
+ * rationale. Process.findRangeByAddress walks the target's memory map on
+ * every call; this hook fires per (slot, candidate) and reads many fields
+ * each time, so uncached it was ~25% of master-capture wall clock.
+ * Verified behaviour-neutral: traces compare identical modulo run-varying
+ * heap pointers. Cleared by reset() between utterances. */
+var _rangeCache = {};
+
 function rangeOK(addr) {
     try {
+        var key = addr.shr(12).shl(12).toString();
+        var hit = _rangeCache[key];
+        if (hit !== undefined) return hit;
         var r = Process.findRangeByAddress(addr);
-        return r !== null && r.protection.indexOf('r') !== -1;
+        var ok = r !== null && r.protection.indexOf('r') !== -1;
+        _rangeCache[key] = ok;
+        return ok;
     } catch(e) { return false; }
 }
 
@@ -619,6 +632,7 @@ rpc.exports = {
         flush();
         stats = { calls: 0, sent: 0, dropped: 0, ptr_invalid: 0,
                   read_errors: 0 };
+        _rangeCache = {};
     }
 };
 

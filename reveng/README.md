@@ -28,6 +28,35 @@ Every SpeechWorks voice ships as a triplet:
 The `8` in `tom8.vdb` means 8 kHz. A 16 kHz version would be `tom16.vdb`. The engine figures out which
 file to load from a template in the VCF.
 
+### The shipped voices (surveyed 2026-07-20)
+
+Most of this document describes Tom, because Tom is the baseline. The
+container format turns out to be *identical* across all five shipped
+voices — same chunks, same order, same XOR-0xCE, same µ-law 8 kHz VDB.
+What varies is inside the chunks:
+
+| Voice | Lang | `unit/vers` | stride | n_units | phones | labl order | phoneset |
+|-------|------|:-----------:|:------:|--------:|:------:|------------|----------|
+| Tom     | en-US | 100006 | 29 | 169,579 | 46 | permuted (`d`/`dh`/`dx`, `en`/`er`) + 1 empty label | `swi_plus_ix` |
+| Jill    | en-US | **100008** | **30** | 185,475 | 46 | alphabetical | `swi_plus_ix` |
+| Felix   | fr-CA | 100006 | 29 | 259,660 | 46 | alphabetical | `swi` |
+| Javier  | es-MX | 100006 | 29 | 219,501 | 31 | alphabetical | `swi` |
+| Paulina | es-MX | **100005** | **24** | 663,410 | 31 | **28 of 31 permuted** | `swi` |
+
+Two things this table is trying to say:
+
+- **Felix and Javier use Tom's exact record format.** Their gap is the
+  front end (fr-CA / es-MX phonemes), not the voice data.
+- **Jill differs by a single byte** — a `phoneInSyl` column inserted at
+  `+0x10` that shifts the rest of the record along by one. She is
+  otherwise a Tom-shaped en-US voice with the same 46 phones, which is
+  why she was the right one to support first.
+
+Per-voice cost weights live in the VCF and differ a lot — Jill weights
+joins at 1.75 vs Tom's 0.7, stress mismatch at 0.5 vs 0.05, and
+`PHONE_IN_SYL_MISMATCH_COST` at 0.3 vs Tom's 0. Anything hardcoded to
+Tom's numbers will be quietly wrong on every other voice.
+
 ---
 
 ## Encryption

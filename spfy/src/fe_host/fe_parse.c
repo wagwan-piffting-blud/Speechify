@@ -98,11 +98,43 @@ static int p_parse_ident(parser_t *p, char *buf, size_t buf_sz) {
     p_skip_ws(p);
     if (p->p >= p->end) return 0;
     int c = (unsigned char)*p->p;
+    /* A byte >= 0x80 is an accented Latin-1 letter in a word name -- the
+     * FE emits fr-CA/es-MX words like "días", "niño", "être" with their
+     * accents intact. isalpha()/isalnum() reject those in the C locale, so
+     * the tokeniser used to stop mid-word (leaving the following `(` of the
+     * `(offset,len)` tag unexpected -> "error at offset N: (") and drop the
+     * whole phrase. Accept high bytes as word-name letters. ASCII (en-US)
+     * is unaffected. */
+    if (!(isalpha(c) || c == '_' || c >= 0x80)) return 0;
+    size_t n = 0;
+    while (p->p < p->end) {
+        c = (unsigned char)*p->p;
+        if (!(isalnum(c) || c == '_' || c == '\'' || c >= 0x80)) break;
+        if (n + 1 < buf_sz) buf[n] = (char)c;
+        n++;
+        p->p++;
+    }
+    if (buf_sz > 0) buf[(n < buf_sz) ? n : buf_sz - 1] = '\0';
+    return (int)n;
+}
+
+/* Phoneme symbol: as p_parse_ident, plus '~'.
+ *
+ * fr-CA marks nasal vowels with a trailing tilde -- its phone set is
+ * `... a~ e eu ... oe oe~ ox o~ ...`. Without '~' as a continuation char
+ * the parser stops mid-symbol on `o~(p100)` and then fails looking for
+ * '('. Kept separate from p_parse_ident so widening the phoneme charset
+ * cannot change how WORD names are tokenised. en-US and es-MX symbols
+ * are pure alnum and so are unaffected. */
+static int p_parse_phone_ident(parser_t *p, char *buf, size_t buf_sz) {
+    p_skip_ws(p);
+    if (p->p >= p->end) return 0;
+    int c = (unsigned char)*p->p;
     if (!(isalpha(c) || c == '_')) return 0;
     size_t n = 0;
     while (p->p < p->end) {
         c = (unsigned char)*p->p;
-        if (!(isalnum(c) || c == '_' || c == '\'')) break;
+        if (!(isalnum(c) || c == '_' || c == '\'' || c == '~')) break;
         if (n + 1 < buf_sz) buf[n] = (char)c;
         n++;
         p->p++;
@@ -185,6 +217,13 @@ static int ensure_word_cap(fe_parsed_t *out) {
 
 static void apply_phoneme_refinement(fe_parsed_t *out);   /* defined below */
 
+/* fr-CA liaison stress inheritance. When a word arrives with bare leading
+ * phonemes (no `.N`), those phones continue the PREVIOUS word's final
+ * syllable, so they should inherit its stress rather than default to 0.
+ * Off by default (en-US/es-MX never emit bare-leading words); fe_host turns
+ * it on only for the fr-CA image. See fe_parse_set_liaison_inherit. */
+static int s_liaison_inherit_stress = 0;
+
 static int ensure_phoneme_cap(fe_parsed_word_t *w) {
     if (w->n_phonemes >= w->phonemes_cap) {
         int nc = w->phonemes_cap ? w->phonemes_cap * 2 : 16;
@@ -201,7 +240,7 @@ static int ensure_phoneme_cap(fe_parsed_word_t *w) {
 static int parse_phoneme(parser_t *p, fe_parsed_word_t *w,
                          int cur_stress, const char *cur_accent) {
     char name[16];
-    if (p_parse_ident(p, name, sizeof(name)) <= 0) return 0;
+    if (p_parse_phone_ident(p, name, sizeof(name)) <= 0) return 0;
     if (!p_expect_lit(p, "(")) return 0;
     if (!p_expect_lit(p, "p")) return 0;
     int dur = 0;
@@ -221,7 +260,8 @@ static int parse_phoneme(parser_t *p, fe_parsed_word_t *w,
     return 1;
 }
 
-static int parse_word_body(parser_t *p, fe_parsed_word_t *w) {
+static int parse_word_body(parser_t *p, fe_parsed_word_t *w,
+                           int prev_last_stress) {
     /* Inside the [ ... ]. Each syllable begins with `.X` (X = 0/1),
      * optionally `,accent`. Then one or more phonemes. Multiple
      * syllables can appear back-to-back. */
@@ -252,6 +292,26 @@ static int parse_word_body(parser_t *p, fe_parsed_word_t *w) {
             }
             w->n_syllables++;
             continue;
+        }
+        /* Liaison / enchainement (fr-CA): a word's phone list can begin
+         * WITHOUT a leading `.N` marker, because its first phone belongs
+         * to the syllable whose nucleus sits in the PREVIOUS word --
+         *   <un (0,2) art,0 [.0 oe~ .0 n ]> <essai [e .1,H* s E ]>
+         *   <nord ... [.1 n c .0 r ]>       <et [e ]>
+         * Open an implicit unstressed syllable so the phone lands at
+         * syl_index 0 rather than -1; a negative index collapsed the slot
+         * tree to n_halfphone==0, which surfaced as a bare "format error".
+         * Cannot fire for en-US or es-MX -- every word in those phonesets
+         * opens with an explicit `.N`. */
+        if (w->n_syllables == 0) {
+            w->n_syllables++;
+            /* These bare leading phones belong to the PREVIOUS word's final
+             * syllable (e.g. "J'aime" = <j' [.1 Z]> <aime [E m]> is one
+             * stressed syllable /ZEm/). Inherit that syllable's stress so
+             * sylType matches the engine instead of collapsing to the
+             * unstressed default. fr-CA only; en-US/es-MX never reach here. */
+            if (s_liaison_inherit_stress && cur_stress == 0)
+                cur_stress = prev_last_stress;
         }
         if (!parse_phoneme(p, w, cur_stress, cur_accent)) return 0;
         p_skip_ws(p);
@@ -343,7 +403,16 @@ static int parse_word(parser_t *p, fe_parsed_t *out) {
         p_skip_ws(p);
     }
     if (!p_expect_lit(p, "[")) return 0;
-    if (!parse_word_body(p, w)) return 0;
+    /* Stress of the previous word's final syllable, for the fr-CA liaison
+     * inheritance in parse_word_body. w is out->words[n_words-1]; the prior
+     * word is [n_words-2]. Its last phoneme carries that syllable's stress. */
+    int prev_last_stress = 0;
+    if (out->n_words >= 2) {
+        const fe_parsed_word_t *prev = &out->words[out->n_words - 2];
+        if (prev->n_phonemes > 0)
+            prev_last_stress = prev->phonemes[prev->n_phonemes - 1].syl_stress;
+    }
+    if (!parse_word_body(p, w, prev_last_stress)) return 0;
     if (!p_expect_lit(p, "]")) return 0;
     if (!p_expect_lit(p, ">")) return 0;
     return 1;
@@ -517,8 +586,20 @@ static int is_arpa_vowel(const char *p) {
  * triggers. Removed 2026-05-13 evening when the empirical rule
  * derivation showed engine excludes nasals (see R2 comment below). */
 
+/* Refinement toggle. Default on for legacy callers; fe_host turns it off
+ * once ESPR mode is enabled (the FE then emits reduced phones itself). */
+static int s_refine_enabled = 1;
+
+void fe_parse_set_refine(int enabled) { s_refine_enabled = enabled ? 1 : 0; }
+
+void fe_parse_set_liaison_inherit(int enabled)
+{
+    s_liaison_inherit_stress = enabled ? 1 : 0;
+}
+
 static void apply_phoneme_refinement(fe_parsed_t *out) {
     if (!out || out->n_words == 0) return;
+    if (!s_refine_enabled) return;
     if (getenv("SPFY_FE_HOST_NO_PHONEME_REFINE")) return;
 
     /* Pass 1: unstressed ih → ix AND unstressed ax → ix (onset-present).
@@ -935,34 +1016,49 @@ void fe_parsed_flatten_to_slots(const fe_parsed_t *parsed,
     }
 }
 
-/* Within a syllable: identify nucleus (first vowel), assign onset/nucleus/
- * coda to each phoneme position. Sets ph->fields conceptually but we
- * write directly into the slot's sp[4] via the caller. Returns the
- * phoneInSyl (0/1/2) for the phoneme at index `pi_in_syl` given the
- * syllable's phoneme list. */
-static uint16_t classify_position_in_syllable(const fe_parsed_phoneme_t *syl_phons,
-                                              int syl_n,
-                                              int pi_in_syl,
-                                              const spfy_phoneset_t *ps) {
-    if (!ps || pi_in_syl < 0 || pi_in_syl >= syl_n) return 0;
-    int nuc = -1;
-    for (int k = 0; k < syl_n; k++) {
-        uint8_t id = spfy_phoneset_lookup(ps, syl_phons[k].arpabet);
-        if (id != 0xff && id < ps->n_phones && ps->entries[id].is_vowel) {
-            nuc = k; break;
+/* phoneInSyl: the target-side row index into the VCF's phoneInSylCosts
+ * matrix, whose row/column vocabulary is
+ *
+ *     0 UNDEF  1 WordInitial  2 SyllInitial  3 SyllMedial
+ *     4 SyllFinal  5 WordFinal  6 SyllUnknown
+ *
+ * The rule below was recovered empirically from Jill's own voice data by
+ * cross-referencing the per-unit phoneInSyl byte (disk +0x10, v100008)
+ * against the independent _WORD_ / _SYL_ unit spans in the ckls chunk:
+ * 3504/3504 units agree exactly, with an all-diagonal confusion matrix.
+ * Note the precedence -- word edges outrank syllable edges, and SyllFinal
+ * outranks SyllInitial, which is what a one-phone syllable resolves to.
+ *
+ * This replaces an earlier onset/nucleus/coda (0/1/2) encoding that did
+ * not correspond to the matrix rows at all. It was inert on Tom, whose
+ * PHONE_IN_SYL_MISMATCH_COST is 0 and who ships no phoneInSylCosts
+ * matrix, but Jill weights this term at 0.3. */
+static uint16_t classify_phone_in_syl(int phi, int n_phon_in_word,
+                                      int pi_in_syl, int syl_n) {
+    if (phi <= 0)                    return 1;   /* WordInitial */
+    if (phi >= n_phon_in_word - 1)   return 5;   /* WordFinal   */
+    if (pi_in_syl >= syl_n - 1)      return 4;   /* SyllFinal   */
+    if (pi_in_syl <= 0)              return 2;   /* SyllInitial */
+    return 3;                                    /* SyllMedial  */
+}
+
+/* Engine phone id for a symbol. Prefers the voice's own feat["name"]
+ * order (correct for every language); falls back to the compiled-in
+ * en-US table when the caller supplied none. */
+static uint8_t engine_phone_id(const fe_phone_names_t *pn, const char *sym) {
+    if (pn && pn->names) {
+        for (uint32_t i = 0; i < pn->n; ++i) {
+            if (pn->names[i] && strcmp(pn->names[i], sym) == 0)
+                return (uint8_t)i;
         }
+        return 0xff;
     }
-    if (nuc < 0) {
-        /* No vowel in syllable — treat the middle phone as nucleus. */
-        nuc = syl_n / 2;
-    }
-    if (pi_in_syl < nuc) return 0;   /* onset */
-    if (pi_in_syl == nuc) return 1;  /* nucleus */
-    return 2;                        /* coda */
+    return spfy_engine_phoneid_lookup(sym);
 }
 
 int fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
                             const spfy_phoneset_t   *ps,
+                            const fe_phone_names_t  *pn,
                             spfy_fe_slot_t         **slots_out,
                             uint32_t                *n_slots_out) {
     if (!parsed || !slots_out || !n_slots_out) return -1;
@@ -978,7 +1074,7 @@ int fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
     /* Engine-faithful pau id (32 in en-US per the empirical table).
      * Only fall back to the VCF's silence_phone_id if the engine table
      * doesn't carry "pau" — should never happen in practice. */
-    uint8_t pau_id = spfy_engine_phoneid_lookup("pau");
+    uint8_t pau_id = engine_phone_id(pn, "pau");
     if (pau_id == 0xff) {
         pau_id = (ps && ps->silence_phone_id != 0xff)
                    ? ps->silence_phone_id : 0u;
@@ -1024,8 +1120,8 @@ int fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
                 syl_end++;
             int syl_n = syl_end - syl_start + 1;
             int pi_in_syl = phi - syl_start;
-            uint16_t phon_in_syl = classify_position_in_syllable(
-                &w->phonemes[syl_start], syl_n, pi_in_syl, ps);
+            uint16_t phon_in_syl = classify_phone_in_syl(
+                phi, w->n_phonemes, pi_in_syl, syl_n);
 
             /* phone_id (for ctx[2]) comes from the engine's empirical
              * table; voiced still comes from the VCF since the engine
@@ -1036,7 +1132,7 @@ int fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
             if (vid != 0xff && vid < ps->n_phones) {
                 voiced = ps->entries[vid].is_voiced;
             }
-            uint8_t eid = spfy_engine_phoneid_lookup(ph->arpabet);
+            uint8_t eid = engine_phone_id(pn, ph->arpabet);
             if (eid != 0xff) {
                 phone_id = eid;
             } else if (vid != 0xff && vid < ps->n_phones) {

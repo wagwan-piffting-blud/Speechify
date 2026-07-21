@@ -56,11 +56,20 @@ static int parse_cklx(const uint8_t *data, size_t n, spfy_chunk_tables_t *out)
 
         uint32_t n_entries = le_u32(p); p += 4;
         spfy_cklx_group_t *g = &out->cklx[group_idx];
+        g->n_keys = n_entries;
+        /* An empty group is legitimate -- Felix (fr-CA) ships no word
+         * chunks at all. calloc(0) may return NULL, which would otherwise
+         * be misread as OOM. */
+        if (n_entries == 0) {
+            g->postings_offset = (uint32_t *)calloc(1,
+                                                sizeof *g->postings_offset);
+            if (!g->postings_offset) return SPFY_E_NOMEM;
+            continue;
+        }
         g->keys            = (char **)calloc(n_entries, sizeof *g->keys);
         g->postings_offset = (uint32_t *)calloc(n_entries + 1,
                                                 sizeof *g->postings_offset);
         if (!g->keys || !g->postings_offset) return SPFY_E_NOMEM;
-        g->n_keys = n_entries;
 
         /* Two-pass: first count total postings, then fill. */
         const uint8_t *p_save = p;
@@ -105,12 +114,20 @@ static int parse_cklx(const uint8_t *data, size_t n, spfy_chunk_tables_t *out)
  *   u32 group_count        (= 2)
  *   for each group:
  *     u16 name_len; char[name_len] group_name
- *     u32 token_count; u32 unk0
+ *     u32 token_count
+ *     u32 unk0                     -- ONLY when token_count > 0
  *     for each (token, filename) record pair (token_count of each):
  *       token: u16 len; char[len] text; u32 ss; u32 se
  *       filename: u16 len; char[len] fname; u32 file_id
  *         (final filename has no trailing u32)
- */
+ *
+ * The conditional unk0 was found 2026-07-20 on Felix (fr-CA), whose
+ * _WORD_ group is genuinely EMPTY -- he ships syllable chunks but no word
+ * chunks. Reading unk0 unconditionally consumed the next group's name
+ * record (the bytes decode as u16 len=5 + "_S", i.e. 0x535F0005) and the
+ * parse then ran off the end of the chunk. With the field made
+ * conditional, all five shipped voices consume their ckls payload
+ * exactly: 394375 / 355308 / 816044 / 1013449 / 5234800 bytes. */
 static int parse_ckls(const uint8_t *data, size_t n,
                       spfy_chunk_tables_t *out)
 {
@@ -135,9 +152,13 @@ static int parse_ckls(const uint8_t *data, size_t n,
             return SPFY_E_FORMAT;
 
         uint32_t token_count = le_u32(p); p += 4;
-        p += 4;   /* unk0 */
+        if (token_count > 0) {
+            if ((size_t)(end - p) < 4) return SPFY_E_FORMAT;
+            p += 4;   /* unk0 -- absent entirely when the group is empty */
+        }
         spfy_ckls_group_t *g = &out->ckls[group_idx];
         g->n_postings = token_count;
+        if (token_count == 0) continue;   /* nothing to allocate or read */
         g->span_start = (uint32_t *)calloc(token_count, sizeof *g->span_start);
         g->span_end   = (uint32_t *)calloc(token_count, sizeof *g->span_end);
         g->token_text = (char    **)calloc(token_count, sizeof *g->token_text);

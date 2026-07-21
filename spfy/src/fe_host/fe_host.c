@@ -70,8 +70,7 @@
 #  endif
 #endif
 
-extern const unsigned char swittsfe_dll_data[];
-extern const size_t        swittsfe_dll_size;
+#include "swittsfe_registry.h"
 
 typedef struct {
     void   **vtable;       /* +0x0 */
@@ -86,8 +85,11 @@ typedef struct spfy_fe_s {
     hosted_fe_iobj_t *iobj;
     spfy_phoneset_t   phoneset;
     int               phoneset_loaded;
+    fe_phone_names_t  phone_names;      /* voice feat["name"] order */
     fe_parsed_t       last_parsed;       /* result of most recent synth */
     int               last_parsed_valid;
+    int               espr_enabled;      /* ESPR mode header is set */
+    char              espr_header[512];  /* \!SWIcv... \!SWIespr1 header */
 } hosted_fe_t;
 
 /* getObject is exported as __cdecl despite the typical Win32 DLL
@@ -122,9 +124,44 @@ int spfy_fe_open(const char *vocab_json,
                  const char *tables_a_dir,
                  const char *tables_b_dir,
                  spfy_fe_t **out) {
+    /* Back-compat entry point: no language given, so use the first
+     * embedded image (en-US by build convention). */
+    return spfy_fe_open_lang(NULL, vocab_json, tables_a_dir, tables_b_dir,
+                             out);
+}
+
+int spfy_fe_open_lang(const char *lang,
+                      const char *vocab_json,
+                      const char *tables_a_dir,
+                      const char *tables_b_dir,
+                      spfy_fe_t **out) {
     (void)vocab_json; (void)tables_a_dir; (void)tables_b_dir;
     if (!out) return -1;
     *out = NULL;
+
+    /* Pick the embedded SWIttsFe image for this voice's language. Falls
+     * back to the first entry (en-US) with a warning, which keeps a voice
+     * whose language was not built in loadable, if wrong-sounding. */
+    const spfy_fe_dll_entry_t *img = spfy_fe_dll_for_lang(lang);
+    if (!img) {
+        if (spfy_fe_n_dlls == 0) {
+            fprintf(stderr, "[fe_host] no FE DLL images embedded\n");
+            return -2;
+        }
+        if (lang && *lang) {
+            fprintf(stderr,
+                    "[fe_host] no embedded FE for language '%s' — falling "
+                    "back to '%s'. Rebuild with -DSPFY_FE_LANGS=\"...;%s\" "
+                    "for correct pronunciation.\n",
+                    lang, spfy_fe_dlls[0].lang, lang);
+        }
+        img = &spfy_fe_dlls[0];
+    }
+
+    /* fr-CA words can arrive with bare leading phones (liaison/enchainement);
+     * enable stress inheritance so they continue the previous word's final
+     * syllable. No-op for en-US/es-MX (they never emit bare-leading words). */
+    fe_parse_set_liaison_inherit(img->lang && strcmp(img->lang, "fr-CA") == 0);
 
     /* (delay moved below — needs to fire AFTER PE loading so the DLL
      * is mapped at expected addresses and Frida can attach hooks.) */
@@ -132,13 +169,15 @@ int spfy_fe_open(const char *vocab_json,
     hosted_fe_t *fe = (hosted_fe_t *)calloc(1, sizeof(*fe));
     if (!fe) return -1;
 
-    fe->dll = host_dll_load(swittsfe_dll_data, swittsfe_dll_size,
+    fe->dll = host_dll_load(img->data, *img->size,
                             host_default_resolver, NULL);
     if (!fe->dll) {
-        fprintf(stderr, "[fe_host] host_dll_load failed: %s\n",
-                host_dll_last_error());
+        fprintf(stderr, "[fe_host] host_dll_load(%s) failed: %s\n",
+                img->lang, host_dll_last_error());
         free(fe); return -2;
     }
+    fprintf(stderr, "[fe_host] FE image: SWIttsFe-%s.dll (%zu bytes)\n",
+            img->lang, *img->size);
 
     getObject_fn getObject =
         (getObject_fn)host_dll_get_proc(fe->dll, "getObject");
@@ -194,22 +233,24 @@ void spfy_fe_close(spfy_fe_t *opaque) {
  * Synth: drive the engine and drain the tagged-output stream
  * ============================================================ */
 
-/* Drain delegateB into a growing buffer. Returns malloc'd NUL-terminated
- * string (caller frees). NULL on OOM. */
-static char *drain_delegate_b(hosted_fe_iobj_t *iobj) {
+/* Drain an output delegate slot into a growing buffer. Returns malloc'd
+ * NUL-terminated string (caller frees). NULL on OOM. `slot` is the vtable
+ * index of a delegateB-style pull method (42 = state[+0x2dc],
+ * 44 = state[+0x2e0]). */
+static char *drain_delegate_slot(hosted_fe_iobj_t *iobj, int slot) {
     size_t cap = 4096;
     char *out = (char *)malloc(cap);
     if (!out) return NULL;
     size_t len = 0;
 
-    vfn3 fn42 = (vfn3)((vfn0 *)iobj->vtable)[SLOT_DELEGATE_B];
+    vfn3 fnd = (vfn3)((vfn0 *)iobj->vtable)[slot];
 
     for (int safety = 0; safety < 4096; safety++) {
         char buf[DRAIN_BUF_SIZE];
         uint32_t out_len = 0;
-        uint32_t r = fn42(iobj, (uint32_t)(uintptr_t)buf,
-                                (uint32_t)sizeof(buf),
-                                (uint32_t)(uintptr_t)&out_len);
+        uint32_t r = fnd(iobj, (uint32_t)(uintptr_t)buf,
+                              (uint32_t)sizeof(buf),
+                              (uint32_t)(uintptr_t)&out_len);
         (void)r;
         /* Per FUN_0836c420: *out_len = bytes_copied + 1; if bytes_copied
          * == 0 the stream is exhausted. */
@@ -229,6 +270,10 @@ static char *drain_delegate_b(hosted_fe_iobj_t *iobj) {
     return out;
 }
 
+static char *drain_delegate_b(hosted_fe_iobj_t *iobj) {
+    return drain_delegate_slot(iobj, SLOT_DELEGATE_B);
+}
+
 /* Push a NUL-terminated string into the FE via slot 5 (feedConfigA).
  * The engine's capture shows feedConfigA accepts a const char *
  * directly — the wrapper takes (this, char *) as 2 stack args. */
@@ -237,11 +282,59 @@ static void feed_text(hosted_fe_iobj_t *iobj, const char *s) {
     fn5(iobj, (uint32_t)(uintptr_t)s);
 }
 
+/* Transcode input text to ISO-8859-1 (Latin-1) into `out`, tolerating
+ * EITHER UTF-8 or already-Latin-1 input.
+ *
+ * The Eloquence FE expects Latin-1: the real engine's text layer converts
+ * the UTF-8 it receives (SWIttsSpeak charset=utf-8) down to the FE's
+ * single-byte codepage first. Passing raw UTF-8 makes the FE see each
+ * accented byte pair as two garbage characters and hallucinate words
+ * (e.g. "dîner" -> "<registr...e () undef>"), which also throws our
+ * tagged-output parser.
+ *
+ * But our two input routes deliver DIFFERENT encodings: spfy_synth's
+ * narrow main() gets command-line args in the Windows system codepage
+ * (Windows-1252 ~= Latin-1, so `í` arrives as a lone 0xED), while a -f
+ * file is read as raw bytes (UTF-8, `í` = 0xC3 0xAD). So we decode valid
+ * UTF-8 multi-byte sequences, but pass a high byte that is NOT a valid
+ * UTF-8 sequence straight through as already-Latin-1. ASCII (en-US) is
+ * identical either way, so Tom/Jill are unaffected. Latin-1 also matches
+ * the engine on byte OFFSETS (1 byte per accent), which the FE reports in
+ * its word (offset,len) tags. Codepoints > 0xFF become '?'. */
+static void text_to_latin1(const char *in, char *out, size_t out_n) {
+    size_t o = 0;
+    const unsigned char *p = (const unsigned char *)in;
+    while (*p && o + 1 < out_n) {
+        unsigned c = *p;
+        if (c < 0x80) { out[o++] = (char)c; ++p; continue; }
+
+        int need = ((c & 0xE0) == 0xC0) ? 1
+                 : ((c & 0xF0) == 0xE0) ? 2
+                 : ((c & 0xF8) == 0xF0) ? 3 : 0;
+        /* Valid UTF-8 iff all `need` continuation bytes are 0x80..0xBF. */
+        int ok = need > 0;
+        for (int k = 1; k <= need && ok; ++k)
+            if ((p[k] & 0xC0) != 0x80) ok = 0;
+
+        if (!ok) {
+            /* Not valid UTF-8 here -> treat this byte as Latin-1 already. */
+            out[o++] = (char)c; ++p; continue;
+        }
+        unsigned cp = c & (0x7Fu >> need);
+        for (int k = 1; k <= need; ++k) cp = (cp << 6) | (p[k] & 0x3F);
+        out[o++] = (cp <= 0xFF) ? (char)cp : '?';
+        p += need + 1;
+    }
+    out[o] = '\0';
+}
+
 static int parse_fe_output_into_slots(hosted_fe_t *fe,
                                       const char *tagged,
                                       const spfy_prosody_hints_t *hints,
                                       spfy_fe_utterance_t *u) {
     (void)hints;
+    if (getenv("SPFY_FE_HOST_DUMP_TAGGED"))
+        fprintf(stderr, "[fe_host tagged] %s\n", tagged ? tagged : "(null)");
     /* Free any prior parsed result before reusing the slot. */
     if (fe->last_parsed_valid) {
         fe_parsed_free(&fe->last_parsed);
@@ -255,10 +348,25 @@ static int parse_fe_output_into_slots(hosted_fe_t *fe,
     /* Use the full slot-builder when we have a phoneset; otherwise
      * fall back to the lightweight emphasis-only flattener. */
     const spfy_phoneset_t *ps = fe->phoneset_loaded ? &fe->phoneset : NULL;
+    if (getenv("SPFY_FE_HOST_DEBUG")) {
+        /* Which phone-id table is in force. When phone_names is absent the
+         * FE falls back to the compiled-in en-US ARPAbet table, which
+         * silently mis-numbers every non-en-US voice. */
+        fprintf(stderr, "[fe_host] phone-id source: %s (n=%u), "
+                        "vcf phoneset n=%u silence=%u\n",
+                fe->phone_names.names ? "VIN feat[\"name\"]"
+                                      : "compiled-in en-US ARPAbet",
+                fe->phone_names.n,
+                ps ? ps->n_phones : 0u,
+                ps ? ps->silence_phone_id : 0xffu);
+    }
     if (ps) {
         spfy_fe_slot_t *slots = NULL;
         uint32_t n_slots = 0;
-        int rc = fe_parsed_to_full_slots(&fe->last_parsed, ps, &slots, &n_slots);
+        int rc = fe_parsed_to_full_slots(&fe->last_parsed, ps,
+                                        fe->phone_names.names
+                                          ? &fe->phone_names : NULL,
+                                        &slots, &n_slots);
         if (rc != 0) return rc;
         u->slots   = slots;
         u->n_slots = n_slots;
@@ -294,17 +402,36 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
         fprintf(stderr, "[fe_host] err_flag latched before synth — bailing\n");
         return NULL;
     }
-    /* The SWI control header `\\\\!SWIcv3.0.0.` is NOT needed for
-     * plain-text input — the FE phonemizes it and our drain ends up
-     * with `<swicv () ...><three () ...>` noise. Just push the text.
-     * (Verbose-mode FE-side capture was deprecated as part of K2; the
-     * FE doesn't have a verbose path — `ix`/`dx`/`ax` are engine-side
-     * post-processing.) */
     static const char EMPTY_CFG = '\0';
     vfn1 fn6 = (vfn1)((vfn0 *)fe->iobj->vtable)[6];
+    vfn1 fn11 = (vfn1)((vfn0 *)fe->iobj->vtable)[SLOT_RUN_OR_ABORT];
 
-    feed_text(fe->iobj, text);
+    /* ESPR MODE: feed the voice's ESPR control header before the text.
+     * This switches Eloquence into its extended concatenative phoneme mode,
+     * so consprout carries the engine's fully-reduced phones (barred-i
+     * `ix`, flapped `dx`) instead of the raw lexicon phones. The header is
+     * built per-voice from the VCF in spfy_fe_set_espr_config().
+     * Reverse-engineered from ConcatTTSEngine::initializeFrontEnd /
+     * ::getPronunciation (SWIttsEngine.dll): fed via feedConfigA(slot5) +
+     * feedConfigB(slot6), the same pair used for text. When enabled the
+     * R1/R3/flap heuristic is turned off (fe_parse_set_refine(0), done in
+     * set_espr_config) since the FE now does that reduction exactly.
+     * (The SPFY_FE_HOST_NO_ESPR A/B switch is honoured at load in
+     * set_espr_config, which leaves espr_enabled == 0.) */
+    if (fe->espr_enabled) {
+        feed_text(fe->iobj, fe->espr_header);                  /* slot 5 */
+        fn6(fe->iobj, (uint32_t)(uintptr_t)&EMPTY_CFG);        /* slot 6 */
+    }
+
+    /* The FE wants Latin-1, not UTF-8 (see utf8_to_latin1). Convert into a
+     * heap buffer sized for the worst case (input already all single-byte)
+     * plus NUL; the conversion only ever shrinks or preserves length. */
+    char *latin1 = (char *)malloc(strlen(text) + 1);
+    if (!latin1) return NULL;
+    text_to_latin1(text, latin1, strlen(text) + 1);
+    feed_text(fe->iobj, latin1);
     fn6(fe->iobj, (uint32_t)(uintptr_t)&EMPTY_CFG);
+    free(latin1);
 
     /* Drain the tagged output stream + clean chunk-seam whitespace. */
     char *tagged = drain_delegate_b(fe->iobj);
@@ -312,7 +439,6 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     fe_clean_stream_inplace(tagged);
 
     /* slot 11 = runOrAbort — commits any remaining synth work. */
-    vfn1 fn11 = (vfn1)((vfn0 *)fe->iobj->vtable)[SLOT_RUN_OR_ABORT];
     fn11(fe->iobj, 0);
     return tagged;
 }
@@ -389,6 +515,59 @@ void spfy_fe_utterance_free(spfy_fe_utterance_t *u) {
 /* ============================================================
  * Stubs for the rest of the FE API
  * ============================================================ */
+
+int spfy_fe_set_phone_names(spfy_fe_t *opaque, char *const *names,
+                            uint32_t n) {
+    if (!opaque) return -1;
+    hosted_fe_t *fe = (hosted_fe_t *)opaque;
+    /* Borrowed: spfy_voice_t owns the strings via its
+     * spfy_phone_order_t, which outlives the FE. */
+    fe->phone_names.names = names;
+    fe->phone_names.n     = names ? n : 0u;
+    return 0;
+}
+
+int spfy_fe_set_espr_config(spfy_fe_t  *opaque,
+                            const char *name,
+                            const char *gender,
+                            const char *phoneset,
+                            const char *version) {
+    if (!opaque) return -1;
+    hosted_fe_t *fe = (hosted_fe_t *)opaque;
+
+    /* A/B escape hatch: SPFY_FE_HOST_NO_ESPR keeps the legacy heuristic
+     * path (no ESPR header, refinement left on). Decided here at load so
+     * the two paths are cleanly exclusive. */
+    if (getenv("SPFY_FE_HOST_NO_ESPR")) {
+        fe->espr_enabled = 0;
+        return -1;
+    }
+
+    /* Fall back to the en-US Tom defaults when a field is absent. */
+    if (!name || !*name)         name     = "Tom";
+    if (!gender || !*gender)     gender   = "male";
+    if (!phoneset || !*phoneset) phoneset = "swi_plus_ix";
+    if (!version || !*version)   version  = "3.0.0.0";
+
+    /* Build the exact header the engine feeds. FOUR real backslash bytes
+     * per control token: each `\\\\` in this C literal is one byte, so
+     * `\\\\\\\\` = 4 bytes. Verified by hooking the real engine's
+     * feedConfigA (viz/frida_hooks/fe_feedconfig_hook.js). */
+    int n = snprintf(fe->espr_header, sizeof fe->espr_header,
+        "\\\\\\\\!SWIcv%s \\\\\\\\!SWIcg%s \\\\\\\\!SWIcn%s "
+        "\\\\\\\\!SWIcl%s \\\\\\\\!SWIespr1 \\\\\\\\!SWIwd0",
+        version, gender, name, phoneset);
+    if (n < 0 || (size_t)n >= sizeof fe->espr_header) {
+        fe->espr_enabled = 0;
+        return -1;
+    }
+    fe->espr_enabled = 1;
+
+    /* The FE now emits the engine's reduced phones directly, so the
+     * built-in R1/R3/flap heuristic must not run on top of them. */
+    fe_parse_set_refine(0);
+    return 0;
+}
 
 int spfy_fe_set_voice_vcf(spfy_fe_t *opaque, const char *vcf_path) {
     if (!opaque || !vcf_path) return -1;

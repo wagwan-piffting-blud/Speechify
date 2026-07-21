@@ -29,6 +29,7 @@
 #include "../voice/vdb_lookup.h"
 #include "../voice/ccos.h"
 #include "../voice/voice_runtime.h"
+#include "../voice/phone_order.h"
 #include "../voice/vcf_matrix.h"
 #include "../voice/chunk_table.h"
 #include "../usel/anchor_score.h"
@@ -70,9 +71,14 @@ typedef struct {
     spfy_cart_t             f0tr_cart;
     spfy_chunk_tables_t     chunks;
 
-    /* hpclass.bin (per voice family). */
+    /* Per-unit hp_class. Derived from the VIN unless an explicit
+     * hpclass.bin path was supplied. */
     uint8_t                *hpc;
     uint32_t                hpc_n;
+
+    /* feat/labl phone-order reconciliation. Owns the feat_to_labl table
+     * that av.feat_to_labl points at, so it must outlive av. */
+    spfy_phone_order_t      phone_order;
 
     /* Per-hp-class candidate bucket index, built from units. */
     uint32_t                hpc_buckets;     /* fixed to 256 currently */
@@ -80,10 +86,20 @@ typedef struct {
     uint32_t               *bucket_cap;
     uint32_t              **bucket;
 
+    /* Half-phone candidate histogram-prune constants, from the voice's
+     * VCF (HALFPHONE_CAND_PRUNE_THRESH / _SLOPE). Cached here because the
+     * prune runs per half-phone slot. Tom 0.8/0.005; Jill 1.0/0.005,
+     * Felix 0.996, Javier 0.3, Paulina 0.4. */
+    float                   hp_prune_thresh;
+    float                   hp_prune_slope;
+
     /* Anchor-scorer voice — references units/ccos/maps/pros/hpc/voicing. */
     spfy_anchor_voice_t     av;
     /* Backing array for av.voicing (built from FE phoneset + VIN feat). */
     uint32_t               *voicing_buf;
+    /* Backing array for av.ctx4 (derived ccos context for v100005 voices;
+     * NULL for v100006/8). Owned here, freed in spfy_voice_free. */
+    uint8_t                *ctx4_buf;
 
     /* FE host (loaded SWIttsFe-en-US.dll + parsed vocab + fe_tables). */
     spfy_fe_t              *fe;

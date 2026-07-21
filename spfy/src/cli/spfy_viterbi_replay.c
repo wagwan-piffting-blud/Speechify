@@ -1259,7 +1259,8 @@ static float score_candidate(const score_ctx_t        *sc,
     }
     uint32_t sp_cnd[5] = {
         cand->sp_syl_in_phrase, cand->sp_syl_type,
-        cand->sp_word_in_phrase, cand->sp_syl_in_word, 6
+        cand->sp_word_in_phrase, cand->sp_syl_in_word,
+        cand->sp_phone_in_syl   /* 6 unless the record is v100008 */
     };
     float SP = spfy_cost_sp(sp_views, sp_tgt_idx, sp_cnd, sc->w_sp);
 

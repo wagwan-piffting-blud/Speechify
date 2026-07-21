@@ -105,14 +105,45 @@ void fe_parsed_flatten_to_slots(const fe_parsed_t *parsed,
  *   sp[1] = sylType   (0=unstressed, 1=primary, 2=secondary — from .X marker)
  *   sp[2] = sylInWord (1-based)
  *   sp[3] = wordInPhrase (1-based, word index in utterance)
- *   sp[4] = phonInSyl (0=onset, 1=nucleus, 2=coda — by phoneset is_vowel)
+ *   sp[4] = phonInSyl (phoneInSylCosts row: 1=WordInitial, 2=SyllInitial,
+ *                      3=SyllMedial, 4=SyllFinal, 5=WordFinal)
  *
  * Returns 0 on success, -1 on allocation failure. Caller frees
  * `*slots_out`. */
+/* Per-voice phone-symbol -> engine phone-id table.
+ *
+ * `names[i]` is the phone whose engine id is `i`, in the VIN's
+ * feat["name"] order -- the same numbering hp_class is built from. When
+ * supplied this replaces the compiled-in en-US table
+ * (data/en_us_engine_phone_ids.csv), which only covers ARPAbet and makes
+ * fr-CA/es-MX phones fall back to VCF ids. Pass NULL to keep the old
+ * behaviour. Deliberately a plain array rather than spfy_phone_order_t so
+ * fe_parse does not have to depend on voice/. */
+typedef struct {
+    char *const *names;
+    uint32_t     n;
+} fe_phone_names_t;
+
 int  fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
                               const spfy_phoneset_t   *ps,
+                              const fe_phone_names_t  *pn,
                               spfy_fe_slot_t         **slots_out,
                               uint32_t                *n_slots_out);
+
+/* Enable/disable the built-in phoneme refinement (R1/R3 vowel reduction +
+ * flap rules) applied by fe_parse_tagged_output. Default: enabled.
+ *
+ * When the FE is driven in ESPR mode it emits the engine's already-reduced
+ * phones (ix/dx) directly, so the heuristic must be turned OFF or it
+ * double-processes them. fe_host disables it once it has fed the ESPR
+ * header. `enabled=0` turns refinement off; nonzero turns it on. */
+void fe_parse_set_refine(int enabled);
+
+/* Enable fr-CA liaison stress inheritance: bare leading phones of a word
+ * (no `.N`) inherit the previous word's final-syllable stress rather than
+ * defaulting to unstressed. fe_host sets this on ONLY for the fr-CA image;
+ * en-US/es-MX never emit bare-leading words so it is a no-op there anyway. */
+void fe_parse_set_liaison_inherit(int enabled);
 
 /* Dump a human-readable summary to `out` (stderr-style debug). */
 void fe_parsed_debug_dump(const fe_parsed_t *p, FILE *out);

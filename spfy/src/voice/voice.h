@@ -75,6 +75,16 @@ void spfy_vin_free(spfy_vin_t *v);
 void spfy_vdb_free(spfy_vdb_t *v);
 void spfy_vcf_free(spfy_vcf_t *v);
 
+/* VCF param lookup by BARE name -- "tts.voiceCfg." is prepended. Returns
+ * NULL / dflt when the param is absent, which is meaningful: the engine
+ * falls back to its own built-in default in exactly that case. */
+const char *spfy_vcf_str(const spfy_vcf_t *vcf, const char *name);
+float       spfy_vcf_f32(const spfy_vcf_t *vcf, const char *name, float dflt);
+/* Same, but tries `name` then `alias`. Needed because Jill spells
+ * SYL_IN_WORD_MISMATCH_COST where every other voice spells SYLL_IN_WORD_. */
+float       spfy_vcf_f32_alias(const spfy_vcf_t *vcf, const char *name,
+                               const char *alias, float dflt);
+
 /* Refuse a VDB whose storage format does not match the spfy decode
  * path (8 kHz, 1 byte/sample µ-law). Returns SPFY_OK if the VDB is
  * compatible, SPFY_E_FORMAT otherwise (and logs a clear message).

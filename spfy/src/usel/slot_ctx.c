@@ -64,16 +64,43 @@ uint32_t spfy_tom_phone_to_label(const char *name)
     return UINT32_MAX;
 }
 
-#define HP_PAU_L 64u    /* pau label = 32; left = 32*2 = 64 */
-#define HP_PAU_R 65u    /* right = 32*2 + 1 = 65 */
+/* Tom's pau sits at feat index 32, so his silence hp_classes are 64/65.
+ * These are the fallback ONLY for the NULL-phone_names (Tom) path --
+ * every other voice puts pau elsewhere (felix 35 -> 70/71, javier 24 ->
+ * 48/49), so the real sentinel is computed per-voice below. */
+#define TOM_HP_PAU_L 64u
+#define TOM_HP_PAU_R 65u
+
+/* Phone symbol -> engine phone id, against the voice's own inventory.
+ * Index in feat["name"] order IS the id. Falls back to the Tom table
+ * when the caller supplied no inventory. UINT32_MAX if unknown. */
+static uint32_t ctx_phone_to_label(char *const *phone_names,
+                                   uint32_t     n_phones,
+                                   const char  *name)
+{
+    if (!phone_names) return spfy_tom_phone_to_label(name);
+    if (!name) return UINT32_MAX;
+    for (uint32_t i = 0; i < n_phones; ++i) {
+        if (phone_names[i] && strcmp(phone_names[i], name) == 0) return i;
+    }
+    return UINT32_MAX;
+}
 
 int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
                           const char         **fe_segments_in_order,
                           uint32_t              n_segments,
+                          char *const          *phone_names,
+                          uint32_t              n_phones,
                           spfy_slice_ctx_table_t *out)
 {
     if (!tree || !fe_segments_in_order || !out) return SPFY_E_INVAL;
     if (n_segments != tree->n_halfphone / 2u) return SPFY_E_FORMAT;
+
+    /* Silence sentinel for out-of-range / unknown neighbours, in THIS
+     * voice's numbering. */
+    uint32_t pau = ctx_phone_to_label(phone_names, n_phones, "pau");
+    uint32_t hp_pau_l = (pau == UINT32_MAX) ? TOM_HP_PAU_L : pau * 2u;
+    uint32_t hp_pau_r = hp_pau_l + 1u;
 
     memset(out, 0, sizeof *out);
     out->n_slots = tree->n_slots;
@@ -111,7 +138,8 @@ int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
         uint32_t pos = k / 2u;
         uint32_t side = k & 1u;
         if (pos >= n_positions) break;
-        uint32_t label = spfy_tom_phone_to_label(fe_segments_in_order[pos]);
+        uint32_t label = ctx_phone_to_label(phone_names, n_phones,
+                                            fe_segments_in_order[pos]);
         if (label == UINT32_MAX) {
             /* Unknown phoneme -- mark this slot as not having ctx. */
             ++k;
@@ -122,12 +150,13 @@ int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
         for (int i = 0; i < 5; ++i) {
             int32_t off = (int32_t)pos + (i - 2);
             if (off < 0 || off >= (int32_t)n_positions) {
-                (*ctx5)[i] = side ? HP_PAU_R : HP_PAU_L;
+                (*ctx5)[i] = side ? hp_pau_r : hp_pau_l;
             } else {
-                uint32_t l2 = spfy_tom_phone_to_label(fe_segments_in_order[off]);
+                uint32_t l2 = ctx_phone_to_label(phone_names, n_phones,
+                                                 fe_segments_in_order[off]);
                 if (l2 == UINT32_MAX) {
                     /* Neighbor unknown -- best-effort: silence sentinel. */
-                    (*ctx5)[i] = side ? HP_PAU_R : HP_PAU_L;
+                    (*ctx5)[i] = side ? hp_pau_r : hp_pau_l;
                 } else {
                     (*ctx5)[i] = l2 * 2u + side;
                 }

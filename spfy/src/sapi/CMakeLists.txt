@@ -47,7 +47,45 @@ set_target_properties(spfy_sapi PROPERTIES
     LINK_FLAGS "-Wl,--kill-at -Wl,--enable-stdcall-fixup"
 )
 
-# The 64-bit SAPI shim (spfy_sapi64.dll) is built separately by
-# build_sapi64.bat using the mingw64 toolchain — CMake can't drive
-# cross-bitness from a single config. The shim subprocess-spawns
-# spfy_synth.exe (this 32-bit build) for actual synthesis.
+# ------------------------------------------------------------------
+# The 64-bit SAPI shim (spfy_sapi64.dll).
+#
+# CMake can't drive cross-bitness from a single config, so this target
+# only materialises when the configured toolchain is itself 64-bit --
+# i.e. under build.bat (msys2 mingw64). build32.bat configures a 32-bit
+# compiler and skips it with the status message below.
+#
+# It does NOT link the synth core: it subprocess-spawns spfy_synth.exe
+# (the 32-bit build) to synthesize, and only needs spfy_dsp for the
+# pitch_shift / time_stretch post-processing it applies to the returned
+# WAV. That is why it can build in a tree whose spfy_synth is 32-bit.
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_library(spfy_sapi64 SHARED
+        spfy_sapi64.c
+        spfy_sapi64.def
+    )
+    target_compile_definitions(spfy_sapi64
+        PRIVATE COBJMACROS=1
+                CINTERFACE=1
+                UNICODE=1
+                _UNICODE=1
+                WIN32_LEAN_AND_MEAN=1
+    )
+    target_include_directories(spfy_sapi64
+        PRIVATE ${CMAKE_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}
+                ${CMAKE_SOURCE_DIR}/src/dsp
+    )
+    target_link_libraries(spfy_sapi64
+        PRIVATE spfy_dsp
+                ole32 oleaut32 advapi32 shell32 uuid)
+    # No --kill-at here: x64 has no stdcall '@N' decoration to strip.
+    set_target_properties(spfy_sapi64 PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "spfy_sapi64"
+        SUFFIX ".dll"
+    )
+else()
+    message(STATUS
+        "sapi: skipping spfy_sapi64 (needs a 64-bit toolchain; use build.bat)")
+endif()

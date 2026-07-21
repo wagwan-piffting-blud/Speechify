@@ -1105,8 +1105,11 @@ static void process_entry(const char *fe_path, const char *vit_path,
                     }
                 }
                 spfy_slice_ctx_table_t ctx_table = {0};
+                /* NULL inventory -> Tom's hardcoded table. This harness
+                 * replays captured Tom traces only. */
                 int rc3 = spfy_derive_slice_ctx(&tree, seg_names,
-                                                fe.n_segs, &ctx_table);
+                                                fe.n_segs, NULL, 0,
+                                                &ctx_table);
                 if (rc3 == SPFY_OK) {
                     ctx_match_full = 1;
                     if (prsl_voice) prsl_match_full = 1;

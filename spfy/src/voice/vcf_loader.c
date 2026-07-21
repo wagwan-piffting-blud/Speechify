@@ -31,6 +31,7 @@
 #include "../../include/spfy/spfy.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -168,6 +169,40 @@ static int vcf_scan_params(const char *xml, size_t xml_n, spfy_vcf_t *out)
         p = param_end + 8;   /* past "</param>" */
     }
     return SPFY_OK;
+}
+
+const char *spfy_vcf_str(const spfy_vcf_t *vcf, const char *name)
+{
+    if (!vcf || !name) return NULL;
+    char key[160];
+    int n = snprintf(key, sizeof key, "tts.voiceCfg.%s", name);
+    if (n < 0 || (size_t)n >= sizeof key) return NULL;
+    for (const spfy_vcf_kv_t *kv = vcf->params; kv; kv = kv->next) {
+        if (strcmp(kv->key, key) == 0) return kv->value;
+    }
+    return NULL;
+}
+
+float spfy_vcf_f32(const spfy_vcf_t *vcf, const char *name, float dflt)
+{
+    const char *s = spfy_vcf_str(vcf, name);
+    if (!s || !*s) return dflt;
+    char *end = NULL;
+    double d = strtod(s, &end);
+    if (end == s) return dflt;
+    return (float)d;
+}
+
+float spfy_vcf_f32_alias(const spfy_vcf_t *vcf, const char *name,
+                         const char *alias, float dflt)
+{
+    const char *s = spfy_vcf_str(vcf, name);
+    if (!s || !*s) s = spfy_vcf_str(vcf, alias);
+    if (!s || !*s) return dflt;
+    char *end = NULL;
+    double d = strtod(s, &end);
+    if (end == s) return dflt;
+    return (float)d;
 }
 
 int spfy_vcf_load(const char *path, spfy_vcf_t *out)

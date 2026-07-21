@@ -1,11 +1,25 @@
 /* Voice runtime maps: L[] (phone -> label) and hp_class[] tables.
  *
- * Tom-specific path: phone_center aligns with the ccos label set, so L is
- * identity and hp_class is `phone + (is_first_half ? 0 : N)`. Other voices
- * may need a halfphone name list (not yet decoded from any chunk we know).
- */
+ * These mirror the engine's create_context_label_mapping (FUN_08e83ce0),
+ * which walks the voice's half-phone names (feat["name"]), strips the
+ * trailing '1'/'2', looks the base name up in the ccos label list, and
+ * writes:
+ *
+ *     voice+0x604[hp_id] = label_idx                        (always)
+ *     voice+0x608[hp_id] = label_idx                        if name ends '1'
+ *     voice+0x608[hp_id] = label_idx + n_labels             otherwise
+ *
+ * Both source lists live in the VIN, so this is derivable per voice with no
+ * Frida capture -- which supersedes the old Tom-only path here that assumed
+ * phone_center == label_idx and patched in Tom's five-phone permutation by
+ * hand. That assumption holds for Jill/Felix/Javier but is badly wrong for
+ * Tom (a 3-cycle on d/dh/dx plus an en/er swap) and catastrophically wrong
+ * for Paulina (28 of 31 labels permuted).
+ *
+ * See phone_order.c for the name-matching itself. */
 
 #include "voice_runtime.h"
+#include "phone_order.h"
 
 #include "../common/log.h"
 #include "../../include/spfy/spfy.h"
@@ -13,8 +27,63 @@
 #include <stdlib.h>
 #include <string.h>
 
+int spfy_voice_maps_build_from_vin(const spfy_vin_t *vin,
+                                   const spfy_ccos_t *ccos,
+                                   spfy_voice_maps_t *out)
+{
+    if (!vin || !ccos || !out) return SPFY_E_INVAL;
+    if (ccos->n_labels == 0 || ccos->n_hp_classes == 0) return SPFY_E_FORMAT;
+    memset(out, 0, sizeof *out);
+
+    spfy_phone_order_t po;
+    int rc = spfy_phone_order_build(vin, &po);
+    if (rc != SPFY_OK) return rc;
+
+    out->n_labels     = ccos->n_labels;
+    out->n_hp_entries = 2u * ccos->n_labels;
+
+    out->L        = (uint8_t *)malloc(out->n_labels);
+    out->hp_class = (uint8_t *)malloc(out->n_hp_entries);
+    if (!out->L || !out->hp_class) {
+        spfy_phone_order_free(&po);
+        spfy_voice_maps_free(out);
+        return SPFY_E_NOMEM;
+    }
+
+    /* L[] maps the unit record's phone_ctx[] entries into ccos label
+     * space. Those bytes come from the same vocabulary as phone_center,
+     * i.e. they are ALREADY labl indices -- so L is the identity for every
+     * voice, not just Tom. (The engine's own +0x604 is indexed by
+     * half-phone id instead; our callers only ever use the phone-level
+     * form.) */
+    for (uint32_t i = 0; i < out->n_labels; ++i) out->L[i] = (uint8_t)i;
+
+    /* hp_class[] is indexed by a half-phone class (phone * 2 + side) in
+     * FEAT order -- that is what slice ctx[] and the derived hpclass table
+     * carry -- and yields the ccos forest index, which is in LABL order.
+     * So the permutation applied here is feat -> labl, the inverse of the
+     * one phone_order exposes for hp_class derivation. Side 0 = LEFT
+     * (label_idx), side 1 = RIGHT (label_idx + n_labels), matching the
+     * engine's +0x608 layout. */
+    for (uint32_t ph = 0; ph < out->n_labels; ++ph) {
+        uint8_t lab = (ph < po.n_phones) ? po.feat_to_labl[ph]
+                                         : SPFY_PHONE_NONE;
+        if (lab == SPFY_PHONE_NONE) lab = (uint8_t)ph;   /* unnamed label */
+        out->hp_class[ph * 2 + 0] = lab;
+        out->hp_class[ph * 2 + 1] = (uint8_t)(lab + out->n_labels);
+    }
+
+    spfy_phone_order_free(&po);
+    return SPFY_OK;
+}
+
 int spfy_voice_maps_build(const spfy_ccos_t *ccos, spfy_voice_maps_t *out)
 {
+    /* Legacy entry point: no VIN, so the phone/label permutation cannot be
+     * recovered and identity is assumed. Correct only for voices whose
+     * ccos label order already matches feat["name"] order (Jill, Felix,
+     * Javier). Callers with a VIN in hand should use
+     * spfy_voice_maps_build_from_vin instead. */
     if (!ccos || !out) return SPFY_E_INVAL;
     if (ccos->n_labels == 0 || ccos->n_hp_classes == 0) return SPFY_E_FORMAT;
     memset(out, 0, sizeof *out);
@@ -29,34 +98,10 @@ int spfy_voice_maps_build(const spfy_ccos_t *ccos, spfy_voice_maps_t *out)
         return SPFY_E_NOMEM;
     }
 
-    /* Identity L[] for Tom (phone_center == label_idx). */
     for (uint32_t i = 0; i < out->n_labels; ++i) out->L[i] = (uint8_t)i;
-
-    /* hp_class table indexed by (phone_center * 2 + (1 - is_first_half))
-     * -- so even index = LEFT half (label_idx), odd index = RIGHT half
-     * (label_idx + n_labels). */
     for (uint32_t pc = 0; pc < out->n_labels; ++pc) {
         out->hp_class[pc * 2 + 0] = (uint8_t)pc;                    /* LEFT  */
         out->hp_class[pc * 2 + 1] = (uint8_t)(pc + out->n_labels);  /* RIGHT */
-    }
-    /* Tom-specific phone-pair swaps in the engine's voice+0x608 hp_class
-     * remap table (captured 2026-05-05 via Frida). The engine swaps
-     * phones in two cycles: 9 -> 10 -> 11 -> 9, and 14 <-> 15.
-     * Apply the same swaps to our hp_class[] so its semantics match the
-     * engine when used directly with slice.ctx[2] indices. */
-    if (out->n_labels == 47) {
-        /* 9 → 10, 10 → 11, 11 → 9 (3-cycle). */
-        out->hp_class[18] = 10;
-        out->hp_class[19] = 10 + (uint8_t)out->n_labels;
-        out->hp_class[20] = 11;
-        out->hp_class[21] = 11 + (uint8_t)out->n_labels;
-        out->hp_class[22] = 9;
-        out->hp_class[23] = 9  + (uint8_t)out->n_labels;
-        /* 14 ↔ 15. */
-        out->hp_class[28] = 15;
-        out->hp_class[29] = 15 + (uint8_t)out->n_labels;
-        out->hp_class[30] = 14;
-        out->hp_class[31] = 14 + (uint8_t)out->n_labels;
     }
     return SPFY_OK;
 }

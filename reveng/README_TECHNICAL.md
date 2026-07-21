@@ -268,24 +268,153 @@ In-mem  On-disk  Type  Field
 
 **Mapping for version 100007+** ([esp+0x24]=1, extra byte at +0x0E):
 
-```
-In-mem  On-disk  Type  Field
-+0x0E   +0x10    u8    f0_start (from stream, not constant)
-+0x0F   +0x11    u8    f0_end           ** gates MISSING_F0_COST **
-+0x10   +0x12    u8    f0_mid
-+0x11   +0x13    u8    f0_context
-+0x12   +0x14    u8    phone_center     ** used as UNIT BIAS input **
-(rest same as 100006 but shifted)
-```
+> **CORRECTED 2026-07-20 — the paragraph that used to sit here was wrong.**
+> It claimed that on v100007+ the in-memory field *meanings* shift, so that
+> in-mem `+0x0F` becomes `f0_end` rather than `f0_start`. That is not what
+> the loader does. `load_chunky_index` (FUN_08e857a0) writes the one extra
+> byte into in-mem `+0x0E` and then advances its read pointer by one:
+>
+> ```c
+> puVar7 = &uStack_1cc;                              /* = block[4] */
+> if (ppiStack_1e8 == 0) { psVar17[7] = 6; }         /* <=100006: const 6 */
+> else { psVar17[7] = uStack_1cc; puVar7 = auStack_1cb; }   /* >=100007 */
+> psVar17[0x0f] = puVar7[0];   /* f0_start, whatever the version */
+> ```
+>
+> Every field from `f0_start` onward therefore keeps its semantics and
+> merely moves one byte later **on disk**. The in-memory layout is
+> version-invariant for `+0x0F..+0x17`; only `+0x0E` differs.
+>
+> Confirmed empirically as well: Jill's disk `+0x11` carries `f0_start`'s
+> ~25% zero-rate signature, and the whole column-distribution profile of
+> her 30-byte record aligns with Tom's 29-byte record under a uniform
+> `+1` shift from `+0x10` onward.
 
-**IMPORTANT**: The version determines which on-disk byte maps to in-memory +0x0F (the field used by the F0 cost gate and chunk bias). For version 100006 (Tom/Mara), +0x0F = on-disk +0x10 = **f0_start**. For version 100007+, +0x0F = on-disk +0x11 = **f0_end**.
+The new `+0x0E` byte is the **phoneInSylCosts column index** — the 5th
+proscost matrix, which v100006 voices have no column source for (the
+loader hardcodes 6 = `SyllUnknown` for them). See "unit record versions"
+below.
 
 Dropped/relocated fields:
 - `unit_id` (+0x00, 4 bytes): implicit (array index)
-- `constant_3` (+0x16, 1 byte): skipped by `add eax, 2` in loader (always 3, never stored)
+- pad byte before `phone_ctx[]` (+0x16 on v100006): skipped by `add eax, 2`
+  in the loader. **Not universally 3** — measured Tom 3, Jill 3, Javier 4,
+  Felix 5, and non-constant on Paulina. Never stored, so harmless, but do
+  not assert on it.
 - `phone_ctx[0..3]` (+0x17..+0x1A): stored in separate array at `voice_obj+0xC0` (4 bytes per unit, indexed by unit_id)
 
+### unit record versions (added 2026-07-20)
+
+Every record is a 12-byte fixed prefix (`+0x00..+0x0B`) followed by a
+variable block whose size the loader computes as:
+
+```
+11 + (version >= 100007 ? 1 : 0)    // phone_in_syl present
+   + (version == 100006 ||
+      version == 100008 ? 5 : 0)    // phone_ctx[4] + flag_b present
+   + (version >= 100005 ? 1 : 0)    // context_cost present
+```
+
+| version | var block | on-disk stride | shipped voices |
+|---------|:---------:|:--------------:|----------------|
+| 100004  | 11        | 23             | (none)         |
+| 100005  | 12        | **24**         | Paulina        |
+| 100006  | 17        | **29**         | Tom, Felix, Javier, aimara, aicraig |
+| 100007  | 13        | 25             | (none)         |
+| 100008  | 18        | **30**         | Jill           |
+
+Measured record counts: Tom 169579, Jill 185475, Felix 259660,
+Javier 219501, Paulina 663410. (A pre-2026-07-20 note claiming Jill has
+191871 units was wrong — that was `unit/data ÷ 29` on a 30-byte table.)
+
+**v100008 (Jill, 30 bytes)** — one byte inserted at `+0x10`, everything
+after shifted by one:
+
+```
++0x00 u32  unit_id            +0x11 u8  f0_start
++0x04 u16  file_idx           +0x12 u8  f0_end
++0x06 u16  local_pos          +0x13 u8  f0_mid
++0x08 u16  zero               +0x14 u8  f0_context
++0x0A u16  dur_like           +0x15 u8  phone_center
++0x0C u8   sp_syl_in_phrase   +0x16 u8  is_first_half
++0x0D u8   sp_syl_type        +0x17 u8  pad (3 for Jill)
++0x0E u8   sp_word_in_phrase  +0x18..+0x1B  phone_ctx[4]
++0x0F u8   sp_syl_in_word     +0x1C u8  flag_b
++0x10 u8   sp_phone_in_syl <- NEW       +0x1D u8  context_cost
+```
+
+**v100005 (Paulina, 24 bytes)** — `+0x00..+0x15` as v100006, then
+`+0x16` a skipped byte (1..12, not constant) and `+0x17` context_cost.
+Two consequences that are easy to miss:
+
+- No `phone_ctx[4]` on disk (`this+0xc0 == 0`), so the ccos S-cost's four
+  context slots have no per-unit source.
+- `flag_b` is **hardcoded to 1** for every unit
+  (`*(undefined *)(psVar17 + 0xb) = 1`), not 0. The "same recording,
+  consecutive uid ⇒ zero join" shortcut therefore loses its
+  discriminating power rather than never firing.
+
+Implemented in `spfy/src/voice/unit_table.c` (`UNIT_LAYOUTS[]`).
+
 The `+0x13` slot is initialized to 0 by the zeroing loop at 0x8E86160, then overwritten by the ccos label index loader at 0x8E831D0 (which reads `phone_center` from +0x12 = on-disk +0x14, maps it through a phone-to-ccos-index table, and writes the result to +0x13).
+
+### hp_class is derivable from the VIN — SOLVED 2026-07-20
+
+The per-unit `hp_class` (in-memory `+0x13`) had been treated as
+Frida-only: `spfy/data/tom_hpclass.bin` was a 169579-byte capture, and
+`voice_runtime.c` carried a hand-patched Tom-specific phone permutation
+with the comment *"We don't yet have a halfphone-name source from the
+VIN"*. There is one, and it closes both problems.
+
+A voice names its phones **twice**, in two different orders:
+
+| source | order | indexes |
+|--------|-------|---------|
+| `feat["name"]` | half-phone variants `aa1,aa2,ae1,ae2,...`; strip the trailing `1`/`2` to get the phone order | what `hp_class` is expressed in |
+| `ccos/labl` | the ccos matrix label order | what `unit.phone_center` is expressed in |
+
+Matching the two **by name** gives the permutation, and then:
+
+```
+hp_class(uid) = labl_to_feat[ unit[uid].phone_center ] * 2 + (uid & 1)
+```
+
+Two things worth stressing:
+
+- The half side is **the parity of the unit id**, not the `is_first_half`
+  field. Units are stored as consecutive (left-half, right-half) pairs.
+  `is_first_half` correlates with hp_class's low bit at chance (~50%);
+  `uid & 1` matches it at exactly 100%.
+- Strip the suffix digit only when it really is `1`/`2`. Felix has phones
+  named `E~`, `oe~`, `EE`, `ng`, `nj`, `ox` — a blind "drop last char"
+  corrupts them.
+
+Verified byte-exact against the Frida dump: **169579/169579 units, zero
+mismatches** (`spfy_dump_voice --hpclass <vin> <ref.bin>`). Measured
+permutations:
+
+| voice | labl vs feat |
+|-------|--------------|
+| Tom | 3-cycle `dx→11, d→9, dh→10` + swap `er→15, en→14` (labl has `ch dx d dh` and `el er en`) |
+| Jill, Felix, Javier | identity (labl already alphabetical) |
+| Paulina | 28 of 31 labels permuted |
+
+Note `n_labels` may exceed the phone count: Tom's `ccos/labl` carries a
+trailing **empty** label (47 labels, 46 phones), which is why Tom's ccos
+data is sized for N=47 while Jill/Felix use N=46 and the es-MX voices
+N=31. Confirmed by chunk size: `2*N*4*(8 + N(N-1)/2*4)` reproduces
+1,628,832 / 1,526,464 / 463,264 exactly.
+
+This also supersedes the "5 hp_base anomalies" open question — `hp_base[pc]`
+is simply `labl_to_feat[pc] * 2`.
+
+Direction matters when consuming the tables: `maps.hp_class[]` takes a
+**feat**-order half-phone class and yields a **labl**-order ccos forest
+index, so it applies `feat_to_labl` (the inverse). `maps.L[]`, applied to
+`phone_ctx[]` bytes, is the identity for every voice, because those bytes
+are already labl-indexed.
+
+Implemented in `spfy/src/voice/phone_order.c`.
 
 ### Phoneme code linkage
 
@@ -485,8 +614,47 @@ kSylTypeMap UNDEF..LastPAInPhrase range).
 **Tom-specific**: version `0x186a6` causes the `uStack_1cc` / disk byte-4 slot of the
 11-byte per-unit variable block to be *hardcoded to 6* at load time (see the
 `if (ppiStack_1e8 == 0)` branch in `load_chunky_index`). Stock's 5th table thus
-becomes a degenerate per-target-feat scalar for Tom -- other voices (versions
-`0x186a5` / `0x186a7`) read the real byte from disk.
+becomes a degenerate per-target-feat scalar for Tom.
+
+**Correction 2026-07-20**: the branch is on `>= 100007`, not "not Tom" —
+so v100005 (Paulina) also gets the hardcoded 6. Only **v100007/100008**
+read the real byte from disk, and of the shipped voices only **Jill**
+(v100008, disk `+0x10`) does.
+
+### phoneInSylCosts (added 2026-07-20)
+
+Only Jill's VCF ships this matrix. Row/column vocabulary, in order:
+
+```
+0 UNDEF   1 WordInitial   2 SyllInitial   3 SyllMedial
+4 SyllFinal   5 WordFinal   6 SyllUnknown
+```
+
+The weight is `tts.voiceCfg.PHONE_IN_SYL_MISMATCH_COST`: Tom 0, Felix 0,
+Javier 0, **Jill 0.3**, Paulina 0.05 (inert — no matrix shipped). So the
+term that is a no-op on Tom is live on Jill.
+
+The **target-side** row index is a function of the phone's position in
+its word and syllable. Recovered from Jill's own data by cross-referencing
+the per-unit column byte (disk `+0x10`) against the independent `_WORD_` /
+`_SYL_` unit spans in the `ckls` chunk — **3504/3504 units agree, with an
+all-diagonal confusion matrix**:
+
+```
+WordInitial (1)  if first phone of word
+WordFinal   (5)  if last  phone of word
+SyllFinal   (4)  if last  phone of syllable
+SyllInitial (2)  if first phone of syllable
+SyllMedial  (3)  otherwise
+```
+
+Precedence matters twice: word edges outrank syllable edges, and
+`SyllFinal` outranks `SyllInitial` — which is what a one-phone syllable
+resolves to. Testing `SyllInitial` first gives 99.20% instead of 100%.
+
+Implemented as `classify_phone_in_syl` in `spfy/src/fe_host/fe_parse.c`.
+It replaced an onset/nucleus/coda `0/1/2` encoding that did not correspond
+to these rows at all (row 0 is `UNDEF`, cost 100).
 
 **Load path**: no dedicated loader was decoded for the voice+0xd8 region (it's
 populated by the VCF-reading arm of `SWIttsUSelCreateVoice`; not disassembled in
@@ -3093,7 +3261,7 @@ The `name` attribute is the priority (compared against `tts.engine.dictionaryDef
 - How `ckls.file_id` maps to other chunks (`unit`, `prsl`, `hash`) beyond simple sequence.
 - The `+40` gap between some consecutive local_pos values (representing silence/padding regions between recording utterances) -- exact semantics unconfirmed.
 - Full semantic decode of `f0tr/durt tree` node fields -- CONFIRMED (2026-03-13). Variable-size nodes (branch=16 bytes, leaf=20 bytes), not fixed 18. See tree section above for complete format.
-- `prsl.context_key` exact semantics: CONFIRMED -- trigram formula `left_hp*10000 + center_hp*100 + right_hp`. See prsl section for full encoding details. Remaining sub-question: what exact sort order the engine uses when building its internal phone-info table (explains the 5 hp_base anomalies). For prsl rebuild, use the empirical hp_base table directly.
+- `prsl.context_key` exact semantics: CONFIRMED -- trigram formula `left_hp*10000 + center_hp*100 + right_hp`. See prsl section for full encoding details. Remaining sub-question: ~~what exact sort order the engine uses when building its internal phone-info table (explains the 5 hp_base anomalies)~~ **RESOLVED 2026-07-20**: `hp_base[pc] = labl_to_feat[pc] * 2`, where `labl_to_feat` is the name-match between `ccos/labl` and `feat["name"]`. See "hp_class is derivable from the VIN". Tom's 5 anomalies are exactly the `d/dh/dx` 3-cycle and the `en/er` swap in his non-alphabetical labl list.
 - Exact join cost distance formula (two weighted LPC/autocorrelation-style components; weights 0.5 and 0.333 are normalization multipliers, not the `joinweights[0/1]` values loaded at runtime from config).
 - Which `(uid_left, uid_right)` pairs were included in the hash and why (threshold, K-NN, or exhaustive).
 - WSOLA unit list `+0x08` and `+0x0C` fields: signed integers, likely pitch shift and time stretch parameters. Exact semantics TBD.

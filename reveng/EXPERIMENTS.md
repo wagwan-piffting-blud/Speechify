@@ -1666,3 +1666,896 @@ WAV MD5 + `SPFY_DUMP_PATH` UID paths + `SPFY_SP_TARGET_DUMP` sp vectors.
    `pitch_st`/`rate_pct` markup, and now arbitrary hand-authored tagged text
    via `SPFY_TAGGED_FILE`. All selection-driven; corpus coverage caps the
    achievable contour depth.
+
+## Experiment 80: Non-Tom voice formats — Jill support (2026-07-20)
+
+**Goal**: work out how Jill / Felix / Javier / Paulina differ from Tom at
+the voice-data level, and add support, starting with Jill.
+
+### 80a. Container survey — all five voices
+
+Walked the RIFF chunk tree of every `.vin` / `.vdb`. Result: **the
+container is identical across all five voices** — same 14 top-level
+chunks in the same order (`LIST vers cnts feat mean hash ckls cklx unit
+f0tr durt ccos prsl hist`), all XOR-0xCE, all VDBs `fmt = (7,1,8000,
+16000,2,16)` i.e. µ-law 8 kHz. Nothing exotic; the deltas are all
+*inside* chunks.
+
+Sizes that actually differ and matter: `ccos` scales as
+`2*N*4*(8 + N(N-1)/2*4)` with `N = n_labels` (Tom 47, Jill/Felix 46,
+Javier/Paulina 31), `mean` as `8 + n_halfphones*8*4` (92 vs 62).
+
+### 80b. Unit record versions
+
+| voice | `unit/vers` | stride | n_units |
+|-------|:-----------:|:------:|--------:|
+| Tom, Felix, Javier | 100006 | 29 | 169579 / 259660 / 219501 |
+| Jill | **100008** | **30** | 185475 |
+| Paulina | **100005** | **24** | 663410 |
+
+**Felix and Javier are the same record format as Tom** — a genuinely
+useful surprise, since it means their remaining work is front-end /
+phoneset, not voice data.
+
+Method: per-byte-column distribution statistics over each unit table,
+aligned against the known v100006 layout. Jill's alignment is
+unambiguous — one byte inserted at `+0x10`, and every structural
+signature after it (the f0 triple's ~20% zero mode, the 0/1
+`is_first_half` split, the constant pad, the 4 context bytes with their
+255 sentinel, the 0/100 `context_cost`) reappears shifted by exactly one.
+
+The new byte has 6 distinct values, range 1..6. Jill's VCF is the only
+one that ships a `proscost.phoneInSylCosts` matrix, whose non-`UNDEF`
+columns number exactly six. That identifies it: it is the column source
+for the 5th proscost matrix, which v100006 voices simply do not have
+(the loader hardcodes 6 = `SyllUnknown`).
+
+This also **falsified** the README's long-standing claim that v100007+
+shifts field *meanings* so in-mem `+0x0F` becomes `f0_end`. The
+decompiled `load_chunky_index` writes the new byte to in-mem `+0x0E`
+then advances the read pointer; semantics are version-invariant. Jill's
+disk `+0x11` carries f0_start's zero-rate signature, not f0_end's.
+
+### 80c. hp_class derivation — replaces the Frida dump entirely
+
+Chased `tom_hpclass.bin` (a 169579-byte Frida capture) to see what a
+Jill equivalent would cost. It costs nothing: it is derivable.
+
+Steps, each falsifiable:
+
+1. `hp_class = phone_center*2 + (1 - is_first_half)` → 93330 mismatches.
+   Rejected.
+2. Correlated the hp_class low bit against **every bit of every byte** in
+   the record. Exactly one hit at 1.0000: `unit_id` bit 0. So the half
+   side is the parity of the unit id — units are stored as consecutive
+   (left, right) pairs. `is_first_half` is something else.
+3. `phone_center*2 + (uid & 1)` → still 17275 mismatches, all of the form
+   "phone index permuted". Per-phone the map was a clean bijection onto
+   `{2p, 2p+1}` pairs, so a phone permutation, not a formula error.
+4. Parsed `ccos/labl` (Pascal strings, not NUL-separated — the first
+   attempt mis-split them) and `feat["name"]`. Tom's labl is **not**
+   alphabetical: `ch dx d dh` and `el er en`. His feat order is. Matching
+   the two by name gives exactly the observed permutation.
+
+Final: `hp_class(uid) = labl_to_feat[phone_center] * 2 + (uid & 1)`,
+verified **169579/169579 exact** against the Frida dump, in Python and
+then again in C via the new `spfy_dump_voice --hpclass`.
+
+Measured permutations: Tom = the d/dh/dx 3-cycle + en/er swap;
+Jill/Felix/Javier = identity; **Paulina = 28 of 31 labels permuted**
+(so the previous identity assumption would have produced garbage
+S-costs for her).
+
+This closes the `README_TECHNICAL.md` open question about "the 5 hp_base
+anomalies" (`hp_base[pc] = labl_to_feat[pc] * 2`) and the
+`voice_runtime.c` comment that no half-phone-name source was known.
+
+Also: the pre-existing `spfy/data/jill_hpclass.bin` was 191871 bytes —
+`unit/data ÷ 29` on a 30-byte table. Deleted; it was never valid.
+
+### 80d. phoneInSyl target rule — recovered from ckls, no RE needed
+
+Our FE was writing `sp[4]` as onset/nucleus/coda `0/1/2`. The matrix rows
+are `UNDEF, WordInitial, SyllInitial, SyllMedial, SyllFinal, WordFinal,
+SyllUnknown` — so `0` meant `UNDEF` (cost 100). Inert on Tom (weight 0),
+wrong on Jill (weight 0.3).
+
+Rather than guess, cross-referenced two independent sources inside Jill's
+own VIN: the per-unit phoneInSyl byte, and the `_WORD_` / `_SYL_` unit
+spans in `ckls`. Hypothesis tested on the 3504 units covered by both:
+
+- word edge > syllable edge > medial, `SyllInitial` before `SyllFinal`
+  → 99.20%, with all 28 errors of one type (predicted SyllInitial, actual
+  SyllFinal — i.e. one-phone syllables).
+- same but `SyllFinal` before `SyllInitial` → **3504/3504 = 100.00%**,
+  confusion matrix fully diagonal.
+
+### 80e. Result
+
+Jill synthesizes. Tom's audit is unchanged at **8532/8532 PATH UID,
+8684/8684 slot fidelity**, including with the derived hp_class table
+substituted for the Frida dump — so the derivation is not merely
+equal-looking, it is drop-in exact.
+
+Per-voice cost constants are now read from each voice's VCF instead of
+being hardcoded to Tom's. Tom's audit staying at 100% is itself a
+check on the key→field mapping, since his VCF values equal the constants
+they replaced.
+
+**Not done**: Felix / Javier / Paulina need an es-MX / fr-CA front end
+(`SWIttsFe-es-MX.dll`, `SWIttsFe-fr-CA.dll` exist in `bin/` but are
+unhosted, and the phoneme tables are en-US). Paulina additionally needs
+the v100005 gaps handled — no on-disk `phone_ctx[4]`, `flag_b` forced to
+1 — before her S-cost and join shortcut mean anything.
+
+## Experiment 81: Jill UID fidelity vs live engine (2026-07-20)
+
+Server switched to Jill; captured 77 corpus phrases with the master hook
+into `spfy/test/oracle/traces_master_jill`. The master child hooks needed no changes
+(the `for hc < 94` voicing read over-reads 2 entries on a 46-label voice,
+but those indices are never queried).
+
+**Headline: structure 76/76, slot fidelity 2114/2114 (100%), path UID
+1983/2114 (93.8%).** Tom unchanged at 8532/8532 throughout.
+
+### 81a. Two independent confirmations of the 2026-07-20 RE
+
+The capture validated Experiment 80 against the live engine:
+
+- `hp_class_remap` (the engine's own voice+0x608 table) is **identity** for
+  Jill and carries the `d/dh/dx` 3-cycle + `en/er` swap for Tom — exactly
+  the permutation derived offline from `labl` x `feat`. Compared entry by
+  entry: **92/92 exact for both voices** (Tom's 2 trailing entries are the
+  hook reading past a 46-phone table with `n_labels=47`).
+- `unit_layout_probe` in-memory `+0x0E`: **Jill = 1, Tom = 6** — the
+  read-from-disk vs hardcoded-6 `phone_in_syl` split, observed live.
+
+### 81b. `tom_swap` was still hardcoded — biggest single fix
+
+Experiment 80 generalised `voice_runtime.c` but left two hand-written Tom
+permutations: `tom_swap_label` (anchor_score.c) and `tom_swap`
+(spfy_synth.c), which pick the **durt tree index** and the ccos S-cost
+label. Both applied Tom's swaps unconditionally.
+
+First Jill run showed it plainly: every error categorised `durt_both_diff`.
+Replacing both with the voice's own `feat_to_labl` table:
+
+| | slot fidelity | path UID |
+|---|---|---|
+| before | 87.4% | 71.3% |
+| after  | **100%** | 79.1% |
+
+### 81c. The engine dumps its own weights — found a swapped mapping
+
+`inner_scorer.weights` carries the engine's live per-voice cost weights:
+
+```
+Tom  sp [0.05, 0.05, 0.05, 0.05, 0  ]  f0 0.2  d 0.3  flag 0.25  ccos 1     w_4c 0.8
+Jill sp [0.2,  0.5,  0,    0.2,  0.3]  f0 0.3  d 0.2  flag 0.1   ccos 1.75  w_4c 1
+```
+
+Jill's VCF has `SYL_IN_WORD=0` and `WORD_IN_PHRASE=0.2`, so **sp[2] is the
+sylInWord weight and sp[3] the wordInPhrase weight** — the opposite of the
+obvious key-name reading, and consistent with the matrix order already in
+`vcf_matrix.c`. Tom's four identical 0.05s made this unobservable on the
+Tom corpus; Jill disambiguates it. Fixing the swap: **79.1% -> 93.8%**.
+
+Everything else in that dump now matches our loader exactly, including
+`w_4c` = `HALFPHONE_CAND_PRUNE_THRESH` (Tom 0.8 / Jill 1.0) and `flag` =
+`UNIT_BIAS_WEIGHT`.
+
+Jill also spells `SYL_IN_WORD_MISMATCH_COST` where every other voice
+spells `SYLL_IN_WORD_`; without the alias lookup that weight silently
+keeps its default.
+
+### 81d. Residual localisation (93.8% -> where the 6.2% lives)
+
+Two things were ruled OUT by direct measurement, not argument:
+
+- **Preselection is not the problem.** Candidate pool sizes are identical
+  engine-vs-ours on every slot of every phrase checked (text_004: 1/16/2/2/9/1;
+  text_022: all 16 slots).
+- **Per-candidate target cost is not the problem.** Sampled candidates are
+  bit-exact: slot 0 uid 0 engine 13.27714 / ours 13.277136; slot 1 uid
+  122032 engine 3.27961 / ours 3.279607; uid 145842 engine 3.62985 / ours
+  3.629850.
+
+What remains is Viterbi path choice among correctly-scored candidates from
+correct pools. E.g. text_004 ("I.") — the engine takes the contiguous
+same-recording run `145842..145845`; we take the locally cheaper 122032 at
+slot 1 and lose the run. 52 of 76 phrases are exactly right; the misses
+cluster in short utterances and `phn_*` items.
+
+### 81e. REFUTED: JOIN_COST_WEIGHT / JOIN_COST_OFFSET on hash hits
+
+Natural hypothesis for 81d: Jill weights joins 1.75 vs Tom's 0.7 and we
+apply neither, so we under-value run continuity. Implemented
+`cost = JOIN_COST_WEIGHT * cell + JOIN_COST_OFFSET` on the hash-hit path
+and measured with each voice's own VCF values:
+
+| voice | before | after |
+|-------|--------|-------|
+| Tom   | 100%   | **93.2%** |
+| Jill  | 93.8%  | **89.7%** |
+
+Both get worse, so the hypothesis is wrong: the hash cells are already
+baked with whatever weighting the voice build applied. Reverted, with the
+negative result recorded in-code at the `join_ctx_t` definition so nobody
+re-tries it. (This also corroborates the older note in
+`spfy_viterbi_replay.c` that applying JOIN_COST_WEIGHT here was a bug.)
+
+## Experiment 82: Jill's last 6.2% — the prune is load-bearing (2026-07-20)
+
+Goal: close Jill's 93.8% -> 100% **without moving Tom off 8532/8532**.
+Result: not achievable by tuning the half-phone prune, and the reason why
+is more interesting than the gap.
+
+### 82a. The mechanism is the HP candidate prune
+
+Drilled `text_004` ("I.", 6 slots, 2-candidate pools) against the engine's
+`viterbi_leave` per-candidate `pre_dp`:
+
+- slot 0 uid 0     engine 13.277136  ours 13.277136
+- slot 1 uid 122032 engine  3.279607  ours  3.279607
+- slot 1 uid 145842 engine  3.629850  ours  3.629850
+- 14 further slot-1 cands: engine 10000 (reject sentinel), we score them
+
+So target costs are bit-exact and pools are identical; at slot 1 our prune
+even keeps exactly the same 2 the engine keeps. But at the next HP our
+prune keeps 1 of 2 (`thresh = best + 1.0`, the other at `best + 1.883`)
+while the **engine keeps both** — and the one we drop, uid 145844, is on
+the engine's chosen contiguous run `145842..145845`.
+
+Confirmed by A/B on the four worst phrases (text_004/019/021/022):
+
+| | path UID |
+|---|---|
+| prune ON  | 28/70 (40.0%) |
+| prune OFF | 68/70 (97.1%) |
+
+### 82b. The engine demonstrably does not prune small pools
+
+Tabulated every DP slot in both trace sets by pool size, recording the
+largest surviving `pre_dp - best` delta:
+
+```
+pool_n   Tom max kept-delta   Jill max kept-delta
+2        7.8152               7.3398
+3        8.9585               8.4990
+6        3.6080               3.5879
+9        0.7750               0.9716
+17       0.7492               0.9242
+25       ~0.70                0.8987
+```
+
+For pool_n >= ~9 the plateau is exactly `THRESH - cum*SLOPE`
+(Tom 0.8-0.005c, Jill 1.0-0.005c) — our formula is right there. Below
+that the engine keeps candidates 4-10x further out than any threshold we
+compute. Note this is true of **Tom too**, yet Tom audits 100% with our
+tighter prune.
+
+Also worth recording: Tom's traces contain **no 10000 sentinels at all**
+while Jill's do, so the two voices don't even surface pruning the same way
+in the capture.
+
+### 82c. Three fixes tried; all improve Jill and all break Tom
+
+| variant | Jill | Tom |
+|---------|------|-----|
+| baseline | 93.8% | **100.0%** |
+| skip prune when pool_n < 3 | 94.0% | 99.9% |
+| skip prune when pool_n < 5 | 93.6% | 97.5% |
+| skip prune when pool_n < 13 | 94.4% | 95.1% |
+| keep at least 2 cands | **95.4%** | 97.0% |
+| keep at least 3 cands | 94.3% | 95.7% |
+| prune off entirely | 80.6% | 85.4% |
+
+Every variant that moves our prune **toward** the engine's observed
+behaviour (keep more at small pools) gains Jill and loses Tom. That is
+the finding:
+
+> **Our HP prune is compensating for a downstream DP/join error.** Tom's
+> 100% is not purely engine-faithful end-to-end — an over-tight prune is
+> removing candidates our DP would otherwise mis-rank, and that masking
+> happens to be exactly right on the Tom corpus.
+
+Consequently Jill's residual cannot be closed from the prune, and cannot
+be diagnosed from Tom's corpus at all: Tom is blind to it by construction.
+The next lever is the join/DP scoring on cross-recording transitions,
+which Jill exercises far more than Tom (Jill's paths take noticeably more
+cross-rec joins).
+
+Reverted to baseline. `SPFY_HP_PRUNE_MIN_KEEP=N` is kept as a diagnostic
+(default off) since it is what demonstrated the masking; the rejected
+pool-size cutoff is recorded in-code so it is not re-tried.
+
+### 82d. Also ruled out this session
+
+- **V0_/V1_/V2_ voiced-join weights**: absent from all five shipped VCFs,
+  so that parameter family is simply unused. No lever there.
+- `USE_F0_PROBABILITIES`, `use_joincache`, `use_edgeframes` are identical
+  across all voices.
+
+## Experiment 83: Jill residual isolated to the sparse-pool prune (2026-07-20)
+
+Constraint lifted (engine-faithfulness over the audit number), so this pass
+went after the actual mechanism rather than protecting Tom's 100%.
+
+### 83a. Join cost is NOT the bug — 100% exact, both voices
+
+The DP trace lets the engine's real join cost be recovered per transition:
+
+```
+engine_join(pred -> c) = dp_20(c) - pre_dp(c) - dp_20(pred)
+```
+
+Compared against `SPFY_JOIN_DUMP` (keyed by uid pair, so no slot alignment
+needed):
+
+| voice | transitions | agree |
+|-------|------------:|------:|
+| Tom   | 9,080  | **9,080 (100.00%)** |
+| Jill  | 14,599 | **14,599 (100.00%)** |
+
+Exact on all four paths — `same_rec`, `hash_hit`, `miss_gate`,
+`miss_no_gate`. Combined with per-candidate `pre_dp` being bit-exact and
+preselection pools being identical, **every input to the DP is correct for
+Jill**; the earlier "downstream DP/join error" framing was wrong.
+
+*Harness caveat worth remembering*: the same `(prev_join_key, curr_uid)`
+pair legitimately has DIFFERENT join costs depending on which SLOT the
+predecessor sits in, because the F0-gate inputs `c7c`/`c80` are
+slot-context, not uid-derived. A first pass that keyed a dict on the uid
+pair reported a spurious Tom disagreement (edge_007, "lighthouse",
+81458->123738); collecting all values per pair removes it. Not an engine
+bug.
+
+### 83b. It IS the prune, and only at sparse pools
+
+Survivor-set size histograms, engine vs ours (30 phrases each):
+
+| size | Tom eng | Tom ours | Jill eng | Jill ours |
+|------|--------:|---------:|---------:|----------:|
+| 1    | 90 | 88 | 67 | **77** |
+| 2    | 35 | 33 |  9 | **21** |
+| 3    | 25 | 21 | 30 | **46** |
+| 4    | 30 | 32 | 17 | **35** |
+| 5    | 31 | 32 | 41 | **28** |
+| 10   | 13 | 12 | 36 | **22** |
+| mean | 15.28 | 14.95 | 14.66 | **13.92** |
+
+**Tom's distribution matches the engine; Jill's is systematically
+left-shifted** — we produce far more 1-4 candidate slots and far fewer
+mid-size ones. So the histogram-prune formula is right (it reproduces Tom,
+and Jill's mid/large pools), and the divergence is confined to sparse
+pools.
+
+### 83c. Why our threshold cannot reach the engine's at sparse pools
+
+Our threshold is `best + bin_dist` with `bin_dist = (k+1) * 0.025` at the
+break, and the break fires when `THRESH - cum*SLOPE < bin_dist`. Since
+`cum >= 1` always (the best candidate is in bin 0), for Jill's `THRESH=1.0`
+we get `lhs <= 0.995`, so the break always lands by `k=39`, i.e.
+
+    bin_dist <= 1.0  for Jill,  always.
+
+But the engine demonstrably keeps candidates well beyond that at sparse
+pools — text_004 keeps one at `best + 1.883`, and measured max kept-deltas
+reach 7.3 (Jill) / 7.8 (Tom) at pool_n=2. Enlarging the 40-bin array does
+not help: with `cum>=1` the break still occurs at `bd=1.0`. So the engine
+is not merely running our formula with a longer loop — it has additional
+sparse-pool behaviour we have not reversed.
+
+### 83d. Hacks that approximate it are NOT engine-faithful
+
+`SPFY_HP_PRUNE_MIN_KEEP=2` gets Jill to 95.4%, but drops Tom to 97.0% —
+and Tom's histogram already matches the engine, so forcing a minimum there
+moves Tom AWAY from engine behaviour. The engine really does keep 67
+single-candidate slots on Jill. A blanket minimum is therefore the wrong
+shape and was not landed. Same verdict for the pool-size cutoff (Exp 82).
+
+### 83e. Status / blocker
+
+Everything measurable is now verified exact for Jill: preselection pools,
+per-candidate target costs, all four join-cost paths, sp targets, ctx,
+durt/f0tr leaves, and hp_class. The entire 6.2% residual is the
+half-phone prune's survivor set on sparse pools.
+
+Closing it needs the decompile of **FUN_08e88830** (the histogram prune).
+Ghidra MCP was unavailable this session. A Frida hook would not help:
+entry-only gives inputs we already have, and the computed threshold lives
+mid-function in exactly the hot-path class that has killed the server
+before.
+
+Kept as diagnostics: `SPFY_PRUNE_DEBUG` now also emits `kept_uids`;
+`SPFY_HP_PRUNE_MIN_KEEP` (default off).
+
+## Experiment 84: FUN_08e88830 decompiled — prune solved, but it has a partner (2026-07-20)
+
+Ghidra came up. `FUN_08e88830` is in **SWIttsUSel.dll** (base 0x08E80000),
+called from exactly one site, `FUN_08e88de0` (InnerScorer) at 0x08e89397.
+
+### 84a. Signature and parameters (from the call site)
+
+```asm
+08e8937f: MOV EAX,[ESI+0x24]     ; weights/config struct
+08e89384: MOV ECX,[ESP+0x30]     ; running min cost
+08e89388: MOV EDX,[EAX+0x50]     ; -> param_3  SLOPE
+08e8938c: MOV ECX,[EAX+0x4c]     ; -> param_2  THRESH
+08e89390: MOV EDX,[EAX+0x48]     ; -> param_1  MAX
+08e89397: CALL 0x08e88830
+```
+
+`FUN_08e88830(this, int MAX, float THRESH, float SLOPE, float best)`.
+`this+0x00` = n_cands, `this+0x18` = cand array, stride 0x18, cost at +4.
+
+This **confirms `cfg+0x4c` == THRESH == the `w_4c` field the inner_scorer
+hook already dumps** (Tom 0.8 / Jill 1.0), so the
+HALFPHONE_CAND_PRUNE_THRESH mapping is right.
+
+### 84b. Our histogram/threshold/sort/cap logic is all correct
+
+Verified line by line against the decompile:
+
+- binning: `(cost - best) * 40 < 40` -> `trunc(delta*40)`, else bin 39. Ours matches.
+- scan: unrolled x10, `bd = (k+1) * 0.025`, break on
+  `MAX < cum || THRESH - cum*SLOPE < bd`. Ours matches, including the
+  `local_c8` starting at 2 (hence `(k+1)`, not `k`).
+- keep test: the odd `*p < t == (*p == t)` idiom is just "break at first
+  cost > thresh", i.e. keep `cost <= thresh`. Ours matches.
+- final `if (MAX < *this) *this = MAX`. Ours matches.
+- 40 bins exactly (`local_c8 < 0x2a` over 4 blocks of 10).
+
+### 84c. The one thing we were missing: the bin-39 guard
+
+```c
+} while (local_c8 < 0x2a);
+fVar2 = fVar2 + param_4;
+if (iVar7 < 0x27) {          /* 39 */
+    ... compact survivors ...
+    *(int *)this = iVar9;
+}
+/* shell sort + MAX cap run regardless */
+```
+
+`iVar7` is the bin index the scan broke at (40 if it never broke). **The
+engine only applies the threshold filter when the break bin is < 39** --
+bin 39 is the clamp/overflow bin, so a threshold that reaches it is
+meaningless and the engine declines to cut. We had no such guard.
+
+It predicts both voices exactly, since `cum >= 1` always (best is in bin 0):
+
+- Tom `THRESH=0.8`: `lhs <= 0.795` -> breaks by k=31, always < 39 -> Tom
+  ALWAYS prunes. The guard is provably a **no-op for Tom** (confirmed:
+  8532/8532 with it enabled).
+- Jill `THRESH=1.0`: `lhs <= 0.995` -> needs `(k+1)*0.025 > 0.995` -> k=39
+  -> **no prune** on sparse pools. Exactly the observed behaviour
+  (text_004 keeping uid 145844 at best+1.883).
+
+### 84d. ...but it is only HALF the mechanism
+
+Enabling the guard alone made Jill **worse**: 93.8% -> 92.6%, survivor
+mean 13.92 -> **17.33** against an engine mean of 14.66. We overshoot.
+
+The caller explains why. `FUN_08e88de0` pre-initialises every candidate's
+cost to the sentinel and abandons scoring early:
+
+```asm
+08e890ca: MOV dword ptr [EDX+EBX*0x1+0x4],0x461c4000   ; cost = 10000.0f
+...
+08e8918c/08e89250/08e892a6/08e8931f:
+          FCOMP [ESP+0x10] ; TEST AH,0x41 ; JZ <skip>  ; partial > bound -> bail
+08e8932a: FCOM  [ESP+0x30]                              ; vs running min
+08e89335: FST   [ESP+0x30]                              ; running_min = cost
+08e89339: FLD   [ESP+0x5c] ; FADD ; FSTP [ESP+0x10]     ; bound = min + slack
+```
+
+`0x461c4000` is exactly `10000.0f` — **this is the origin of the 10000
+sentinels seen in Jill's DP traces** (Exp 82/83), not a prune marker.
+
+So the engine cuts candidates twice: a running-min early-exit during
+scoring, then the histogram prune. We implement only the second, and our
+lack of the guard has been silently standing in for the first. Removing
+the compensation without adding the real mechanism is a net loss.
+
+### 84e. Status
+
+Guard implemented but **gated off** behind `SPFY_HP_PRUNE_BIN39_GUARD=1`,
+with the reasoning recorded at the code site. Enable it together with the
+scoring-time early-exit in FUN_08e88de0, not before.
+
+Baseline unchanged: Tom 8532/8532, Jill 1983/2114 (93.8%).
+
+**Next step is now concrete**: implement the running-min early-exit in our
+per-HP scorer (init cost to 10000, track `running_min`, bail when a
+partial sum exceeds `running_min + slack`), then flip the guard on. The
+one unknown left is the source of `slack` at `[ESP+0x5c]`.
+
+## Experiment 85: the other half — running-min early exit. Jill 93.8% -> 98.0% (2026-07-20)
+
+Implemented the companion to Exp 84's bin-39 guard. Both landed together.
+
+### 85a. What FUN_08e88de0 actually does
+
+Decompiled (SWIttsUSel.dll, `USelNetworkSlice::all_half_phone_costs`):
+
+```c
+fVar4    = *(float *)(cfg + 0x4c);   /* slack */
+local_30 = 10000.0;                  /* running_min */
+local_50 = 10000.0;                  /* bound       */
+for each cand:
+    cand.cost = 0x461c4000;          /* 10000.0f sentinel, pre-set */
+    fVar14 = SP_sum + flag*w + 0;
+    if (fVar14 <= local_50) { fVar14 += ccos_4cell * cfg[0x44];
+    if (fVar14 <= local_50) { fVar14 += D_cost;
+    if (fVar14 <= local_50) { fVar14 += F0_cost;
+    if (fVar14 <= local_50) {
+        if (fVar14 < local_30) { local_30 = fVar14; local_50 = fVar4 + fVar14; }
+        cand.cost = fVar14;
+    }}}}
+FUN_08e88830(this, cfg[0x48], cfg[0x4c], cfg[0x50], local_30);
+```
+
+**The slack is `cfg+0x4c` -- the SAME field the prune takes as THRESH,
+i.e. `HALFPHONE_CAND_PRUNE_THRESH`** (Tom 0.8, Jill 1.0). No new constant
+to recover; the `[ESP+0x5c]` unknown from Exp 84 is just that field spilled.
+
+Also note `best` handed to the prune is `local_30`, the running minimum
+over SURVIVORS -- not a post-hoc min over all costs.
+
+### 85b. Staged bail-out == single post-hoc test
+
+Every component is non-negative (proscost cells, flag term, scaled ccos,
+squared D, squared/MISSING F0), so the partial sums are monotonic:
+`partial > bound` implies `full > bound`, and `full <= bound` implies every
+partial passed. So the four staged tests collapse to one test on the full
+cost. What does NOT collapse is the ordering: the bound tightens **in pool
+order**, so this must be a left-to-right sweep, never a min-then-filter.
+
+Implemented in spfy_synth.c immediately after the inner-scorer loop. This
+finally fills in the `SPFY_HP_EARLY_EXIT_VAL` stub that had carried a
+"fVar4 value is TBD via decomp of voice config loader" note since
+2026-05-14.
+
+### 85c. Result — both halves together
+
+| configuration | Tom | Jill |
+|---|---|---|
+| neither (previous baseline) | **8532/8532 (100%)** | 1983/2114 (93.8%) |
+| bin-39 guard only (Exp 84) | 8532/8532 (100%) | 1957/2114 (92.6%) |
+| **both** | **8532/8532 (100%)** | **2071/2114 (98.0%)** |
+
+Jill **93.8% -> 98.0%**, phrases with any wrong UID 24 -> 11 (65 of 76 now
+perfect), structure 76/76 and slot fidelity 2114/2114 unchanged. **Tom is
+byte-for-byte unmoved at 8532/8532**, as predicted: his THRESH=0.8 means
+the scan always breaks by k=31, so the guard is a no-op for him, and the
+early exit reproduces the candidate reduction his tighter histogram cut was
+already approximating.
+
+The A/B is exact: setting `SPFY_NO_HP_EARLY_EXIT=1` +
+`SPFY_NO_HP_PRUNE_BIN39_GUARD=1` restores 100% / 93.8% precisely.
+
+Audio unaffected (Jill pangram: 2.88 s, 65 units, speech-shaped envelope).
+
+### 85d. Remaining Jill residual (2.0%)
+
+11 phrases, concentrated in `phn_002` / `phn_007` (18/28 each) and
+`nat_002` (6/18). Everything measurable is still exact: pools, per-cand
+target costs, all four join-cost paths, sp targets, ctx, durt/f0tr,
+hp_class. Next candidate is the shell-sort tie-break -- the engine sorts
+survivors by cost with a secondary ascending compare on the int at cand+0
+(`*(int *)(iVar4 + iVar12) <= *(int *)(iVar4 + iVar9)`), whereas ours is a
+selection sort on cost alone. That would only bite on exact cost ties, so
+it is a plausible fit for a small, stubborn residual.
+
+## Experiment 86: Jill 98.0% -> 100.0%. The prune compare is x87-extended (2026-07-20)
+
+Chased the last 2%. It was a single floating-point boundary, and fixing it
+also corrected a 2026-05-14 mis-diagnosis.
+
+### 86a. Localisation
+
+`phn_002` ("This is the ae sound.") hp=17: pool 15, engine keeps 5, we
+kept all 15 (`break_k=39, filtered=0`). Verified first that nothing else
+differed:
+
+- **pool order is identical** engine-vs-ours on all 28 slots (the engine's
+  `prsl_slot` uid list vs our pre-prune pool). This matters because the
+  early-exit bound tightens in pool order.
+- survivor sets are a strict SUPERSET of the engine's everywhere -- we
+  never lose a candidate the engine kept, we only keep extras.
+- our early exit leaves 7 survivors at that slot; histogram `cum` reaches
+  5 by bin 26 and stays there.
+
+At k=38 the break test is `1.0 - 5*0.005f  <  39*0.025f`:
+
+```
+extended : 0.9750000005588  <  0.9750000145286   -> TRUE,  break at k=38
+float    : 0.97500002384    <  0.97500002384     -> FALSE, no break
+```
+
+Both sides round to the SAME float, so a 32-bit comparison sees equality
+and misses the break. Breaking at k=38 keeps exactly the 5 the engine
+keeps.
+
+### 86b. The disassembly is unambiguous
+
+`FUN_08e88830` @ 08e888c6..08e888ee:
+
+```asm
+FILD [ESP+0x14]        ; (k+1)
+FMUL [0x08e98520]      ; bd  = (k+1)*BIN_WIDTH      <- stays in ST, extended
+FILD [ESP+0x10]        ; cum
+FMUL [ESP+0xec]        ; cum*SLOPE
+FSUBR [ESP+0xe8]       ; lhs = THRESH - cum*SLOPE   <- stays in ST, extended
+FLD ST1 ; FCOMPP       ; break when bd > lhs
+...
+FADD  [ESP+0xf0]       ; bd += best, STILL extended
+FSTP  dword [ESP+0x18] ; single rounding to float, here and nowhere else
+```
+
+Neither operand is rounded to 32-bit before the compare, and `best` is
+added at extended precision before the one and only store.
+
+### 86c. Corrects a 2026-05-14 note
+
+That note claimed "the LHS must be stored to a float local before the
+comparison ... engine (SSE2 / 32-bit precision) produces equality". The
+engine is x87, not SSE2, and rounds neither side. The old fix and its
+`SPFY_PRUNE_X87` escape hatch are removed.
+
+Note `SPFY_PRUNE_X87=1` alone was ALSO wrong -- it left `lhs` extended but
+compared against an already-rounded `bd`. That mix scores Jill 99.9% but
+costs Tom 23 slots (8509/8532). Only extending BOTH sides satisfies both
+voices.
+
+### 86d. Result
+
+| step | Tom | Jill |
+|---|---|---|
+| Exp 85 (early exit + bin-39 guard) | 8532/8532 | 2071/2114 (98.0%) |
+| + x87 lhs only (`SPFY_PRUNE_X87`)  | 8509/8532 (99.7%) | 2111/2114 (99.9%) |
+| **+ both sides extended**          | **8532/8532 (100.0%)** | **2113/2114 (100.0%)** |
+
+**Jill: structure 76/76, slot fidelity 2114/2114, path UID 2113/2114.**
+Tom unmoved at 8532/8532 and 8684/8684. Audio unaffected.
+
+A/B (`SPFY_NO_HP_EARLY_EXIT=1`) drops Jill to 2018/2114 (95.5%), so the
+early exit remains load-bearing.
+
+### 86e. Sort tie-break: implemented, currently inert
+
+The engine's shell sort breaks equal-cost ties on the int at cand+0 (the
+uid), descending -- decoded from
+`cost_j >= cost_jg && (cost_j != cost_jg || uid_j <= uid_jg)`. Implemented
+as a total comparator (cost asc, uid desc), which makes our selection sort
+agree with a shell sort regardless of algorithm since uids are unique in a
+pool. Measured effect on both voices: **zero** -- exact cost ties do not
+occur in either corpus. Kept because it is what the disassembly says;
+`SPFY_NO_HP_SORT_UID_TIE=1` reverts.
+
+### 86f. Remaining
+
+One slot: `nat_001` 17/18. Everything else on the captured Jill corpus is
+exact.
+
+## Experiment 87: Jill on the FULL 235-entry corpus — 99.5% (2026-07-20)
+
+Captured the remaining 159 corpus entries (`SPFY_DUMPWAV_TIMEOUT=120` for
+the long ones); `spfy/test/oracle/traces_master_jill` now holds all 235. Verified
+mid-flight that the server was still on Jill (`hp_class_remap n_labels=46`).
+
+### 87a. Headline
+
+| | Tom | Jill |
+|---|---|---|
+| phrases clean | 226/226 | 226/226 |
+| structure | 225/226 (99.6%) | 225/226 (99.6%) |
+| slot fidelity | **8684/8684 (100.0%)** | **8664/8684 (99.8%)** |
+| path UID | **8532/8532 (100.0%)** | **8548/8592 (99.5%)** |
+
+(Jill's UID denominator is larger than Tom's -- 8592 vs 8532 -- because her
+phrases expand to more half-phone slots.) The one structure miss is
+`longtext_sioux_001`, identical on both voices.
+
+Only **6 of 226 phrases** diverge at all: nat_001, nat_024, nat_033,
+nat_035, nat_043, nat_049.
+
+### 87b. The residual splits cleanly in two
+
+**(i) FE phoneme choice — 24 UIDs, 20 slots, 2 phrases.**
+`nat_024` and `nat_049` carry every slot-fidelity failure
+(ctx=20, ctx_neighbor=16, ctx_center=4, pool_n=12, durt_both_diff=4). The
+pool/durt categories are downstream consequences: a different phone gives
+a different triphone key, hence a different PRSL pool.
+
+Root cause is one phone. `nat_024` = "...closed due to ongoing...":
+
+```
+TOM  engine:  d uw  dx uw  aa ng ...      "to" -> dx + uw
+JILL engine:  d uw  dx ix  aa ng ...      "to" -> dx + ix
+```
+
+Both differ ONLY at slots 40/41. The FE DLL's tagged output is byte
+identical for both voices (`<to (29,2) prep,0 [.0 dx(p100) ih(p100) ]>`) --
+the tagged text is lossy and collapses ix/ih, so the real choice happens in
+the refinement we apply on top.
+
+Corpus-wide scan of every "to"-type site (t|dx + reduced vowel), both
+voices:
+
+| tom | jill | next is vowel | count |
+|-----|------|---------------|-------|
+| ax | ax | no  | 19 |
+| ix | ix | no  | 12 |
+| uw | uw | **yes** | 3 |
+| uw | ix | **yes** | 2  <-- the only disagreements |
+| ih | ih | no  | 1 |
+| uw | uw | no  | 1 |
+
+34 of 36 sites agree. Both disagreements are "to" before a vowel -- but
+**Jill herself picks `uw` before a vowel at 3 other sites**, so this is NOT
+a per-voice rule flip and cannot be fixed with a voice flag. Our `to`
+vowel rule (project_to_word_rule_2026_05_13) was fit to Tom's traces and
+is under-specified; the real engine rule keys on context we have not
+identified. Deliberately NOT patched -- any heuristic that flips these 2
+sites risks the 3 agreeing before-vowel sites.
+
+**(ii) Pure selection — 20 UIDs, 4 phrases.**
+nat_001 (17/18), nat_033 (70/72), nat_035 (165/174), nat_043 (112/120) all
+have **100% slot fidelity** and no categories: correct ctx, sp, durt, f0tr,
+pools. On nat_001 the survivor SETS match on all 18 slots and only the
+ORDER differs (15 slots).
+
+Relevant observation: the engine's DP candidate array is **not** sorted by
+the `pre_dp` values the trace reports -- e.g. nat_001 slot 4 reads
+`0.500749, 0.000002, 0.610103, 0.698729, 0.794023`. That is consistent
+with the known two-sweep scoring: the array is ordered by sweep-1 costs
+while the trace shows sweep-2 values. So a post-prune order difference is
+expected and usually harmless; it only bites where a DP tie is decided by
+position. This is the likely mechanism for these 20 UIDs.
+
+### 87c. State
+
+Tom byte-for-byte unchanged at 8684/8684 and 8532/8532 throughout. Build
+clean, zero warnings.
+
+## Experiment 88: multi-language FE — all five voices synthesize (2026-07-20)
+
+Bundled the fr-CA and es-MX front-end DLLs alongside en-US and route the
+choice off the voice's own VCF, so selecting a voice selects its FE.
+
+### 88a. Build-time registry instead of one hardcoded DLL
+
+`fe_host/CMakeLists.txt` previously embedded exactly one image
+(`SWIttsFe-en-US.dll` -> `swittsfe_dll_data[]`). It now loops over
+`SPFY_FE_LANGS` (default `en-US;fr-CA;es-MX`), embedding one blob per
+language and generating a registry table mapping VCF language tag -> blob.
+`spfy_fe_dll_for_lang()` does a case-insensitive lookup treating `-` and
+`_` as equivalent.
+
+New API `spfy_fe_open_lang(lang, ...)`; the old `spfy_fe_open()` forwards
+with `lang = NULL`, which falls back to the first embedded image. Both the
+native PE backend (fe_host.c) and the emulator backend (fe_host_emu.c)
+implement it -- the emulator maps one image per process, so the first voice
+opened wins there.
+
+`spfy_voice_load` reads `tts.voiceCfg.language` from the VCF (already
+parsed at that point, which it has to be since the DLL is chosen at open
+time) and passes it through.
+
+Sizes: en-US 7.5 MB, fr-CA 1.5 MB, es-MX 0.9 MB of DLL; the generated C is
+~6.3x that. Trim `SPFY_FE_LANGS` for a faster build.
+
+CMake gotcha worth recording: a literal `;` cannot be written inline in
+the generated-source string -- CMake treats it as a list separator and
+`\;` survives into the C file as a stray backslash. Build it from a
+`set(_SEMI ";")` variable.
+
+### 88b. Two format bugs found by fr-CA
+
+**ckls `unk0` is conditional.** Felix failed to load with a bare "format
+error". His `_WORD_` chunk group is genuinely EMPTY (0 tokens) -- he ships
+syllable chunks but no word chunks. Our parser read the group header as
+`name, u32 token_count, u32 unk0` unconditionally, so for an empty group
+it consumed the next group's name record and then ran off the chunk. The
+bytes it swallowed decode as `0x535F0005` = `u16 len=5` + `"_S"`, i.e. the
+start of `_SYL_`.
+
+`unk0` is present ONLY when `token_count > 0`. With that fixed all five
+voices consume their ckls payload exactly: 394375 / 355308 / 816044 /
+1013449 / 5234800 bytes. Also guarded the zero-size `calloc`s, which can
+return NULL and get misreported as OOM.
+
+**Phoneme symbols can contain `~`.** fr-CA marks nasal vowels with a
+trailing tilde (`a~`, `o~`, `oe~`, `E~`). `p_parse_ident` stopped at the
+tilde and the phoneme parser then failed looking for `(`, giving
+`[fe_parse] error at offset 50`. Added `p_parse_phone_ident` (ident plus
+`~`), kept separate from the word-name tokeniser so en-US/es-MX are
+provably unaffected -- their symbols are pure alnum.
+
+### 88c. Result
+
+| voice | FE image selected | output |
+|-------|-------------------|--------|
+| Tom | SWIttsFe-en-US.dll | 0.89 s |
+| Jill | SWIttsFe-en-US.dll | 0.85 s |
+| Felix | **SWIttsFe-fr-CA.dll** | 0.62 s |
+| Javier | **SWIttsFe-es-MX.dll** | 0.89 s |
+| Paulina | **SWIttsFe-es-MX.dll** | 0.85 s |
+
+The foreign FEs emit genuine target-language phonemes:
+`bonjour` -> `b o~ Z u r`, `comment` -> `k c m a~ t`, `allez` -> `a l e`;
+`hola` -> `O l a`, `buenos` -> `b w E n o s`, `dias` -> `d i A s`.
+
+Audits unchanged: **Tom 8532/8532 (100%)**, **Jill 8548/8592 (99.5%)**.
+
+### 88d. Next step is identified and safe
+
+The engine phone-id table is still en-US only (`data/en_us_engine_phone_ids.csv`
+-> codegen), so fr-CA/es-MX phones log
+`'o~' not in engine phone-id table; falling back to VCF id`. The correct
+source is the VIN's own `feat["name"]` order -- the same table that
+defines hp_class.
+
+Verified the swap is safe: the en-US CSV is **exactly** the VIN feat
+order -- 45 entries, **0 mismatches**, and feat additionally supplies the
+one phone the CSV lacks. So replacing the compiled-in CSV with a
+VIN-derived name->index lookup (via `spfy_phone_order_t.phone_names`) is a
+provable no-op for Tom/Jill and the correct generalisation for the other
+languages. Blocked only on giving fe_parse access to the per-voice phone
+order (phone_names are non-NUL-terminated slices into the VIN today).
+
+Also still open for Paulina specifically: v100005 has no on-disk
+`phone_ctx[4]` and forces `flag_b = 1`, so her ccos S-cost and same-rec
+join shortcut need alternate sourcing (Exp 80).
+
+## Experiment 89: phone ids from the VIN, not a compiled-in en-US CSV (2026-07-20)
+
+The "safe plumbing" identified in Exp 88. The FE resolved phone symbols
+through `data/en_us_engine_phone_ids.csv` (ARPAbet only), so fr-CA and
+es-MX phones fell back to VCF ids with a warning per phone.
+
+### 89a. Why it was safe
+
+The engine's phone id IS the VIN `feat["name"]` index -- the same
+numbering hp_class is built from (Exp 80). Checked the CSV against Tom's
+feat order before touching anything: **45 entries, 0 mismatches**, and
+feat additionally supplies the one phone the CSV lacks. So the swap could
+only be a no-op for en-US.
+
+### 89b. What changed
+
+- `spfy_phone_order_t.phone_names` now holds OWNED, NUL-terminated copies
+  instead of counted slices into the VIN, since every consumer wants C
+  strings. Added `spfy_phone_order_index(po, name)`.
+- `fe_parse` takes an optional `fe_phone_names_t { names, n }` and
+  resolves symbols through it, falling back to the compiled-in table when
+  NULL. Deliberately a plain array, not `spfy_phone_order_t`, so fe_parse
+  keeps no dependency on voice/.
+- New `spfy_fe_set_phone_names()` on both FE backends (native + emulator),
+  plus an accept-and-ignore stub on the in-house `fe/fe.c` so non-hosted
+  builds link without callers branching.
+- `spfy_voice_load` passes `v->phone_order.phone_names`, which it owns and
+  which outlives the FE.
+
+### 89c. Result
+
+| | before | after |
+|---|---|---|
+| Tom  | 8684/8684, 8532/8532 | **unchanged** |
+| Jill | 8664/8684, 8548/8592 | **unchanged** |
+| Felix / Javier / Paulina phone-id warnings | many per phrase | **0** |
+
+All three foreign voices still synthesize. The en-US no-op was confirmed
+by re-running both full audits.
+
+### 89d. Trace storage
+
+Jill's 235 master traces were living in `C:\tmp\jill_traces_master` and
+got cleaned up by a temp sweep mid-session. They now live at
+**`spfy/test/oracle/traces_master_jill`** (81.7 MB), alongside Tom's
+`traces_master` (75.4 MB). Both are covered by the `*.json*` .gitignore
+rule and neither is tracked, so this only changes where they survive --
+not what is committed. Pass `--traces-master spfy/test/oracle/traces_master_jill`
+to master_compare2.py.

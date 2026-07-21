@@ -6,6 +6,7 @@ add_library(spfy_voice STATIC
     vcf_matrix.c
     unit_table.c
     ccos.c
+    phone_order.c
     voice_runtime.c
     feat_table.c
     vdb_lookup.c

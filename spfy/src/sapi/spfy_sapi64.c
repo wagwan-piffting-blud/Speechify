@@ -216,7 +216,10 @@ static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
     _snwprintf(vin,   MAX_PATH, L"%ls\\en-US\\%ls\\%ls.vin",  project, voice_name, voice_name);
     _snwprintf(vdb,   MAX_PATH, L"%ls\\en-US\\%ls\\%ls8.vdb", project, voice_name, voice_name);
     _snwprintf(vcf,   MAX_PATH, L"%ls\\en-US\\%ls\\%ls.vcf",  project, voice_name, voice_name);
-    _snwprintf(hpc,   MAX_PATH, L"%ls\\spfy\\data\\tom_hpclass.bin", project);
+    /* Empty hpclass arg -> spfy_synth derives the table from this voice's
+     * own VIN. Previously pinned to data/tom_hpclass.bin, which made every
+     * non-Tom voice fail the unit-count check at load. */
+    hpc[0] = L'\0';
     _snwprintf(vocab, MAX_PATH, L"%ls\\spfy\\build\\fe_symbol_table.json", project);
     _snwprintf(tab_a, MAX_PATH, L"%ls\\spfy\\data\\fe_tables_a", project);
     _snwprintf(tab_b, MAX_PATH, L"%ls\\spfy\\data\\fe_tables",   project);
@@ -485,44 +488,12 @@ static ULONG STDMETHODCALLTYPE tts_AddRef(ISpTTSEngine *This)
 static ULONG STDMETHODCALLTYPE tts_Release(ISpTTSEngine *This)
 { return impl_release(IMPL_FROM_TTS(This)); }
 
-/* Concatenate the SPVTEXTFRAG list into UTF-16 + matching UTF-8. */
-static char *frags_to_utf8(const SPVTEXTFRAG *frag, WCHAR **out_w, int *out_wlen)
-{
-    int total = 0;
-    for (const SPVTEXTFRAG *f = frag; f; f = f->pNext) {
-        if (f->State.eAction == SPVA_Speak
-            || f->State.eAction == SPVA_Pronounce
-            || f->State.eAction == SPVA_SpellOut) {
-            total += (int)f->ulTextLen;
-        }
-        total += 1;
-    }
-    if (total <= 0) return NULL;
-    WCHAR *w = (WCHAR *)malloc((size_t)total * sizeof(WCHAR) + sizeof(WCHAR));
-    if (!w) return NULL;
-    int wp = 0;
-    for (const SPVTEXTFRAG *f = frag; f; f = f->pNext) {
-        if (f->State.eAction == SPVA_Speak
-            || f->State.eAction == SPVA_Pronounce
-            || f->State.eAction == SPVA_SpellOut) {
-            if (f->pTextStart && f->ulTextLen > 0) {
-                memcpy(w + wp, f->pTextStart, f->ulTextLen * sizeof(WCHAR));
-                wp += (int)f->ulTextLen;
-            }
-            w[wp++] = L' ';
-        }
-    }
-    w[wp] = 0;
-    int u8n = WideCharToMultiByte(CP_UTF8, 0, w, wp, NULL, 0, NULL, NULL);
-    if (u8n <= 0) { free(w); return NULL; }
-    char *u8 = (char *)malloc((size_t)u8n + 1);
-    if (!u8) { free(w); return NULL; }
-    WideCharToMultiByte(CP_UTF8, 0, w, wp, u8, u8n, NULL, NULL);
-    u8[u8n] = 0;
-    *out_w    = w;
-    *out_wlen = wp;
-    return u8;
-}
+/* (A whole-utterance frags_to_utf8() lived here. It concatenated the
+ * entire SPVTEXTFRAG list into one buffer, which the engine no longer
+ * does -- tts_Speak walks the list per fragment and calls
+ * speak_one_frag_text64() on each, so word-boundary offsets stay tied to
+ * their own fragment. Removed as dead code once this file gained a build
+ * target and -Wunused-function started firing.) */
 
 /* Read the WAV at `path`, pitch-shift its int16 data section by
  * `semitones` (TD-PSOLA, duration-preserving), and write it back over

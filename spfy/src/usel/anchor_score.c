@@ -27,38 +27,44 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Tom phone-pair swaps applied by the engine's voice+0x608 hp_class remap.
- * label 9 -> 10, 10 -> 11, 11 -> 9; 14 <-> 15. */
-static uint32_t tom_swap_label(uint32_t label)
+/* feat-order phone -> ccos labl index, i.e. the engine's voice+0x608
+ * permutation with the side term factored out. This used to be a
+ * hardcoded `tom_swap_label` (9->10, 10->11, 11->9; 14<->15), which is
+ * Tom's `d`/`dh`/`dx` 3-cycle plus his `en`/`er` swap. That is wrong for
+ * every voice whose ccos labl order differs from Tom's: identity for
+ * Jill/Felix/Javier, and a 28-of-31 permutation for Paulina. The table
+ * now comes from the voice's own feat/labl name tables.
+ *
+ * Verified against the engine's live voice+0x608 dump (inner_scorer
+ * hp_class_remap event): 92/92 exact for both Tom and Jill. */
+static uint32_t phone_feat_to_labl(const spfy_anchor_voice_t *av,
+                                   uint32_t phone)
 {
-    switch (label) {
-    case 9:  return 10;
-    case 10: return 11;
-    case 11: return 9;
-    case 14: return 15;
-    case 15: return 14;
-    default: return label;
-    }
+    if (!av || !av->feat_to_labl || phone >= av->n_feat_phones) return phone;
+    uint8_t lab = av->feat_to_labl[phone];
+    return (lab == 0xFFu) ? phone : lab;
 }
 
-/* s_ctx_remap(c, n): hp_class -> label (with Tom swap). Returns -1 on OOB. */
-static int32_t s_ctx_remap(int32_t c, uint32_t n_labels)
+/* s_ctx_remap: hp_class -> ccos label. Returns -1 on OOB. */
+static int32_t s_ctx_remap(const spfy_anchor_voice_t *av,
+                           int32_t c, uint32_t n_labels)
 {
     if (c < 0) return -1;
     uint32_t label = ((uint32_t)c) >> 1;
     if (label >= n_labels) return -1;
-    return (int32_t)tom_swap_label(label);
+    return (int32_t)phone_feat_to_labl(av, label);
 }
 
-/* hp_class_remap: hp_class (interleaved label*2+side) -> de-interleaved
- * (side*n_labels + swap(label)) used as ccos forest index. */
-static int32_t hp_class_remap(int32_t c, uint32_t n_labels)
+/* hp_class_remap: hp_class (interleaved phone*2+side) -> de-interleaved
+ * (side*n_labels + labl(phone)) used as ccos forest index. */
+static int32_t hp_class_remap(const spfy_anchor_voice_t *av,
+                              int32_t c, uint32_t n_labels)
 {
     if (c < 0) return -1;
     uint32_t side  = ((uint32_t)c) & 1u;
     uint32_t label = ((uint32_t)c) >> 1;
     if (label >= n_labels) return -1;
-    return (int32_t)(side * n_labels + tom_swap_label(label));
+    return (int32_t)(side * n_labels + phone_feat_to_labl(av, label));
 }
 
 /* Anchor-time CART feature callback. Mirrors spfy_synth.c::cart_feat
@@ -96,6 +102,7 @@ typedef struct {
     const uint8_t               *cb_phone_ctx;  /* len 4 OR NULL */
     int                          is_first_hp;   /* HP at index 0 of anchor */
     int                          is_last_hp;    /* HP at index n_hp-1 */
+    const spfy_anchor_voice_t   *av;            /* for the phone permutation */
 } spfy_anchor_feat_user_t;
 
 static int32_t anchor_cart_feat(uint32_t q_type, void *user)
@@ -108,11 +115,13 @@ static int32_t anchor_cart_feat(uint32_t q_type, void *user)
         case 3:
             if (u->cb_phone_ctx && !u->is_first_hp)
                 return (int32_t)u->cb_phone_ctx[1];
-            return (int32_t)tom_swap_label((uint32_t)h->ctx[1] >> 1);
+            return (int32_t)phone_feat_to_labl(u->av,
+                                               (uint32_t)h->ctx[1] >> 1);
         case 4:
             if (u->cb_phone_ctx && !u->is_last_hp)
                 return (int32_t)u->cb_phone_ctx[2];
-            return (int32_t)tom_swap_label((uint32_t)h->ctx[3] >> 1);
+            return (int32_t)phone_feat_to_labl(u->av,
+                                               (uint32_t)h->ctx[3] >> 1);
         case 5: return (int32_t)h->q5;
         /* q7 clamped to 0: engine's durt walker (FUN_08e87d90) executes
          * XOR EBX,EBX before each dispatcher call; q_type=7 reads EBX.
@@ -148,14 +157,14 @@ static float compute_4cell_ccos(const spfy_anchor_voice_t *av,
                                  const spfy_anchor_ctx_t *last_ctx)
 {
     uint32_t n_labels = av->ccos->n_labels;
-    int32_t hp_first_remap = hp_class_remap(first_ctx->ctx[2], n_labels);
-    int32_t hp_last_remap  = hp_class_remap(last_ctx->ctx[2],  n_labels);
+    int32_t hp_first_remap = hp_class_remap(av, first_ctx->ctx[2], n_labels);
+    int32_t hp_last_remap  = hp_class_remap(av, last_ctx->ctx[2],  n_labels);
     if (hp_first_remap < 0 || hp_last_remap < 0) return NAN;
 
-    int32_t sl0 = s_ctx_remap(first_ctx->ctx[0], n_labels);
-    int32_t sl1 = s_ctx_remap(first_ctx->ctx[1], n_labels);
-    int32_t sl2 = s_ctx_remap(last_ctx->ctx[3],  n_labels);
-    int32_t sl3 = s_ctx_remap(last_ctx->ctx[4],  n_labels);
+    int32_t sl0 = s_ctx_remap(av, first_ctx->ctx[0], n_labels);
+    int32_t sl1 = s_ctx_remap(av, first_ctx->ctx[1], n_labels);
+    int32_t sl2 = s_ctx_remap(av, last_ctx->ctx[3],  n_labels);
+    int32_t sl3 = s_ctx_remap(av, last_ctx->ctx[4],  n_labels);
     if (sl0 < 0 || sl1 < 0 || sl2 < 0 || sl3 < 0) return NAN;
 
     /* Cand col bytes: SS phone_ctx[0..1] for slots 0,1, SE phone_ctx[2..3]
@@ -163,10 +172,20 @@ static float compute_4cell_ccos(const spfy_anchor_voice_t *av,
     spfy_unit_record_t ss_rec, se_rec;
     if (spfy_unit_record_get(av->units, ss, &ss_rec) != SPFY_OK) return NAN;
     if (spfy_unit_record_get(av->units, se, &se_rec) != SPFY_OK) return NAN;
-    int32_t pc_ss0 = (int32_t)(int8_t)ss_rec.phone_ctx[0];
-    int32_t pc_ss1 = (int32_t)(int8_t)ss_rec.phone_ctx[1];
-    int32_t pc_se2 = (int32_t)(int8_t)se_rec.phone_ctx[2];
-    int32_t pc_se3 = (int32_t)(int8_t)se_rec.phone_ctx[3];
+    int32_t pc_ss0, pc_ss1, pc_se2, pc_se3;
+    if (av->ctx4) {
+        /* v100005: derived, pre-remapped ccos-labl columns (voice+0xc4).
+         * ss supplies the left cells [0,1], se the right cells [2,3]. */
+        pc_ss0 = (int32_t)(int8_t)av->ctx4[ss * 4u + 0u];
+        pc_ss1 = (int32_t)(int8_t)av->ctx4[ss * 4u + 1u];
+        pc_se2 = (int32_t)(int8_t)av->ctx4[se * 4u + 2u];
+        pc_se3 = (int32_t)(int8_t)av->ctx4[se * 4u + 3u];
+    } else {
+        pc_ss0 = (int32_t)(int8_t)ss_rec.phone_ctx[0];
+        pc_ss1 = (int32_t)(int8_t)ss_rec.phone_ctx[1];
+        pc_se2 = (int32_t)(int8_t)se_rec.phone_ctx[2];
+        pc_se3 = (int32_t)(int8_t)se_rec.phone_ctx[3];
+    }
 
     float c0 = ccos_cell_signed(av->ccos, (uint32_t)hp_first_remap, 0, sl0, pc_ss0);
     float c1 = ccos_cell_signed(av->ccos, (uint32_t)hp_first_remap, 1, sl1, pc_ss1);
@@ -387,7 +406,9 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
             cand_bytes[1] = u_rec.sp_syl_type;        /* disk 0x0d */
             cand_bytes[2] = u_rec.sp_word_in_phrase;  /* disk 0x0e */
             cand_bytes[3] = u_rec.sp_syl_in_word;     /* disk 0x0f */
-            cand_bytes[4] = 6;                        /* Tom hardcoded */
+            /* v100008 (Jill) stores this at disk 0x10; older record
+             * versions have no column and the decoder yields 6. */
+            cand_bytes[4] = u_rec.sp_phone_in_syl;
             for (int k = 0; k < 5; ++k) {
                 if (av->w_sp[k] == 0.0f) continue;
                 uint8_t pc_idx = k_to_proscost[k];
@@ -475,7 +496,8 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
                 .cb_phone_ctx = getenv("SPFY_NO_UNIT_PHONE_CTX")
                                   ? NULL : feat_pctx,
                 .is_first_hp = (u_idx == 0),
-                .is_last_hp  = ((int)u_idx == n_hp - 1)
+                .is_last_hp  = ((int)u_idx == n_hp - 1),
+                .av = av
             };
             float am = 0.0f, av_var = 0.0f;
             /* 2026-05-14: engine FUN_08e89530 passes byte at unit_record
@@ -706,6 +728,70 @@ int spfy_anchor_hpclass_load(const char *path, uint8_t **out_data,
 
 void spfy_anchor_hpclass_free(uint8_t *data) { free(data); }
 
+/* See header. Mirrors engine FUN_08e91c30 (per-unit derivation) with the
+ * FUN_08e8adc0 v100005 ccos-column remap (voice+0x604) baked in via
+ * s_ctx_remap -- which is the SAME table the ccos ROW path already uses
+ * bit-exactly, so the column reuse is correct by construction. The neighbour
+ * layout is [left2, left1, right1, right2] = uid-4, uid-2, uid+2, uid+4
+ * (half-phone stride 2); a low/recording-boundary left edge snaps to unit 0,
+ * a high/recording-boundary right edge snaps to unit N-2. */
+int spfy_anchor_build_ctx4(spfy_anchor_voice_t *av, uint8_t **out_owned)
+{
+    if (out_owned) *out_owned = NULL;
+    if (!av || !av->units || !av->hpclass_table || !av->ccos)
+        return SPFY_E_INVAL;
+    av->ctx4 = NULL;
+    if (av->units->version != 100005u)   return SPFY_OK;
+    if (getenv("SPFY_NO_V100005_CTX4"))  return SPFY_OK;
+
+    uint32_t n        = av->units->n_units;
+    uint32_t n_labels = av->ccos->n_labels;
+    if (n == 0 || n_labels == 0)         return SPFY_OK;
+
+    /* Cache file_idx once so the neighbour walk is O(1) per cell. The engine
+     * compares in-mem record+0x00 (= disk+0x04 = file_idx) to detect a
+     * recording boundary. */
+    uint16_t *file_idx = (uint16_t *)malloc((size_t)n * sizeof *file_idx);
+    uint8_t  *ctx4     = (uint8_t  *)malloc((size_t)n * 4u);
+    if (!file_idx || !ctx4) { free(file_idx); free(ctx4); return SPFY_E_NOMEM; }
+    for (uint32_t u = 0; u < n; ++u) {
+        spfy_unit_record_t r;
+        if (spfy_unit_record_get(av->units, u, &r) != SPFY_OK) {
+            free(file_idx); free(ctx4); return SPFY_E_FORMAT;
+        }
+        file_idx[u] = r.file_idx;
+    }
+
+    static const int loff[2] = { 4, 2 };   /* left-2, left-1 */
+    static const int roff[2] = { 2, 4 };   /* right-1, right-2 */
+    for (uint32_t uid = 0; uid < n; ++uid) {
+        uint16_t self = file_idx[uid];
+        int32_t  nb[4];
+        for (int k = 0; k < 2; ++k) {
+            /* Short-circuit keeps file_idx[li] out of bounds when li < 0. */
+            int32_t li = (int32_t)uid - loff[k];
+            if (li < 0 || file_idx[li] != self) li = 0;
+            nb[k] = li;
+        }
+        for (int k = 0; k < 2; ++k) {
+            int32_t ri = (int32_t)uid + roff[k];
+            if (ri >= (int32_t)n || file_idx[ri] != self) ri = (int32_t)n - 2;
+            nb[2 + k] = ri;
+        }
+        for (int k = 0; k < 4; ++k) {
+            uint8_t hpc = ((uint32_t)nb[k] < av->hpclass_n)
+                          ? av->hpclass_table[nb[k]] : 0u;
+            int32_t labl = s_ctx_remap(av, (int32_t)hpc, n_labels);
+            ctx4[uid * 4u + (uint32_t)k] = (uint8_t)(labl & 0xff);  /* -1->0xFF */
+        }
+    }
+
+    free(file_idx);
+    av->ctx4 = ctx4;
+    if (out_owned) *out_owned = ctx4;
+    return SPFY_OK;
+}
+
 int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
                          const spfy_anchor_ctx_t          *ctx,
                          const spfy_anchor_sp_target_t    *sp_target,
@@ -722,7 +808,7 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
 
     uint32_t n_labels = av->ccos->n_labels;
     int32_t self_hpc = ctx->ctx[2];
-    int32_t hp_remap = hp_class_remap(self_hpc, n_labels);
+    int32_t hp_remap = hp_class_remap(av, self_hpc, n_labels);
     if (hp_remap < 0) return SPFY_E_OOB;
 
     /* SP-sum: 5-matrix sum at this HP's sp_target. */
@@ -736,7 +822,7 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
     cand_bytes[1] = u_rec.sp_syl_type;
     cand_bytes[2] = u_rec.sp_word_in_phrase;
     cand_bytes[3] = u_rec.sp_syl_in_word;
-    cand_bytes[4] = 6;
+    cand_bytes[4] = u_rec.sp_phone_in_syl;   /* 6 unless v100008 */
     float sp_per_k[5] = {0};
     for (int k = 0; k < 5; ++k) {
         if (av->w_sp[k] == 0.0f) continue;
@@ -755,14 +841,23 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
 
     /* 4-cell ccos: rows from ctx[0,1,3,4], cols from voice+0xc0[uid*4+k]
      * (signed bytes; sentinel 0xFF -> -1 wraps to previous row last col). */
-    int32_t sl0 = s_ctx_remap(ctx->ctx[0], n_labels);
-    int32_t sl1 = s_ctx_remap(ctx->ctx[1], n_labels);
-    int32_t sl2 = s_ctx_remap(ctx->ctx[3], n_labels);
-    int32_t sl3 = s_ctx_remap(ctx->ctx[4], n_labels);
-    int32_t pc0 = (int32_t)(int8_t)u_rec.phone_ctx[0];
-    int32_t pc1 = (int32_t)(int8_t)u_rec.phone_ctx[1];
-    int32_t pc2 = (int32_t)(int8_t)u_rec.phone_ctx[2];
-    int32_t pc3 = (int32_t)(int8_t)u_rec.phone_ctx[3];
+    int32_t sl0 = s_ctx_remap(av, ctx->ctx[0], n_labels);
+    int32_t sl1 = s_ctx_remap(av, ctx->ctx[1], n_labels);
+    int32_t sl2 = s_ctx_remap(av, ctx->ctx[3], n_labels);
+    int32_t sl3 = s_ctx_remap(av, ctx->ctx[4], n_labels);
+    int32_t pc0, pc1, pc2, pc3;
+    if (av->ctx4) {
+        /* v100005: derived, pre-remapped ccos-labl columns (voice+0xc4). */
+        pc0 = (int32_t)(int8_t)av->ctx4[uid * 4u + 0u];
+        pc1 = (int32_t)(int8_t)av->ctx4[uid * 4u + 1u];
+        pc2 = (int32_t)(int8_t)av->ctx4[uid * 4u + 2u];
+        pc3 = (int32_t)(int8_t)av->ctx4[uid * 4u + 3u];
+    } else {
+        pc0 = (int32_t)(int8_t)u_rec.phone_ctx[0];
+        pc1 = (int32_t)(int8_t)u_rec.phone_ctx[1];
+        pc2 = (int32_t)(int8_t)u_rec.phone_ctx[2];
+        pc3 = (int32_t)(int8_t)u_rec.phone_ctx[3];
+    }
     float ccos4 = 0.0f;
     if (sl0 >= 0)
         ccos4 += ccos_cell_signed(av->ccos, (uint32_t)hp_remap, 0, sl0, pc0);
@@ -876,4 +971,50 @@ void spfy_anchor_voice_set_default_weights(spfy_anchor_voice_t *av)
     av->dat_98a24 = 50.0f;
     av->dat_98528 = 10000.0f;
     av->dat_8e9857c = 1.0f;
+}
+
+void spfy_anchor_voice_set_weights_from_vcf(spfy_anchor_voice_t *av,
+                                            const spfy_vcf_t *vcf)
+{
+    if (!av) return;
+    /* Seed with the engine's built-in defaults, then let the VCF override.
+     * A missing param must keep the built-in value, which is why every
+     * lookup passes the current field as its fallback. */
+    spfy_anchor_voice_set_default_weights(av);
+    if (!vcf) return;
+
+    /* Slots 2 and 3 are SWAPPED relative to the obvious reading of the VCF
+     * key names, matching the matrix order in vcf_matrix.c (KIND_NAME[2] =
+     * sylInWordCosts, KIND_NAME[3] = wordInPhraseCosts). Confirmed against
+     * the engine's own per-voice weight dump (inner_scorer `weights.sp`):
+     *   Tom  [0.05, 0.05, 0.05, 0.05, 0   ]  -- all equal, tells us nothing
+     *   Jill [0.2,  0.5,  0,    0.2,  0.3 ]
+     * and Jill's VCF has SYL_IN_WORD=0, WORD_IN_PHRASE=0.2. So slot 2 is
+     * the sylInWord weight and slot 3 the wordInPhrase weight. Tom's four
+     * identical values made this unobservable on the Tom corpus. */
+    av->w_sp[0] = spfy_vcf_f32(vcf, "PHRASE_POS_MISMATCH_COST",    av->w_sp[0]);
+    av->w_sp[1] = spfy_vcf_f32(vcf, "STRESS_MISMATCH_COST",        av->w_sp[1]);
+    av->w_sp[2] = spfy_vcf_f32_alias(vcf, "SYLL_IN_WORD_MISMATCH_COST",
+                                          "SYL_IN_WORD_MISMATCH_COST",
+                                          av->w_sp[2]);
+    av->w_sp[3] = spfy_vcf_f32(vcf, "WORD_IN_PHRASE_MISMATCH_COST", av->w_sp[3]);
+    av->w_sp[4] = spfy_vcf_f32(vcf, "PHONE_IN_SYL_MISMATCH_COST",  av->w_sp[4]);
+
+    av->w_ccos = spfy_vcf_f32(vcf, "CONTEXT_COST_WEIGHT", av->w_ccos);
+    av->w_dur  = spfy_vcf_f32(vcf, "DUR_WEIGHT",          av->w_dur);
+    av->w_f0   = spfy_vcf_f32(vcf, "ABS_F0_WEIGHT",       av->w_f0);
+
+    /* UNIT_BIAS_WEIGHT and CHUNK_BIAS_WEIGHT are equal in all five shipped
+     * voices, so which one feeds w_3c cannot be distinguished from the
+     * data. UNIT_BIAS is the better semantic match (w_3c scales the
+     * per-unit FLAG sum). Revisit if a voice ever ships them unequal. */
+    av->w_3c = spfy_vcf_f32(vcf, "UNIT_BIAS_WEIGHT", av->w_3c);
+
+    /* Anchor prune threshold/slope. The SYL_ and WORD_ variants are also
+     * equal in every shipped voice; the anchor path covers both anchor
+     * types with one threshold, so SYL_ is used as the representative. */
+    av->anchor_norm  = spfy_vcf_f32(vcf, "SYL_CAND_PRUNE_THRESH",
+                                    av->anchor_norm);
+    av->anchor_norm2 = spfy_vcf_f32(vcf, "SYL_CAND_PRUNE_SLOPE",
+                                    av->anchor_norm2);
 }

@@ -52,6 +52,17 @@ int  spfy_fe_open(const char *vocab_json,
                   const char *tables_b_dir,
                   spfy_fe_t **out);
 
+/* Same, but selects which embedded SWIttsFe-<lang>.dll image to host.
+ * `lang` is a VCF `tts.voiceCfg.language` tag ("en-US", "fr-CA",
+ * "es-MX"); NULL or an unbuilt language falls back to the first embedded
+ * image with a warning. Which languages are available is a build-time
+ * choice -- see SPFY_FE_LANGS in src/fe_host/CMakeLists.txt. */
+int  spfy_fe_open_lang(const char *lang,
+                       const char *vocab_json,
+                       const char *tables_a_dir,
+                       const char *tables_b_dir,
+                       spfy_fe_t **out);
+
 /* Load voice-specific phoneset from a VCF file. Optional -- if not
  * called, the FE falls back to the hardcoded SAMPA->phone_id mapping
  * baked into stage_spr.c (low-quality placeholder; phone IDs won't
@@ -59,6 +70,35 @@ int  spfy_fe_open(const char *vocab_json,
  * ctx[5] values usable by spfy_synth_replay end-to-end. */
 int  spfy_fe_set_voice_vcf(spfy_fe_t  *fe,
                             const char *vcf_path);
+
+/* Supply the voice's phone-symbol -> engine-phone-id table, in the VIN's
+ * feat["name"] order. `names` must outlive the FE (spfy_voice_t owns it
+ * via its spfy_phone_order_t). Without this the FE uses the compiled-in
+ * en-US ARPAbet table, which is correct for en-US but leaves fr-CA and
+ * es-MX phones unmapped. Returns 0 on success. */
+int  spfy_fe_set_phone_names(spfy_fe_t   *fe,
+                             char *const *names,
+                             uint32_t     n);
+
+/* Enable the FE's ESPR output mode using this voice's config. The hosted
+ * backend builds and feeds the exact control header the real engine sends
+ * (\!SWIcv<version> \!SWIcg<gender> \!SWIcn<name> \!SWIcl<phoneset>
+ * \!SWIespr1 \!SWIwd0), which makes the FE emit the engine's fully-reduced
+ * phones (barred-i `ix`, flapped `dx`) directly into consprout. When this
+ * succeeds the backend ALSO disables the built-in R1/R3/flap heuristic
+ * (fe_parse_set_refine(0)), since the FE now does that work exactly.
+ *
+ * Values come straight from the VCF (tts.voiceCfg.{name,gender,phoneset,
+ * version}). The phoneset is what carries the reduction: "swi_plus_ix" for
+ * en-US, "swi" for the es-MX/fr-CA voices. NULL fields fall back to the
+ * en-US defaults. Returns 0 if ESPR was enabled, nonzero if the backend
+ * does not support it (in-house / emulator stubs) -- in which case the
+ * heuristic stays on. */
+int  spfy_fe_set_espr_config(spfy_fe_t  *fe,
+                             const char *name,
+                             const char *gender,
+                             const char *phoneset,
+                             const char *version);
 
 void spfy_fe_close(spfy_fe_t *fe);
 

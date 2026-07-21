@@ -40,3 +40,4 @@ installer/dist/
 *.mp3
 examples/
 reveng/spfy4/
+generate_archive.bat

@@ -14,20 +14,16 @@
  *   voice+0x608[hp_id] = label_idx                  if name ended in '1' (LEFT)
  *                      = label_idx + num_labels     otherwise            (RIGHT)
  *
- * For Tom, phone_center (0..45) aligns with the ccos label set, so the
- * mapping is essentially identity:
- *     L[phone_center]      = phone_center
- *     hp_class(phone, is_first_half) = phone + (is_first_half ? 0 : N)
- *
- * For voices where phone_center and label_idx don't align, the engine
- * looks up the halfphone's NAME in the labl list. We don't yet have a
- * halfphone-name source from the VIN -- the engine's `voice+0x28`
- * num_halfphones array is populated from a chunk we haven't decoded.
- * Until then, this loader is Tom-specific (identity L[], straightforward
- * hp_class[]).
+ * The engine builds these by looking the half-phone's NAME up in the labl
+ * list. The half-phone-name source IS in the VIN -- it is the feat["name"]
+ * table ("aa1","aa2",...) -- so the mapping is fully derivable per voice;
+ * see phone_order.h. The identity shortcut that used to live here is
+ * correct only for Jill/Felix/Javier, whose labl order already matches
+ * feat order. Tom needs a 3-cycle on d/dh/dx plus an en/er swap, and
+ * Paulina permutes 28 of its 31 labels.
  *
  * Public surface: a flat phone_id -> label_id table plus a flat
- * (phone_center * 2 + is_first_half) -> hp_class table. Both 8-bit indices
+ * (phone_center * 2 + side) -> hp_class table. Both 8-bit indices
  * since values fit in [0, 2*N-1] = [0, 93] for Tom. */
 
 typedef struct {
@@ -37,9 +33,14 @@ typedef struct {
     uint32_t  n_hp_entries;   /* = 2*n_labels */
 } spfy_voice_maps_t;
 
-/* Build the L[] and hp_class[] tables from a loaded ccos. Tom-specific
- * (assumes phone_center aligns with label index). Returns SPFY_E_NOTSUP if
- * the voice's halfphone naming isn't recoverable from chunks alone. */
+/* Build L[] and hp_class[] using the voice's real phone/label name tables.
+ * This is the correct entry point for any voice. */
+int  spfy_voice_maps_build_from_vin(const spfy_vin_t *vin,
+                                    const spfy_ccos_t *ccos,
+                                    spfy_voice_maps_t *out);
+
+/* Legacy: assumes phone_center == label_idx. Correct only for voices whose
+ * ccos label order matches feat["name"] order. Prefer the _from_vin form. */
 int  spfy_voice_maps_build(const spfy_ccos_t *ccos, spfy_voice_maps_t *out);
 void spfy_voice_maps_free(spfy_voice_maps_t *m);
 
