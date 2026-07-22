@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../common/le.h"
+
 /* CART tree evaluator (durt + f0tr).
  *
  * On disk, both chunks share the format:
@@ -30,11 +32,18 @@
  * '`tree` wire layout' for the full spec.
  */
 
+/* `values` points into the VIN buffer at an arbitrary chunk offset, so it
+ * is held as raw bytes and read through spfy_ques_value(). See common/le.h. */
 typedef struct {
-    uint32_t        type;       /* 1..9; see q_type table in README_TECHNICAL */
-    uint32_t        n_values;
-    const uint32_t *values;     /* LE u32 array, points into VIN buffer */
+    uint32_t       type;        /* 1..9; see q_type table in README_TECHNICAL */
+    uint32_t       n_values;
+    const uint8_t *values;      /* LE u32 array, points into VIN buffer */
 } spfy_ques_t;
+
+static inline uint32_t spfy_ques_value(const spfy_ques_t *q, uint32_t i)
+{
+    return spfy_le_u32(q->values + (size_t)i * 4u);
+}
 
 typedef struct {
     /* For branches: q_index >= 0, yes_child >= 0, no_child >= 0

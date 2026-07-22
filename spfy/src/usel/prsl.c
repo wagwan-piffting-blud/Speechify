@@ -54,7 +54,7 @@ int spfy_prsl_load(const spfy_vin_t *vin, spfy_prsl_t *out)
         }
         groups[g].context_key  = key;
         groups[g].n_candidates = n_cand;
-        groups[g].candidates   = (const uint32_t *)p;
+        groups[g].candidates   = p;
         p += n_cand * 4u;
 
         if (g > 0 && key <= prev_key) check_monotonic = 0;
@@ -78,7 +78,7 @@ void spfy_prsl_free(spfy_prsl_t *p)
 }
 
 int spfy_prsl_lookup(const spfy_prsl_t *p, uint32_t context_key,
-                     const uint32_t **cands, uint32_t *n_cands)
+                     const uint8_t **cands, uint32_t *n_cands)
 {
     if (!p || !cands || !n_cands) return SPFY_E_INVAL;
     *cands = NULL; *n_cands = 0;

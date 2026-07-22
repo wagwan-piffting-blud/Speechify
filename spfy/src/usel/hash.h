@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../common/le.h"
 #include "../voice/voice.h"
 
 /* Join-cost hash: precomputed (uid_left, uid_right) -> f32 join cost.
@@ -29,13 +30,33 @@
  * Tom: n_rows=692190, n_cells=2416481.
  */
 
+/* The three arrays alias the VIN buffer at whatever offset the RIFF layout
+ * put the chunk, so they are held as raw bytes and read through the
+ * accessors below rather than as `const uint32_t *` / `const float *`.
+ * See common/le.h for why (32-bit ARM faults on the float case). */
 typedef struct {
-    uint32_t        n_rows;
-    uint32_t        n_cells;
-    const uint32_t *rows;     /* aliases VIN buffer; not owned */
-    const uint32_t *cells_A;  /* aliases VIN buffer; uid_right_owner */
-    const float    *cells_B;  /* aliases VIN buffer; join cost */
+    uint32_t       n_rows;
+    uint32_t       n_cells;
+    const uint8_t *rows;      /* aliases VIN buffer; not owned; u32[n_rows] */
+    const uint8_t *cells_A;   /* aliases VIN buffer; uid_right_owner, u32[] */
+    const uint8_t *cells_B;   /* aliases VIN buffer; join cost, f32[] */
 } spfy_hash_t;
+
+/* Element accessors. Callers index by element, not byte. */
+static inline uint32_t spfy_hash_row(const spfy_hash_t *h, uint32_t i)
+{
+    return spfy_le_u32(h->rows + (size_t)i * 4u);
+}
+
+static inline uint32_t spfy_hash_cell_a(const spfy_hash_t *h, uint64_t i)
+{
+    return spfy_le_u32(h->cells_A + (size_t)i * 4u);
+}
+
+static inline float spfy_hash_cell_b(const spfy_hash_t *h, uint64_t i)
+{
+    return spfy_le_f32(h->cells_B + (size_t)i * 4u);
+}
 
 /* Load hash sub-chunks from VIN. Aliases the VIN buffer; do not free vin
  * while using out. */

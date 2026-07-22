@@ -150,7 +150,8 @@ int main(int argc, char **argv)
                     "engine_cost=%.6g  rows[r]=%u\n",
                     uid_left, uid_right, cost_eng,
                     (uint32_t)uid_right < h.n_rows
-                       ? h.rows[(uint32_t)uid_right] : 0xFFFFFFFFu);
+                       ? spfy_hash_row(&h, (uint32_t)uid_right)
+                       : 0xFFFFFFFFu);
             }
         } else {
             ++n_miss_mismatch;

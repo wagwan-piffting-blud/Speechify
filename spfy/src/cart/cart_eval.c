@@ -10,7 +10,7 @@ int spfy_ques_eval(const spfy_ques_t *q, uint32_t value)
      * Question value-sets are small (median ~5 entries, max ~50) so linear
      * scan is fine. */
     for (uint32_t i = 0; i < q->n_values; ++i) {
-        if (q->values[i] == value) return 1;
+        if (spfy_ques_value(q, i) == value) return 1;
     }
     return 0;
 }

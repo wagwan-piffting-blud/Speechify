@@ -218,13 +218,13 @@ static int do_prsl(const char *vin_path, uint32_t key)
                p.groups[p.n_groups - 1].n_candidates);
     }
 
-    const uint32_t *cands = NULL; uint32_t n_cands = 0;
+    const uint8_t *cands = NULL; uint32_t n_cands = 0;
     rc = spfy_prsl_lookup(&p, key, &cands, &n_cands);
     if (rc == SPFY_OK) {
         printf("\nlookup key=%u -> %u candidates", key, n_cands);
         printf("\n  ");
         for (uint32_t i = 0; i < n_cands && i < 16; ++i) {
-            printf("%u ", cands[i]);
+            printf("%u ", spfy_prsl_cand(cands, i));
         }
         if (n_cands > 16) printf("...");
         printf("\n");
@@ -256,7 +256,7 @@ static int do_prsl(const char *vin_path, uint32_t key)
             { "left  only     ", l * 10000u },
         };
         for (size_t i = 0; i < sizeof probes / sizeof *probes; ++i) {
-            const uint32_t *cc = NULL; uint32_t nn = 0;
+            const uint8_t *cc = NULL; uint32_t nn = 0;
             int hit = spfy_prsl_lookup(&p, probes[i].k, &cc, &nn) == SPFY_OK;
             printf("  %s = %u  -> %s (n_cand=%u)\n",
                    probes[i].name, probes[i].k,
@@ -585,15 +585,15 @@ int main(int argc, char **argv)
         }
         printf("  n_rows=%u n_cells=%u\n", h.n_rows, h.n_cells);
         if (curr < h.n_rows) {
-            uint32_t ro = h.rows[curr];
+            uint32_t ro = spfy_hash_row(&h, curr);
             uint64_t target_idx = (uint64_t)ro + prev;
             printf("  rows[%u]=%u  target_idx=%llu\n", curr, ro,
                    (unsigned long long)target_idx);
             if (target_idx < h.n_cells) {
                 printf("  cells_A[%llu]=%u cells_B=%g\n",
                        (unsigned long long)target_idx,
-                       h.cells_A[target_idx],
-                       (double)h.cells_B[target_idx]);
+                       spfy_hash_cell_a(&h, target_idx),
+                       (double)spfy_hash_cell_b(&h, target_idx));
             }
             uint64_t lo = (ro > 16) ? ro - 16 : 0;
             uint64_t hi = ro + 32;
@@ -602,8 +602,8 @@ int main(int argc, char **argv)
                    (unsigned long long)lo, (unsigned long long)hi);
             for (uint64_t i = lo; i < hi; ++i) {
                 printf("    [%llu] A=%u B=%g delta=%lld\n",
-                       (unsigned long long)i, h.cells_A[i],
-                       (double)h.cells_B[i],
+                       (unsigned long long)i, spfy_hash_cell_a(&h, i),
+                       (double)spfy_hash_cell_b(&h, i),
                        (long long)((int64_t)i - (int64_t)ro));
             }
         }
@@ -612,14 +612,14 @@ int main(int argc, char **argv)
         int rc2 = spfy_hash_lookup(&h, curr, prev, &cost2);
         printf("rc=%d cost=%g\n", rc2, (double)cost2);
         if (prev < h.n_rows) {
-            uint32_t ro2 = h.rows[prev];
+            uint32_t ro2 = spfy_hash_row(&h, prev);
             uint64_t ti2 = (uint64_t)ro2 + curr;
             printf("  rows[%u]=%u  reverse_idx=%llu\n", prev, ro2,
                    (unsigned long long)ti2);
             if (ti2 < h.n_cells) {
                 printf("  cells_A[%llu]=%u cells_B=%g\n",
-                       (unsigned long long)ti2, h.cells_A[ti2],
-                       (double)h.cells_B[ti2]);
+                       (unsigned long long)ti2, spfy_hash_cell_a(&h, ti2),
+                       (double)spfy_hash_cell_b(&h, ti2));
             }
         }
         spfy_hash_free(&h); spfy_vin_free(&vin);

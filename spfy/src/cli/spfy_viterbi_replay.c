@@ -75,6 +75,7 @@
 
 #include <spfy/spfy.h>
 
+#include "../common/le.h"
 #include "../voice/voice.h"
 #include "../voice/unit_table.h"
 #include "../voice/ccos.h"
@@ -1007,8 +1008,9 @@ typedef struct {
      * the CCOS-gate hash-miss path (FUN_08e8b620 @ 0x08e8b7f8). Same
      * shape as spfy_synth.c's join_ctx_t — see plan 02-02 §"THIRD scope
      * revision" in 02-DP-AUDIT.md. When curve == NULL the dag callback
-     * falls back to miss_default for any hash miss (legacy behaviour). */
-    const float             *curve;
+     * falls back to miss_default for any hash miss (legacy behaviour).
+     * Raw bytes read via spfy_le_f32() -- see common/le.h. */
+    const uint8_t           *curve;
     int32_t                  curve_max_idx;
     int32_t                  curve_sub_off;
     float                    f0_edge_change_weight;
@@ -1040,7 +1042,7 @@ static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
             jc->curve_max_idx = (int32_t)mx;
             jc->curve_sub_off = (int32_t)off;
         } else if (fcc == 0x61746164u /* 'data' LE */) {
-            jc->curve = (const float *)body;
+            jc->curve = body;
         }
         p = body + sz;
         if (sz & 1) ++p;
@@ -1126,14 +1128,15 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
         int32_t idx = (int32_t)curr_c6c - jc->curve_sub_off - prev_c7c;
         if (idx < 0) idx = 0;
         else if (idx >= jc->curve_max_idx) idx = jc->curve_max_idx - 1;
-        curve_val = jc->f0_edge_change_weight * jc->curve[idx];
+        float curve_raw = spfy_le_f32(jc->curve + (size_t)idx * 4u);
+        curve_val = jc->f0_edge_change_weight * curve_raw;
         if (getenv("SPFY_DAG_JOIN_TRACE")) {
             fprintf(stderr,
                     "  dag-gate fire prev=(uid=%u,c7c=%d,c80=%d) "
                     "curr=(uid=%u,c6c=%u) idx=%d curve=%.4f -> %.4f\n",
                     prev_uid_join_key, prev_c7c, prev_c80,
                     curr_uid, curr_c6c, idx,
-                    (double)jc->curve[idx],
+                    (double)curve_raw,
                     (double)(jc->missing_join_cost + curve_val));
         }
     }
@@ -1361,7 +1364,7 @@ static int prsl_try_lookup(const spfy_prsl_t *prsl,
                            const spfy_unit_record_t *l,
                            const spfy_unit_record_t *c,
                            const spfy_unit_record_t *r,
-                           const uint32_t **out_cands,
+                           const uint8_t **out_cands,
                            uint32_t *out_n,
                            uint32_t *used_key)
 {
@@ -1492,7 +1495,7 @@ static int replay_utterance(const uid_list_t              *chosen,
     long u_slots_pool_matches_capture = 0;
 
     for (uint32_t s = 0; s < n_slots; ++s) {
-        const uint32_t *pcands   = NULL;
+        const uint8_t  *pcands   = NULL;   /* u32[] aliasing VIN; see prsl.h */
         uint32_t        pn       = 0;
         uint32_t        used_key = 0;
         int             rc_p     = SPFY_E_OOB;
@@ -1522,7 +1525,9 @@ static int replay_utterance(const uid_list_t              *chosen,
         if (rc_p == SPFY_OK) {
             u_slots_prsl_hit++;
             for (uint32_t i = 0; i < pn; ++i)
-                if (pcands[i] == slot_uids[s]) { chosen_in_pool = 1; break; }
+                if (spfy_prsl_cand(pcands, i) == slot_uids[s]) {
+                    chosen_in_pool = 1; break;
+                }
             if (chosen_in_pool) u_slots_chosen_in_pool++;
 
             /* If we have a captured pool, sanity check: same UIDs (any
@@ -1533,7 +1538,9 @@ static int replay_utterance(const uid_list_t              *chosen,
                 if (cs->n_cands == pn) {
                     int eq = 1;
                     for (uint32_t i = 0; i < pn; ++i) {
-                        if (cs->uids[i] != pcands[i]) { eq = 0; break; }
+                        if (cs->uids[i] != spfy_prsl_cand(pcands, i)) {
+                            eq = 0; break;
+                        }
                     }
                     if (eq) u_slots_pool_matches_capture++;
                 }
@@ -1551,7 +1558,9 @@ static int replay_utterance(const uid_list_t              *chosen,
                 int present = 0;
                 if (rc_p == SPFY_OK) {
                     for (uint32_t i = 0; i < pn; ++i)
-                        if (pcands[i] == pp) { present = 1; break; }
+                        if (spfy_prsl_cand(pcands, i) == pp) {
+                            present = 1; break;
+                        }
                 }
                 if (!present && pp != slot_uids[s]) {
                     prev_plus_one = pp;
@@ -1576,7 +1585,8 @@ static int replay_utterance(const uid_list_t              *chosen,
 
         uint32_t k = 0;
         if (rc_p == SPFY_OK) {
-            for (uint32_t i = 0; i < pn; ++i) cand_buf[s][k++] = pcands[i];
+            for (uint32_t i = 0; i < pn; ++i)
+                cand_buf[s][k++] = spfy_prsl_cand(pcands, i);
         }
         if (!chosen_in_pool)   cand_buf[s][k++] = slot_uids[s];
         if (add_prev_plus_one) cand_buf[s][k++] = prev_plus_one;

@@ -58,9 +58,9 @@ int spfy_hash_load(const spfy_vin_t *vin, spfy_hash_t *out)
         return SPFY_E_FORMAT;
     }
 
-    out->rows    = (const uint32_t *)rows_ptr;
-    out->cells_A = (const uint32_t *)cell_ptr;
-    out->cells_B = (const float    *)(cell_ptr + (size_t)out->n_cells * 4u);
+    out->rows    = rows_ptr;
+    out->cells_A = cell_ptr;
+    out->cells_B = cell_ptr + (size_t)out->n_cells * 4u;
     return SPFY_OK;
 }
 
@@ -86,13 +86,13 @@ int spfy_hash_lookup(const spfy_hash_t *h,
      * the rows[] value. The README's "0 means no entry" was a partial
      * truth; only valid for rows[169579..] padding which the engine never
      * queries. */
-    uint32_t row_offset = h->rows[uid_right];
+    uint32_t row_offset = spfy_hash_row(h, uid_right);
     uint64_t idx = (uint64_t)row_offset + uid_left;
     if (idx >= h->n_cells) return SPFY_E_OOB;
 
     /* Verification key: cells_A[index] must equal uid_right (CORRECTED
      * 2026-05-05 -- was previously documented as uid_left). */
-    if (h->cells_A[idx] != uid_right) return SPFY_E_OOB;
-    *out_cost = h->cells_B[idx];
+    if (spfy_hash_cell_a(h, idx) != uid_right) return SPFY_E_OOB;
+    *out_cost = spfy_hash_cell_b(h, idx);
     return SPFY_OK;
 }

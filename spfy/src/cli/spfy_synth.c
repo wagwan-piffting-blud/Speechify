@@ -52,6 +52,7 @@
  * no-op macro that compiles away — the synth path stays byte-identical and
  * full-speed. Only the spfy_synth_trace target builds this file with
  * -DSPFY_TRACE=1, turning the emits into NDJSON written to the trace sink. */
+#include "../common/le.h"
 #include "../common/log.h"
 
 /* In-house FE — used when SPFY_FE_INTERNAL=1 to bypass the SWIttsFe
@@ -588,8 +589,12 @@ typedef struct {
      *
      * curve points into VIN bytes; sub_off is signed (Tom: -50);
      * max_idx is the curve length (Tom: 100). When curve == NULL the
-     * callback uses miss_default for any miss (legacy behaviour). */
-    const float             *curve;
+     * callback uses miss_default for any miss (legacy behaviour).
+     *
+     * Held as raw bytes and read via spfy_le_f32(): the `data` sub-chunk
+     * lands at an arbitrary VIN offset, and a misaligned float load is a
+     * SIGBUS on 32-bit ARM. See common/le.h. */
+    const uint8_t           *curve;
     int32_t                  curve_max_idx;
     int32_t                  curve_sub_off;
     float                    f0_edge_change_weight;
@@ -630,11 +635,21 @@ static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
             jc->curve_max_idx = (int32_t)mx;
             jc->curve_sub_off = (int32_t)off;
         } else if (fcc == 0x61746164u /* 'data' LE */) {
-            jc->curve = (const float *)body;
+            jc->curve = body;
         }
         p = body + sz;
         if (sz & 1) ++p;
     }
+}
+
+/* Read candidate i from whichever candidate pool is live for this slot.
+ * `prsl_pool` aliases the VIN buffer (possibly unaligned, LE u32); the
+ * hp-bucket fallback `bucket_pool` is an owned, aligned uint32_t array.
+ * Exactly one of the two is non-NULL. */
+static uint32_t pool_cand(const uint8_t *prsl_pool,
+                          const uint32_t *bucket_pool, uint32_t i)
+{
+    return prsl_pool ? spfy_prsl_cand(prsl_pool, i) : bucket_pool[i];
 }
 
 /* Engine-faithful FUN_08e8b620 join cost. Same-rec adjacent
@@ -684,7 +699,8 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
             int32_t idx = (int32_t)curr_c6c - jc->curve_sub_off - prev_c7c;
             if (idx < 0) idx = 0;
             else if (idx >= jc->curve_max_idx) idx = jc->curve_max_idx - 1;
-            curve_val = jc->f0_edge_change_weight * jc->curve[idx];
+            curve_val = jc->f0_edge_change_weight
+                      * spfy_le_f32(jc->curve + (size_t)idx * 4u);
             path = "miss_gate";
         }
         cost = jc->missing_join_cost + curve_val;
@@ -2052,7 +2068,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         uint32_t hp_bound = v->phone_order.n_phones
                               ? v->phone_order.n_phones * 2u : 92u;
         uint32_t ck = spfy_prsl_context_key(ctx5[1], ctx5[2], ctx5[3]);
-        const uint32_t *pool = NULL;
+        /* Two possible pool provenances, kept apart because they differ in
+         * alignment: PRSL hands back a u32[] aliasing the VIN buffer at an
+         * arbitrary offset (read via spfy_prsl_cand), while the hp-bucket
+         * fallback below is an owned, naturally-aligned array. Exactly one
+         * is non-NULL; see pool_cand(). */
+        const uint8_t  *pool       = NULL;
+        const uint32_t *pool_bucket = NULL;
         uint32_t pool_n = 0;
         spfy_prsl_lookup(&v->prsl, ck, &pool, &pool_n);
         if (pool_n == 0 && !getenv("SPFY_NO_PRSL_92_FALLBACK")) {
@@ -2111,7 +2133,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             uint32_t dump_n = pool_n < cand_cap ? pool_n : cand_cap;
             for (uint32_t i = 0; i < dump_n; ++i) {
                 fprintf(stderr, "%s%u", i ? "," : "",
-                        pool ? pool[i] : SILENCE_SENTINEL_UID);
+                        pool ? spfy_prsl_cand(pool, i) : SILENCE_SENTINEL_UID);
             }
             fprintf(stderr, "]}\n");
         }
@@ -2120,7 +2142,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         /* Triphone miss: fall back to all v->units with this phone_center+side. */
         uint32_t fb_hp = ctx5[2];
         if (pool_n == 0 && fb_hp < v->hpc_buckets && v->bucket_n[fb_hp] > 0) {
-            pool   = v->bucket[fb_hp];
+            pool        = NULL;          /* switch provenance; see pool_cand */
+            pool_bucket = v->bucket[fb_hp];
             pool_n = v->bucket_n[fb_hp];
             if (pool_n > MAX_CANDS_PER_SLOT) pool_n = MAX_CANDS_PER_SLOT;
         }
@@ -2157,9 +2180,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             rc = SPFY_E_NOMEM; goto fail;
         }
         for (uint32_t i = 0; i < pool_n; ++i) {
-            cbuf[hp][i] = pool[i];
+            uint32_t cand_uid = pool_cand(pool, pool_bucket, i);
+            cbuf[hp][i] = cand_uid;
             spfy_unit_record_t ur;
-            if (spfy_unit_record_get(&v->units, pool[i], &ur) == SPFY_OK) {
+            if (spfy_unit_record_get(&v->units, cand_uid, &ur) == SPFY_OK) {
                 /* mem+0x10 = disk+0x11 = f0_end, mem+0x11 = disk+0x12 =
                  * f0_mid, mem+0x0f = disk+0x10 = f0_start. */
                 cand_c6c[hp][i] = ur.f0_end;
@@ -3281,7 +3305,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             fprintf(stderr, "{\"f0_curve\":1,\"n\":%d,\"sub_off\":%d,\"vals\":[",
                     jc.curve_max_idx, jc.curve_sub_off);
             for (int i = 0; i < jc.curve_max_idx; ++i)
-                fprintf(stderr, "%s%.4f", i ? "," : "", (double)jc.curve[i]);
+                fprintf(stderr, "%s%.4f", i ? "," : "",
+                        (double)spfy_le_f32(jc.curve + (size_t)i * 4u));
             fprintf(stderr, "]}\n");
         }
     }

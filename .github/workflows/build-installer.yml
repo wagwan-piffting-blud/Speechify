@@ -1,30 +1,52 @@
-# Build the Speechify installers (Windows + Linux).
+# Build the Speechify installers (Windows + Linux + macOS).
 #
 # Triggers:
-#   * Branch push to main  — builds both platforms and publishes a
-#     dated GitHub Release with the Windows .exe and the Linux .tar.gz.
+#   * Branch push to main  — builds every target and publishes a dated
+#     GitHub Release with the Windows .exe plus one tarball per unix
+#     target.
 #   * workflow_dispatch     — manual trigger; uploads as artifacts only,
 #     no release.
 #
 # Jobs:
-#   * setup          — resolves the date-based version once so both
-#                      builds and the release agree on the string.
+#   * setup          — resolves the date-based version once so every
+#                      build and the release agree on the string.
 #   * build-windows  — msys2 mingw32/mingw64 + Inno Setup. Produces
 #                      spfy-setup-<version>.exe (registers SAPI, drops
 #                      the FE data into %USERPROFILE%\Documents).
-#   * build-linux    — ubuntu-latest with gcc-multilib (-m32; the FE
-#                      DLL we host is 32-bit Windows PE so the loader
-#                      must run in a 32-bit address space). No SAPI —
-#                      not everyone runs Wine. Produces
-#                      spfy-linux-x86-<version>.tar.gz.
-#   * release        — runs after both builds succeed on push events;
-#                      attaches both packages to one Release.
+#   * build-unix     — matrix over linux-x86 (i386), linux-x86_64,
+#                      linux-armv7, linux-arm64, macos-arm64 and
+#                      macos-x86_64. No SAPI (Windows COM only); each leg
+#                      produces spfy-<target>-<version>.tar.gz. fail-fast
+#                      is off so one target can't hide the others' results.
+#   * release        — publishes on push once setup + build-windows
+#                      succeed. Unix tarballs are attached if they built;
+#                      any that didn't are annotated as warnings, so a
+#                      single failed/unavailable leg yields a partial
+#                      release rather than none at all.
 #
 # Toolchains:
 #   * Windows: msys2 mingw32 (i686) for the main project + 32-bit SAPI
 #     DLL, msys2 mingw64 (x86_64) for the 64-bit SAPI shim, Inno Setup 6
 #     via Chocolatey.
-#   * Linux: stock gcc with gcc-multilib (i386 cross), cmake, ninja.
+#   * Linux: stock gcc, cmake, ninja. gcc-multilib is needed ONLY by the
+#     i386 leg, and only for its 32-bit libc.
+#   * Linux armv7: no hosted 32-bit ARM runner exists, so this leg builds
+#     inside a qemu-emulated debian:bookworm container on an x86_64 runner.
+#     Emulated, therefore slow — see its timeout in the matrix.
+#   * macOS: AppleClang + brew ninja.
+#
+# Every unix leg — native or emulated — runs spfy/ci/build_unix.sh, so the
+# legs cannot drift apart in flags, build type, or pass criteria. That
+# script also VERIFIES: it synthesizes the reference phrase through
+# en-US/tom (committed) and fails the leg unless the WAV's sha256 matches.
+# Byte-exactness is this project's ship gate, and a build-only check would
+# have gone green through the entire armv7 SIGBUS — that bug only ever
+# showed up at runtime.
+#
+# Every target drives the front-end through the src/host_emu x86
+# interpreter (the native PE loader was retired 2026-07-22), so nothing
+# here has to execute 32-bit x86 code natively — that is what lets the
+# same source build byte-identical output on arm64 and x86_64 alike.
 #
 # The FE DLL (SWIttsFe-en-US.dll) is committed at bin/ in the repo and
 # is embedded into spfy_sapi.dll + spfy_synth(.exe) at build time via
@@ -230,16 +252,18 @@ jobs:
   #
   # FE backend: every target drives the real SWIttsFe-<lang>.dll through
   # the src/host_emu x86 interpreter — the only backend since the native
-  # PE loader was retired 2026-07-22. Verified byte-identical across
-  # Windows x86/x64, Linux x86_64 and Linux arm64 (same WAV sha256).
-  # linux-x86 (i386) is still built for 32-bit-only CPUs and VMs, and
-  # still needs gcc-multilib for its 32-bit libc.
+  # PE loader was retired 2026-07-22. Verified byte-identical (same WAV
+  # sha256) on Windows x86/x64, Linux x86/x86_64, Linux arm64, Linux
+  # armv7 and macOS arm64. linux-x86 (i386) is still built for
+  # 32-bit-only CPUs and VMs, and still needs gcc-multilib for its
+  # 32-bit libc.
   #
-  # SPFY_STRICT_FP pins x87 80-bit semantics for bit-exactness. It is a
-  # no-op on arm64 (no x87 exists), and the CMake probe drops individual
-  # flags a compiler rejects (AppleClang has no -mfpmath=387), warning
-  # rather than failing. arm64 output is therefore expected to match on
-  # unit selection (integer) but may differ in low audio bits.
+  # SPFY_STRICT_FP pins x87 80-bit semantics. It is a no-op on ARM (no
+  # x87 exists), and the CMake probe drops individual flags a compiler
+  # rejects (AppleClang has no -mfpmath=387), warning rather than
+  # failing. Measured 2026-07-22: x87 pinning is NOT load-bearing here —
+  # ARM matches bit-for-bit without it, because the unit-selection path
+  # is integer and the audio path is IEEE-stable.
   # --------------------------------------------------------------------
 
   build-unix:
@@ -250,43 +274,87 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `timeout` is per-leg (see timeout-minutes below). Queue time
+          # counts against it, so these are wall-clock budgets, not just
+          # build time. 15 is a placeholder for the legs whose real
+          # duration hasn't been measured — tighten to ~2x observed once
+          # you've read them off a green run.
           - id: linux-x86
             runner: ubuntu-latest
             cflags: "-m32 -D_GNU_SOURCE=1"
             ldflags: "-m32"
             multilib: true
+            qemu: ""
+            image: ""
+            timeout: 15
           - id: linux-x86_64
             runner: ubuntu-latest
             cflags: "-D_GNU_SOURCE=1"
             ldflags: ""
             multilib: false
+            qemu: ""
+            image: ""
+            timeout: 15
           - id: linux-arm64
             runner: ubuntu-24.04-arm
             cflags: "-D_GNU_SOURCE=1"
             ldflags: ""
             multilib: false
+            qemu: ""
+            image: ""
+            timeout: 15
+          # 32-bit ARM. There is NO hosted armv7 runner (ubuntu-24.04-arm
+          # is aarch64), so this one builds in a qemu-emulated container on
+          # an x86_64 runner. Cross-compiling would be far faster but the
+          # runner couldn't execute the result — the same objection that
+          # ruled out cross-compiling Intel macOS. debian:bookworm because
+          # the Ubuntu armhf images are unreliable.
+          #
+          # Emulation makes this the slowest leg by a wide margin; the
+          # timeout below is set from a measured local run, not a guess.
+          - id: linux-armv7
+            runner: ubuntu-latest
+            cflags: "-D_GNU_SOURCE=1"
+            ldflags: ""
+            multilib: false
+            qemu: "linux/arm/v7"
+            image: "debian:bookworm"
+            timeout: 30
           - id: macos-arm64
             runner: macos-14
             cflags: ""
             ldflags: ""
             multilib: false
+            qemu: ""
+            image: ""
+            timeout: 15
           # Intel macOS. NOT macos-13 — that image was retired 2025-12-04
           # (deprecation began 2025-09-22), and requesting a dead label
           # doesn't error, it just queues until the job times out.
           # macos-15-intel is the last Intel-based image; GitHub drops
           # x86_64 macOS entirely when it retires in Fall 2027.
+          #
+          # Measured 12m33s on 2026-07-22 — by far the slowest leg, and
+          # Intel capacity is being wound down ahead of that retirement,
+          # so give it real headroom rather than a tight cap.
           - id: macos-x86_64
             runner: macos-15-intel
             cflags: ""
             ldflags: ""
             multilib: false
+            qemu: ""
+            image: ""
+            timeout: 30
 
     runs-on: ${{ matrix.runner }}
 
-    # Queue time counts against this, so a retired/unavailable runner label
-    # fails here in 20 minutes instead of hanging for the 6-hour default and
-    # blocking the release job behind it.
-    timeout-minutes: 20
+    # Per-leg budget (matrix.timeout) rather than one flat value. Queue time
+    # counts against it, so a retired/unavailable runner label fails here
+    # instead of hanging for the 6-hour default and blocking the release
+    # behind it. A dead label burns the whole budget either way, so the fast
+    # legs stay tight for quick detection while the known-slow Intel macOS
+    # leg gets the headroom it actually needs.
+    timeout-minutes: ${{ matrix.timeout }}
 
     steps:
       - name: Checkout
@@ -295,8 +363,11 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Install toolchain (Linux)
-        if: runner.os == 'Linux'
+      # Native legs only: the emulated leg installs its own toolchain
+      # inside the container (see build_unix.sh — one `docker run` means
+      # a separate install step would be thrown away).
+      - name: Install toolchain (Linux, native)
+        if: runner.os == 'Linux' && matrix.qemu == ''
         run: |
           sudo apt-get update
           if [ "${{ matrix.multilib }}" = "true" ]; then
@@ -312,24 +383,40 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install ninja
 
-      - name: Configure
-        run: |
-          cmake -S spfy -B build-out -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="${{ matrix.cflags }}" \
-            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.ldflags }}" \
-            -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.ldflags }}" \
-            -DSPFY_STRICT_FP=ON \
-            -DSPFY_BUILD_TESTS=OFF \
-            -DSPFY_FE_HOSTED=ON
+      # Registers the qemu-user binfmt handlers on the host so the runner
+      # can exec foreign-arch binaries. Must happen on the HOST, before any
+      # cross-arch container starts — a job-level `container:` would be too
+      # late, which is why this leg shells out to `docker run` instead.
+      - name: Set up QEMU
+        if: matrix.qemu != ''
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.qemu }}
 
-      - name: Build
-        run: cmake --build build-out
+      - name: Configure and build (native)
+        if: matrix.qemu == ''
+        env:
+          SPFY_CFLAGS: ${{ matrix.cflags }}
+          SPFY_LDFLAGS: ${{ matrix.ldflags }}
+        run: bash spfy/ci/build_unix.sh
 
-      - name: Verify build outputs
+      # Same script, run under emulation. The workspace is bind-mounted, so
+      # build-out lands on the host and the packaging steps below are shared
+      # with the native legs.
+      - name: Configure and build (qemu ${{ matrix.qemu }})
+        if: matrix.qemu != ''
         run: |
-          ls -la build-out/src/cli/spfy_synth
-          file build-out/src/cli/spfy_synth
+          docker run --rm --platform "${{ matrix.qemu }}" \
+            -v "${GITHUB_WORKSPACE}:/w" -w /w \
+            -e SPFY_CFLAGS="${{ matrix.cflags }}" \
+            -e SPFY_LDFLAGS="${{ matrix.ldflags }}" \
+            -e SPFY_INSTALL_DEPS=1 \
+            -e SPFY_MULTILIB=0 \
+            "${{ matrix.image }}" \
+            bash spfy/ci/build_unix.sh
+          # Container ran as root, so build-out is root-owned; hand it back
+          # or the packaging steps below can't stage into it.
+          sudo chown -R "$(id -u):$(id -g)" build-out
 
       - name: Package tarball
         run: |
@@ -387,8 +474,8 @@ jobs:
 
     steps:
       # One pattern pull grabs the Windows installer plus every matrix
-      # tarball (linux-x86 / linux-x86_64 / linux-arm64 / macos-*), so
-      # adding a target to the matrix needs no change here.
+      # tarball (linux-x86 / linux-x86_64 / linux-armv7 / linux-arm64 /
+      # macos-*), so adding a target to the matrix needs no change here.
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -405,7 +492,7 @@ jobs:
           echo "Publishing:"
           ls -la dist/
           missing=0
-          for t in linux-x86 linux-x86_64 linux-arm64 macos-arm64 macos-x86_64; do
+          for t in linux-x86 linux-x86_64 linux-armv7 linux-arm64 macos-arm64 macos-x86_64; do
             if ! ls dist/spfy-"$t"-*.tar.gz >/dev/null 2>&1; then
               echo "::warning title=Missing target::no artifact for $t — release is partial"
               missing=$((missing + 1))
@@ -414,7 +501,7 @@ jobs:
           if [ "$missing" -gt 0 ]; then
             echo "::warning title=Partial release::$missing target(s) missing from this release"
           else
-            echo "all 5 unix targets present"
+            echo "all 6 unix targets present"
           fi
 
       - name: Resolve release tag

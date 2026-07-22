@@ -916,7 +916,7 @@ int main(int argc, char **argv)
     if (scan) {
         uint32_t lo = 0, hi = 0, cc = 0;
         if (sscanf(scan, "%u:%u:%u", &lo, &hi, &cc) == 3) {
-            uint32_t row_off = (cc < hash.n_rows) ? hash.rows[cc] : 0;
+            uint32_t row_off = (cc < hash.n_rows) ? spfy_hash_row(&hash, cc) : 0;
             fprintf(stderr,
                     "scan curr=%u rows[%u]=%u\n", cc, cc, row_off);
             for (uint32_t p = lo; p <= hi; ++p) {
@@ -924,7 +924,7 @@ int main(int argc, char **argv)
                 int hr = spfy_hash_lookup(&hash, p, cc, &c);
                 uint64_t idx = (uint64_t)row_off + p;
                 uint32_t cellA = (idx < hash.n_cells)
-                                 ? hash.cells_A[idx] : 0xFFFFFFFFu;
+                                 ? spfy_hash_cell_a(&hash, idx) : 0xFFFFFFFFu;
                 fprintf(stderr,
                         "  prev=%u idx=%llu cellA=%u rc=%d cost=%g %s\n",
                         p, (unsigned long long)idx, cellA, hr, (double)c,

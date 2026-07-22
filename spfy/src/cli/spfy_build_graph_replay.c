@@ -1144,7 +1144,7 @@ static void process_entry(const char *fe_path, const char *vit_path,
                             uint32_t cent  = ctx_table.ctx[s][2];
                             uint32_t right = ctx_table.ctx[s][3];
                             uint32_t key = spfy_prsl_context_key(left, cent, right);
-                            const uint32_t *cands = NULL;
+                            const uint8_t *cands = NULL;
                             uint32_t n_cands = 0;
                             int rc4 = spfy_prsl_lookup(prsl_voice, key,
                                                        &cands, &n_cands);
@@ -1153,7 +1153,8 @@ static void process_entry(const char *fe_path, const char *vit_path,
                             else if (n_cands != p->n_uids_per_hp[hp_idx]) pook = 0;
                             else {
                                 for (uint32_t k = 0; k < n_cands; ++k) {
-                                    if (cands[k] != p->uids_per_hp[hp_idx][k]) {
+                                    if (spfy_prsl_cand(cands, k)
+                                        != p->uids_per_hp[hp_idx][k]) {
                                         pook = 0; break;
                                     }
                                 }

@@ -54,7 +54,7 @@ static int parse_trhd(const uint8_t *data, size_t n, spfy_cart_t *c)
                 if ((size_t)(end - p) < (size_t)qs[i].n_values * 4) {
                     free(qs); return SPFY_E_FORMAT;
                 }
-                qs[i].values = (const uint32_t *)p;
+                qs[i].values = p;
                 p += qs[i].n_values * 4;
             }
             c->n_ques = n_q;
