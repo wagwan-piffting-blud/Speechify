@@ -635,7 +635,7 @@ static void trap(const char* what,uint32_t eip0){
     fprintf(stderr,"** CPU TRAP (%s) eip=0x%08x bytes=%02x %02x %02x %02x\n",what,eip0,b0,b1,b2,b3);
 }
 
-int ITRACE = 0; static int itrace_count = 0; static uint32_t g_p5 = 0;
+int ITRACE = 0; static int itrace_count = 0;
 uint64_t g_insns = 0;   // total guest instructions executed (profiling)
 uint64_t g_ophist[1024];  // PROFILING: [op] for 1-byte, [256+op2] for 0F xx (temporary)
 // focused x87 trace (env EMU_FPUTRACE=lo,hi,max)

@@ -25,12 +25,18 @@ if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "BUILD=C:\tmp\spfy_build_hosted"
 set "BIN=%SCRIPT_DIR%\..\bin"
 
+REM Match the CI / Linux configuration (Release + strict x87 FP) so this
+REM tracer is byte-for-byte comparable with them -- and faster for the viz.
+REM Override for a debugging session:  set SPFY_BUILD_TYPE=Debug
+if "%SPFY_BUILD_TYPE%"=="" set "SPFY_BUILD_TYPE=Release"
+if "%SPFY_STRICT_FP%"=="" set "SPFY_STRICT_FP=ON"
+
 if not exist "%CMAKE%" ( echo error: cmake not found at "%CMAKE%" & exit /b 1 )
 
 echo [configure] SPFY_FE_HOSTED=ON -^> "%BUILD%"
 "%CMAKE%" -S "%SCRIPT_DIR%" -B "%BUILD%" -G Ninja ^
   -DCMAKE_MAKE_PROGRAM="%NINJA%" -DCMAKE_C_COMPILER="%GCC%" ^
-  -DCMAKE_BUILD_TYPE=Debug -DSPFY_STRICT_FP=OFF -DSPFY_BUILD_TESTS=OFF ^
+  -DCMAKE_BUILD_TYPE=%SPFY_BUILD_TYPE% -DSPFY_STRICT_FP=%SPFY_STRICT_FP% -DSPFY_BUILD_TESTS=OFF ^
   -DSPFY_FE_HOSTED=ON
 if errorlevel 1 ( echo CONFIGURE FAILED & exit /b 1 )
 

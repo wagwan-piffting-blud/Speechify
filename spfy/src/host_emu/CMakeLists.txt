@@ -5,7 +5,7 @@
 # cross-platform alternative to src/host/ (which only works on x86
 # Windows). Used by:
 #
-#   - spfy/src/fe_host/  (via -DSPFY_FE_EMU=ON)        — phase 2 wiring
+#   - spfy/src/fe_host/  (the only FE backend)          — phase 2 wiring
 #   - spfy/wasm/                                        — phase 4 cross-build
 #   - D:/Android/Spfy/app/src/main/cpp/CMakeLists.txt   — phase 4 NDK build
 #
@@ -51,15 +51,35 @@ if(MSVC)
         _CRT_SECURE_NO_WARNINGS
         _CRT_NONSTDC_NO_DEPRECATE
     )
-elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    # MATCHES, not STREQUAL: AppleClang (macOS) must be covered too, and
+    # it reports its id as "AppleClang".
+    #
     # Donor declares some helpers later in the same TU (forward decls in
     # the comments); allow it without -Werror tripping. The donor also
     # casts function pointers across shim_fn signatures intentionally.
+    #
+    # The conversion-class suppressions below answer the root CMakeLists'
+    # -Wconversion / -Wsign-conversion / -Wmissing-prototypes /
+    # -Wmisleading-indentation set. They fire in bulk (~250) only on
+    # 64-bit hosts, where this file set is compiled for the first time
+    # (32-bit x86 builds take the native src/host/ loader instead). The
+    # noise is inherent to the job: an x86 decoder mixes uint8/16/32 and
+    # signed/unsigned displacements on nearly every line, and narrows
+    # between guest 32-bit words and host size_t/pointers constantly.
+    # Suppressed deliberately and target-scoped — same precedent as
+    # spfy_fe's -Wno-cast-function-type — rather than loosening the
+    # warning set for the whole build. Correctness here is held by the
+    # byte-exact audit, not by -Wconversion.
     target_compile_options(spfy_host_emu PRIVATE
         -Wno-pointer-sign
         -Wno-unused-parameter
         -Wno-unused-function
         -Wno-cast-function-type
+        -Wno-conversion
+        -Wno-sign-conversion
+        -Wno-missing-prototypes
+        -Wno-misleading-indentation
     )
 endif()
 

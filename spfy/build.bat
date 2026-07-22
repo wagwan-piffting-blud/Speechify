@@ -2,12 +2,22 @@
 REM ============================================================
 REM  spfy build.bat -- Windows dev build helper.
 REM
-REM  IMPORTANT: this produces a NATIVE WINDOWS binary using
-REM  msys2 mingw-w64 gcc. Output is NOT bit-exact with the
-REM  Speechify oracle; the canonical 1:1 build target is
-REM  Linux x86_64 with the x87 long-double toolchain
-REM  (cmake/Toolchain-x87.cmake). Use this script only for
-REM  fast iteration on loaders, parsers, and unit tests.
+REM  IMPORTANT: this script configures SPFY_FE_HOSTED=OFF -- the
+REM  in-house pure-C front-end, which is NOT engine-faithful (~91%
+REM  audit). Its output therefore does NOT match the Speechify oracle.
+REM
+REM  That is a FRONT-END choice, not a toolchain limitation. The mingw-w64
+REM  builds from build32.bat (x86, native PE loader) and build_emu.bat
+REM  (x64, emulator-backed FE) ARE byte-exact with the oracle -- verified
+REM  2026-07-22: Windows x86, Windows x64, Linux x86_64 and Linux arm64
+REM  all emit an identical WAV for the same text.
+REM
+REM  Use this script only for fast iteration on loaders, parsers, and
+REM  unit tests (it stays on Debug/-O0 for that reason). For
+REM  engine-faithful output use instead:
+REM    build32.bat        x86, native PE loader
+REM    build_emu.bat      x64, emulator-backed FE
+REM    build_hosted.bat   x64 viz tracer -> bin\spfy_synth_trace.exe
 REM
 REM  Usage:
 REM    build.bat              configure + build

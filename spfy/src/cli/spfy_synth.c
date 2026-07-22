@@ -482,7 +482,16 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
                 out->syl_btone[syl_g_idx] = (int8_t)bt;
             }
 
-            uint32_t n_seg_in_syl = (uint32_t)(last_pi - first_pi + 1);
+            /* first_pi and last_pi are assigned together in the scan
+             * above, and the first_pi < 0 case already `continue`d, so
+             * the true count is [1, n_phonemes]. GCC can't infer that
+             * pairing: it sees last_pi - first_pi + 1 as possibly
+             * negative, which wraps to a huge uint32 and trips
+             * -Walloc-size-larger-than on 32-bit. State the invariant. */
+            int n_seg_signed = last_pi - first_pi + 1;
+            if (n_seg_signed < 0)                n_seg_signed = 0;
+            if (n_seg_signed > w->n_phonemes)    n_seg_signed = w->n_phonemes;
+            uint32_t n_seg_in_syl = (uint32_t)n_seg_signed;
             out->syl_n_segs[syl_g_idx] = n_seg_in_syl;
             out->syl_segs[syl_g_idx] = (uint32_t *)calloc(
                 n_seg_in_syl, sizeof **out->syl_segs);
@@ -1603,12 +1612,6 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     "(SWIttsFe-<lang> via host_emu, portable to "
                     "arm64/wasm). The image is picked from the voice's "
                     "VCF language -- see the [fe_host] line above.\n");
-#elif defined(SPFY_FE_HOSTED)
-                fprintf(stderr,
-                    "[spfy] FE backend: NATIVE DLL "
-                    "(SWIttsFe-<lang>, 32-bit x86 only). The image is "
-                    "picked from the voice's VCF language -- see the "
-                    "[fe_host] line above.\n");
 #else
                 fprintf(stderr,
                     "[spfy] FE backend: IN-HOUSE pure-C "

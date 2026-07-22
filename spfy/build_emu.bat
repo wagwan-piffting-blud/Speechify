@@ -1,14 +1,14 @@
 @echo off
 REM ============================================================
-REM  spfy build_emu.bat -- Windows build variant that turns on the
-REM  emulator-backed hosted FE (SWIttsFe-en-US.dll driven through
-REM  src/host_emu/ instead of the native src/host/ PE loader).
+REM  spfy build_emu.bat -- Windows x64 build of the engine-faithful spfy
+REM  (the real SWIttsFe-<lang>.dll driven through the src/host_emu x86
+REM  interpreter).
 REM
-REM  Same host toolchain as build.bat (MSYS2 mingw-w64 64-bit gcc),
-REM  but flips SPFY_FE_HOSTED=ON + SPFY_FE_EMU=ON so:
-REM    - fe_host/CMakeLists picks fe_host_emu.c
-REM    - src/host_emu/ builds as a lib and links into spfy_fe
-REM    - the 32-bit-only src/host/ PE loader stays out of the build
+REM  Same host toolchain as build.bat (MSYS2 mingw-w64 64-bit gcc), but
+REM  sets SPFY_FE_HOSTED=ON so the real DLL front-end is used instead of
+REM  the in-house pure-C one. The emulator is the only FE backend now
+REM  (the native src/host/ PE loader was retired 2026-07-22), so there is
+REM  no longer an SPFY_FE_EMU switch to pass.
 REM
 REM  Output lives in a separate build dir so it doesn't clash with
 REM  build.bat's C:\tmp\spfy_build.
@@ -33,6 +33,12 @@ set "GXX=%MSYS_ROOT%\mingw64\bin\g++.exe"
 if not exist "%CMAKE%" ( echo error: cmake not found at "%CMAKE%" & exit /b 1 )
 if not exist "%NINJA%" ( echo error: ninja not found at "%NINJA%" & exit /b 1 )
 if not exist "%GCC%"   ( echo error: gcc not found at "%GCC%"     & exit /b 1 )
+
+REM Match the CI / Linux configuration (Release + strict x87 FP) so local
+REM Windows builds are byte-for-byte comparable with them.
+REM Override for a debugging session:  set SPFY_BUILD_TYPE=Debug
+if "%SPFY_BUILD_TYPE%"=="" set "SPFY_BUILD_TYPE=Release"
+if "%SPFY_STRICT_FP%"=="" set "SPFY_STRICT_FP=ON"
 
 if "%SPFY_EMU_FE_BUILD_DIR%"=="" set "SPFY_EMU_FE_BUILD_DIR=C:\tmp\spfy_build_emu"
 set "BUILD_DIR=%SPFY_EMU_FE_BUILD_DIR%"
@@ -62,16 +68,18 @@ if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 goto :all
 
 :all
+REM  No -DCMAKE_CXX_COMPILER here: spfy is project(... LANGUAGES C), so
+REM  passing one only earns a configure-time "Manually-specified variables
+REM  were not used by the project" warning. %GXX% stays defined above for
+REM  anyone extending this script.
 echo [configure] cmake -^> "%BUILD_DIR%"
 "%CMAKE%" -S "%SCRIPT_DIR%" -B "%BUILD_DIR%" -G Ninja ^
     -DCMAKE_MAKE_PROGRAM="%NINJA%" ^
     -DCMAKE_C_COMPILER="%GCC%" ^
-    -DCMAKE_CXX_COMPILER="%GXX%" ^
-    -DCMAKE_BUILD_TYPE=Debug ^
-    -DSPFY_STRICT_FP=OFF ^
+    -DCMAKE_BUILD_TYPE=%SPFY_BUILD_TYPE% ^
+    -DSPFY_STRICT_FP=%SPFY_STRICT_FP% ^
     -DSPFY_BUILD_TESTS=ON ^
-    -DSPFY_FE_HOSTED=ON ^
-    -DSPFY_FE_EMU=ON
+    -DSPFY_FE_HOSTED=ON
 if errorlevel 1 ( popd >nul & exit /b 1 )
 
 echo [build] ninja

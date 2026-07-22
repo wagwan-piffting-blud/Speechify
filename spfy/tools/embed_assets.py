@@ -133,7 +133,16 @@ static int write_file(const char *outdir, const char *filename,
                       const unsigned char *data, size_t n)
 {
     char path[1024];
-    snprintf(path, sizeof path, "%s%c%s", outdir, PATHSEP, filename);
+    /* Check the result: an over-long outdir would otherwise silently
+     * truncate and write to the WRONG path. (Also what silences GCC's
+     * -Wformat-truncation, which fires only on an unused return.) */
+    int path_len = snprintf(path, sizeof path, "%s%c%s",
+                            outdir, PATHSEP, filename);
+    if (path_len < 0 || (size_t)path_len >= sizeof path) {
+        fprintf(stderr, "spfy_assets: path too long: %s%c%s\n",
+                outdir, PATHSEP, filename);
+        return -1;
+    }
     FILE *f = fopen(path, "wb");
     if (!f) {
         fprintf(stderr, "spfy_assets: failed to open %s: ", path);

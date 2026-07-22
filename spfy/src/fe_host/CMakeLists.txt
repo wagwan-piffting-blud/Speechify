@@ -1,46 +1,20 @@
 # spfy/src/fe_host/CMakeLists.txt — hosted-DLL FE.
 #
 # Builds the spfy_fe target (drop-in name) backed by the embedded
-# SWIttsFe-en-US.dll bytes, with two interchangeable backends:
+# SWIttsFe-<lang>.dll bytes, driven through the portable x86 interpreter
+# in src/host_emu/. That is the ONLY backend: it builds on any pointer
+# size and any host ISA (x86, x86_64, arm64, wasm32).
 #
-#   SPFY_FE_HOSTED=ON (default)  -> native PE loader (src/host/),
-#                                   requires a 32-bit build
-#   SPFY_FE_EMU=ON              -> portable x86 emulator (src/host_emu/),
-#                                   builds on any pointer size; required
-#                                   for Android arm64, WASM, Apple Silicon
+# History: a native PE-loader backend (src/host/ + fe_host.c) used to be
+# the default on 32-bit x86, with the emulator as the portable fallback.
+# It was retired 2026-07-22 once the emulator was shown byte-exact on
+# every target — including i686, where it cost only ~7% wall-clock. The
+# 32-bit build still exists (older x86-only CPUs and VMs); it just runs
+# the interpreter like everyone else.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Auto-select the emulator backend on host configs that can't run the
-# 32-bit x86 PE natively (64-bit pointers, or a non-x86 ISA). Users can
-# still override to `-DSPFY_FE_EMU=OFF` on a 32-bit host if they want the
-# faster native path, or explicitly set `-DSPFY_FE_EMU=ON` on 32-bit x86
-# to test the emulator path.
-set(_spfy_fe_emu_default OFF)
-if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-    set(_spfy_fe_emu_default ON)
-endif()
-if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86|i.86|amd64|AMD64|X86|i686")
-    set(_spfy_fe_emu_default ON)
-endif()
-if(EMSCRIPTEN OR ANDROID OR ANDROID_ABI)
-    set(_spfy_fe_emu_default ON)
-endif()
-option(SPFY_FE_EMU
-       "Drive SWIttsFe through the portable host_emu emulator instead of the native PE loader"
-       ${_spfy_fe_emu_default})
-
-if(SPFY_FE_EMU)
-    message(STATUS "fe_host: using EMULATOR backend (host_emu) — 100% engine PATH UID, works on any host CPU")
-elseif(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
-    message(FATAL_ERROR
-        "SPFY_FE_HOSTED=ON with SPFY_FE_EMU=OFF requires a 32-bit build "
-        "(current ptr=${CMAKE_SIZEOF_VOID_P}B). Configure with -m32 / a 32-bit "
-        "toolchain, or drop -DSPFY_FE_EMU=OFF (auto-detect will re-enable the "
-        "emulator path).")
-else()
-    message(STATUS "fe_host: using NATIVE PE backend (host/) — fast, 32-bit x86 only")
-endif()
+message(STATUS "fe_host: EMULATOR backend (host_emu) — 100% engine PATH UID, any host CPU")
 
 # Languages whose SWIttsFe-<lang>.dll gets embedded. en-US must stay
 # first: it is the fallback when a voice's VCF names a language we did
@@ -52,14 +26,8 @@ set(SPFY_FE_LANGS "en-US;fr-CA;es-MX"
 set(SWITTSFE_DLL_DIR "${CMAKE_SOURCE_DIR}/../bin"
     CACHE PATH "Directory holding the SWIttsFe-<lang>.dll images")
 
-# Bring in the loader library. NATIVE backend uses src/host/ (PE32 loader,
-# 32-bit only). EMULATOR backend uses src/host_emu/ (portable interpreter,
-# any pointer size).
-if(SPFY_FE_EMU)
-    add_subdirectory("${CMAKE_SOURCE_DIR}/src/host_emu" "${CMAKE_BINARY_DIR}/host_emu_build")
-else()
-    add_subdirectory("${CMAKE_SOURCE_DIR}/src/host" "${CMAKE_BINARY_DIR}/host_build")
-endif()
+# The portable interpreter (any pointer size, any host ISA).
+add_subdirectory("${CMAKE_SOURCE_DIR}/src/host_emu" "${CMAKE_BINARY_DIR}/host_emu_build")
 
 # Python is required to run the DLL-embed step. Must be located BEFORE
 # the add_custom_command below since ${Python3_EXECUTABLE} is expanded
@@ -131,26 +99,12 @@ add_custom_command(
             "${CMAKE_SOURCE_DIR}/tools/engine_phoneid_to_c.py"
     COMMENT "Codegen engine phone-id table from ${PHONEID_CSV}")
 
-if(SPFY_FE_EMU)
-    set(SPFY_FE_DRIVER_SRC fe_host_emu.c)
-    # Emulator carries its own loader; src/host/ is NOT compiled.
-    set(SPFY_FE_NATIVE_LOADER_SRCS )
-else()
-    set(SPFY_FE_DRIVER_SRC fe_host.c)
-    # Native PE loader compiled directly into spfy_fe (the test_synth.exe
-    # standalone build does the same; using libspfy_host.a transitively
-    # produced a non-functional getObject result, possibly due to a
-    # static-archive symbol-ordering quirk with the embedded DLL data).
-    set(SPFY_FE_NATIVE_LOADER_SRCS
-        ${CMAKE_SOURCE_DIR}/src/host/loader.c
-        ${CMAKE_SOURCE_DIR}/src/host/imports.c)
-endif()
-
 add_library(spfy_fe STATIC
-    ${SPFY_FE_DRIVER_SRC}
+    # The emulator carries its own PE loader (src/host_emu/loader.c), so
+    # nothing else needs compiling in here.
+    fe_host_emu.c
     fe_parse.c
     fe_no_refine.c
-    ${SPFY_FE_NATIVE_LOADER_SRCS}
     # Hand-written FE infrastructure files. `fe.c` (the public-API
     # impl) is the ONE file we replace; the rest are loaders / data
     # containers / utilities that downstream CLIs still reference for
@@ -173,20 +127,13 @@ target_include_directories(spfy_fe
             ${CMAKE_CURRENT_BINARY_DIR}     # for generated engine_phoneid.h
             ${CMAKE_SOURCE_DIR}/src/common
             ${CMAKE_SOURCE_DIR}/src/voice)
-if(SPFY_FE_EMU)
-    target_include_directories(spfy_fe PRIVATE ${CMAKE_SOURCE_DIR}/src/host_emu)
-    target_link_libraries(spfy_fe PUBLIC spfy_host_emu spfy_voice spfy_common spfy_baked_pos)
-    target_compile_definitions(spfy_fe PRIVATE SPFY_FE_EMU=1)
-else()
-    target_include_directories(spfy_fe PRIVATE ${CMAKE_SOURCE_DIR}/src/host)
-    target_link_libraries(spfy_fe PUBLIC spfy_host spfy_voice spfy_common spfy_baked_pos)
-endif()
+target_include_directories(spfy_fe PRIVATE ${CMAKE_SOURCE_DIR}/src/host_emu)
+target_link_libraries(spfy_fe PUBLIC spfy_host_emu spfy_voice spfy_common spfy_baked_pos)
+target_compile_definitions(spfy_fe PRIVATE SPFY_FE_EMU=1)
 
-# fe_host.c (native path) indexes the hosted DLL's vtable via
-# function-pointer casts (vfn0 -> vfn1/vfn3 by slot number). Same
-# Windows-ABI constraint as spfy/src/host/ — suppress the cast warnings
-# on this target only. The emulator path doesn't do native fn-ptr casts
-# but the flag is harmless.
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+# The driver indexes the hosted DLL's vtable by slot number through
+# function-pointer casts. MATCHES (not STREQUAL) so AppleClang, which
+# reports its id as "AppleClang", is covered too.
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(spfy_fe PRIVATE -Wno-pedantic -Wno-cast-function-type)
 endif()

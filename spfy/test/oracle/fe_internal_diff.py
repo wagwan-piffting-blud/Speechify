@@ -20,9 +20,11 @@ import argparse
 import collections
 import csv
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
@@ -30,9 +32,15 @@ from typing import List
 REPO = Path(__file__).resolve().parents[3]
 DEFAULT_CORPUS = REPO / "spfy" / "test" / "oracle" / "corpus.jsonl"
 DEFAULT_VCF    = REPO.parent / "Speechify" / "en-US" / "tom" / "tom.vcf"
-BUILD_DIR = Path(r"C:\tmp\spfy_build32")
-INTERNAL_EXE = BUILD_DIR / "src" / "cli" / "spfy_fe_text2tagged.exe"
-DLL_EXE      = BUILD_DIR / "src" / "cli" / "spfy_fe_host_dump.exe"
+# Both binaries are ours and build on every platform, so don't hard-code a
+# Windows build dir or a .exe suffix. Override the location with
+# SPFY_BUILD_DIR (e.g. SPFY_BUILD_DIR=~/spfy_build on macOS).
+_DEFAULT_BUILD = (r"C:\tmp\spfy_build32" if os.name == "nt"
+                  else str(Path(tempfile.gettempdir()) / "spfy_build"))
+BUILD_DIR = Path(os.environ.get("SPFY_BUILD_DIR", _DEFAULT_BUILD))
+_EXE = ".exe" if os.name == "nt" else ""
+INTERNAL_EXE = BUILD_DIR / "src" / "cli" / f"spfy_fe_text2tagged{_EXE}"
+DLL_EXE      = BUILD_DIR / "src" / "cli" / f"spfy_fe_host_dump{_EXE}"
 
 OUT_DIR = Path(r"c:\tmp\fe_diff")
 RAW_DIR = OUT_DIR / "raw"
@@ -51,9 +59,13 @@ def run_internal(text: str) -> str:
     return r.stdout.strip()
 
 
-# Match the fprintf format in fe_host.c: `[fe_host] tagged output (N bytes): TEXT`.
-DLL_TAG_RE = re.compile(r"\[fe_host\] tagged output \(\d+ bytes\): (.+?)(?=\n\[host_dump\]|\Z)",
-                        re.DOTALL)
+# Match the fprintf format emitted by the FE driver:
+#   `[fe_host_emu] tagged output (N bytes): TEXT`
+# The `_emu` suffix is optional so captures taken against the old native
+# PE-loader driver (`[fe_host]`, retired 2026-07-22) still parse.
+DLL_TAG_RE = re.compile(
+    r"\[fe_host(?:_emu)?\] tagged output \(\d+ bytes\): (.+?)(?=\n\[host_dump\]|\Z)",
+    re.DOTALL)
 
 
 def run_dll(text: str, vcf: Path) -> str:

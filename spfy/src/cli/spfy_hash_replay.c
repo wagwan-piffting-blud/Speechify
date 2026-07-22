@@ -159,8 +159,12 @@ int main(int argc, char **argv)
     fclose(fp);
 
     fprintf(stdout, "\nprobes total      : %ld\n", n_probes);
+    /* Explicit (double) casts: `long` is 64-bit on 64-bit hosts and
+     * -Wconversion flags the implicit widening. Probe counts never reach
+     * 2^53, so the cast is exact. */
     fprintf(stdout, "hit/miss match    : %ld  (%.2f%%)\n",
-            n_match, 100.0 * n_match / (n_probes ? n_probes : 1));
+            n_match,
+            100.0 * (double)n_match / (double)(n_probes ? n_probes : 1));
     fprintf(stdout, "  hit  matched    : %ld\n", n_hit_match);
     fprintf(stdout, "  miss matched    : %ld\n", n_miss_match);
     fprintf(stdout, "engine HIT, native MISS  : %ld\n", n_hit_mismatch);

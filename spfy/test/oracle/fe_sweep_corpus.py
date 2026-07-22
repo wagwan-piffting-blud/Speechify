@@ -33,13 +33,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CORPUS = PROJECT_ROOT / "spfy" / "test" / "oracle" / "corpus.jsonl"
 DEFAULT_TRACE_DIR = PROJECT_ROOT / "spfy" / "test" / "oracle" / "traces" / "fe_tree"
-DEFAULT_OUT = "c:/tmp/fe_sweep_corpus.jsonl"
+DEFAULT_OUT = str(Path(tempfile.gettempdir()) / "fe_sweep_corpus.jsonl")
 DEFAULT_BATCH = 100
 
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]*")

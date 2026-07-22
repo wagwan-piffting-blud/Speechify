@@ -28,9 +28,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
+from pathlib import Path
 
-DEFAULT_DICT = "c:/tmp/fe_dict.jsonl"
-DEFAULT_OUT  = "c:/tmp/pos_sweep_corpus.jsonl"
+DEFAULT_DICT = str(Path(tempfile.gettempdir()) / "fe_dict.jsonl")
+DEFAULT_OUT  = str(Path(tempfile.gettempdir()) / "pos_sweep_corpus.jsonl")
 DEFAULT_BATCH = 100
 
 

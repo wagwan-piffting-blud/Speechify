@@ -16,22 +16,83 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+# Strict FP — pin x87 80-bit semantics so results stay bit-identical to the
+# Windows/i386 reference.
+#
+# Only meaningful on x86: AArch64 (Apple Silicon, arm64 Linux) has no x87,
+# so the block is skipped there and low-order audio bits may differ from the
+# i386 reference. The unit-selection path is integer decision-making and is
+# NOT affected, so the UID audit stays comparable across arches.
+#
+# Each flag is feature-tested rather than assumed. These are GCC spellings;
+# Clang/AppleClang reject some outright (notably `-mfpmath=387`, a hard
+# error) and merely warn-and-ignore others (`-ffloat-store`), which would
+# either break the build or spam warnings on every TU. -Werror during the
+# probe turns "unsupported, ignoring" warnings into probe failures so we
+# only add flags that genuinely apply.
 if(SPFY_STRICT_FP AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"
-                  AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86|i.86|amd64|AMD64")
-    add_compile_options(
+                  AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86|i.86|amd64|AMD64|X86|i686")
+    include(CheckCCompilerFlag)
+
+    set(_spfy_fp_want
         -fno-fast-math
         -fexcess-precision=standard
         -ffloat-store
         -mno-fma
     )
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-        add_compile_options(-mfpmath=387 -mlong-double-80)
+        list(APPEND _spfy_fp_want -mfpmath=387 -mlong-double-80)
     endif()
+
+    set(_spfy_fp_saved "${CMAKE_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_FLAGS "-Werror")
+    set(_spfy_fp_missing "")
+    foreach(_f IN LISTS _spfy_fp_want)
+        string(MAKE_C_IDENTIFIER "SPFY_HAS${_f}" _spfy_fp_var)
+        check_c_compiler_flag("${_f}" ${_spfy_fp_var})
+        if(${_spfy_fp_var})
+            add_compile_options("${_f}")
+        else()
+            list(APPEND _spfy_fp_missing "${_f}")
+        endif()
+    endforeach()
+    set(CMAKE_REQUIRED_FLAGS "${_spfy_fp_saved}")
+
+    if(_spfy_fp_missing)
+        message(WARNING
+            "SPFY_STRICT_FP: this compiler rejected ${_spfy_fp_missing} — x87 "
+            "semantics are not fully pinned, so synthesized audio bytes may "
+            "differ in low bits from the i386 reference build. Unit-selection "
+            "UIDs are unaffected.")
+    endif()
+elseif(SPFY_STRICT_FP AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    message(STATUS
+        "SPFY_STRICT_FP: no x87 on ${CMAKE_SYSTEM_PROCESSOR} — skipping x87 "
+        "pinning (UID path is integer and unaffected).")
 endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wconversion
                         -Wstrict-prototypes -Wmissing-prototypes)
+endif()
+
+# Apple's linker (Xcode 15+) warns "ignoring duplicate libraries" on nearly
+# every link here, for two benign reasons:
+#   * CMake repeats static libs to satisfy the circular deps between
+#     spfy_voice / spfy_common / spfy_usel — intentional, and required by
+#     GNU ld's single-pass archive resolution.
+#   * libm arrives twice: from the global link_libraries(m) below AND from
+#     host_emu's own `PUBLIC m`, which it must keep for standalone /
+#     Android / wasm builds that never see this file.
+# The linker resolves both correctly; the warnings just bury real
+# diagnostics. Feature-tested because the flag is Xcode 15+ only.
+if(APPLE)
+    include(CheckLinkerFlag)
+    check_linker_flag(C "-Wl,-no_warn_duplicate_libraries"
+                      SPFY_HAS_NO_WARN_DUP_LIBS)
+    if(SPFY_HAS_NO_WARN_DUP_LIBS)
+        add_link_options(-Wl,-no_warn_duplicate_libraries)
+    endif()
 endif()
 
 if(SPFY_TRACE)
@@ -80,14 +141,10 @@ target_include_directories(spfy_baked_pos PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
 add_subdirectory(src/fe_internal)
 if(SPFY_FE_HOSTED)
     add_subdirectory(src/fe_host)
-    # Now that fe_host has evaluated its SPFY_FE_EMU auto-detect (which may
-    # flip based on ANDROID / EMSCRIPTEN / non-32-bit host), surface the
-    # effective value globally so downstream CLIs (spfy_synth.c) can pick
-    # the right startup banner + call convention. Must be AFTER
-    # add_subdirectory(src/fe_host) so we read the post-detect value.
-    if(SPFY_FE_EMU)
-        add_compile_definitions(SPFY_FE_EMU=1)
-    endif()
+    # The hosted FE is always the emulated DLL now (the native PE loader
+    # was retired 2026-07-22). Surface that globally so downstream CLIs
+    # (spfy_synth.c) print the right startup banner.
+    add_compile_definitions(SPFY_FE_EMU=1)
 else()
     add_subdirectory(src/fe)
 endif()

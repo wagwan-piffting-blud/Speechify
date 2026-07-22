@@ -670,8 +670,10 @@ static void balabolka_to_arpabet(const char *sym, char *out, size_t out_cap)
         for (int v = 0; VOWELS[v]; ++v) {
             if (strcmp(tok, VOWELS[v]) == 0) { prev_is_vowel = 1; break; }
         }
-        strncpy(prev_token, tok, sizeof prev_token - 1);
-        prev_token[sizeof prev_token - 1] = '\0';
+        /* snprintf rather than strncpy: same truncate-and-terminate
+         * semantics, but without GCC's -Wstringop-truncation complaint
+         * about strncpy not NUL-terminating on a full-length copy. */
+        snprintf(prev_token, sizeof prev_token, "%s", tok);
     }
 
     /* Trailing unstressed vowel — finalize with 0. */

@@ -223,15 +223,60 @@ jobs:
           retention-days: 30
 
   # --------------------------------------------------------------------
-  # build-linux — i386 cross build via gcc-multilib. No SAPI (Windows
-  # COM only); ships spfy_synth CLI + the runtime data files needed to
-  # synthesize against a user-provided voice (VIN/VDB/VCF). Voices stay
-  # proprietary and are not bundled.
+  # build-unix — Linux + macOS matrix. No SAPI (Windows COM only); ships
+  # the spfy_synth CLI + the runtime data files needed to synthesize
+  # against a user-provided voice (VIN/VDB/VCF). Voices stay proprietary
+  # and are not bundled.
+  #
+  # FE backend: every target drives the real SWIttsFe-<lang>.dll through
+  # the src/host_emu x86 interpreter — the only backend since the native
+  # PE loader was retired 2026-07-22. Verified byte-identical across
+  # Windows x86/x64, Linux x86_64 and Linux arm64 (same WAV sha256).
+  # linux-x86 (i386) is still built for 32-bit-only CPUs and VMs, and
+  # still needs gcc-multilib for its 32-bit libc.
+  #
+  # SPFY_STRICT_FP pins x87 80-bit semantics for bit-exactness. It is a
+  # no-op on arm64 (no x87 exists), and the CMake probe drops individual
+  # flags a compiler rejects (AppleClang has no -mfpmath=387), warning
+  # rather than failing. arm64 output is therefore expected to match on
+  # unit selection (integer) but may differ in low audio bits.
   # --------------------------------------------------------------------
 
-  build-linux:
+  build-unix:
     needs: setup
-    runs-on: ubuntu-latest
+
+    strategy:
+      # One target failing shouldn't hide results for the others.
+      fail-fast: false
+      matrix:
+        include:
+          - id: linux-x86
+            runner: ubuntu-latest
+            cflags: "-m32 -D_GNU_SOURCE=1"
+            ldflags: "-m32"
+            multilib: true
+          - id: linux-x86_64
+            runner: ubuntu-latest
+            cflags: "-D_GNU_SOURCE=1"
+            ldflags: ""
+            multilib: false
+          - id: linux-arm64
+            runner: ubuntu-24.04-arm
+            cflags: "-D_GNU_SOURCE=1"
+            ldflags: ""
+            multilib: false
+          - id: macos-arm64
+            runner: macos-14
+            cflags: ""
+            ldflags: ""
+            multilib: false
+          - id: macos-x86_64
+            runner: macos-13
+            cflags: ""
+            ldflags: ""
+            multilib: false
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - name: Checkout
@@ -240,58 +285,66 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      - name: Install 32-bit toolchain
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential gcc-multilib g++-multilib \
-            cmake ninja-build python3
+          if [ "${{ matrix.multilib }}" = "true" ]; then
+            sudo apt-get install -y --no-install-recommends \
+              build-essential gcc-multilib g++-multilib \
+              cmake ninja-build python3
+          else
+            sudo apt-get install -y --no-install-recommends \
+              build-essential cmake ninja-build python3
+          fi
 
-      - name: Configure (i386)
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure
         run: |
-          # Mirrors spfy/build_linux.sh: -m32 reaches the linker so libgcc
-          # / libc come from multilib. SPFY_STRICT_FP=ON keeps x87 80-bit
-          # FP semantics for bit-exactness against the Windows reference.
-          cmake -S spfy -B /tmp/spfy_build_linux32 -G Ninja \
+          cmake -S spfy -B build-out -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-m32 -D_GNU_SOURCE=1" \
-            -DCMAKE_EXE_LINKER_FLAGS="-m32" \
-            -DCMAKE_SHARED_LINKER_FLAGS="-m32" \
+            -DCMAKE_C_FLAGS="${{ matrix.cflags }}" \
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.ldflags }}" \
+            -DCMAKE_SHARED_LINKER_FLAGS="${{ matrix.ldflags }}" \
             -DSPFY_STRICT_FP=ON \
             -DSPFY_BUILD_TESTS=OFF \
             -DSPFY_FE_HOSTED=ON
 
       - name: Build
-        run: cmake --build /tmp/spfy_build_linux32
+        run: cmake --build build-out
 
       - name: Verify build outputs
         run: |
-          ls -la /tmp/spfy_build_linux32/src/cli/spfy_synth
-          file /tmp/spfy_build_linux32/src/cli/spfy_synth
+          ls -la build-out/src/cli/spfy_synth
+          file build-out/src/cli/spfy_synth
 
       - name: Package tarball
         run: |
-          set -euo pipefail
+          set -eu
           VERSION="${{ needs.setup.outputs.version }}"
-          PKG="spfy-linux-x86-${VERSION}"
-          STAGE="/tmp/spfy-linux-stage/${PKG}"
+          PKG="spfy-${{ matrix.id }}-${VERSION}"
+          STAGE="${RUNNER_TEMP}/spfy-stage/${PKG}"
           mkdir -p "${STAGE}/bin" "${STAGE}/spfy/data" "${STAGE}/spfy/build"
-          cp /tmp/spfy_build_linux32/src/cli/spfy_synth        "${STAGE}/bin/"
-          cp spfy/data/tom_hpclass.bin                         "${STAGE}/spfy/data/"
-          cp -r spfy/data/fe_tables                            "${STAGE}/spfy/data/"
-          cp -r spfy/data/fe_tables_a                          "${STAGE}/spfy/data/"
-          cp spfy/build/fe_symbol_table.json                   "${STAGE}/spfy/build/"
-          cp spfy/README.md                                    "${STAGE}/" || true
+          cp build-out/src/cli/spfy_synth          "${STAGE}/bin/"
+          cp spfy/data/tom_hpclass.bin             "${STAGE}/spfy/data/"
+          cp -r spfy/data/fe_tables                "${STAGE}/spfy/data/"
+          cp -r spfy/data/fe_tables_a              "${STAGE}/spfy/data/"
+          cp spfy/build/fe_symbol_table.json       "${STAGE}/spfy/build/"
+          cp spfy/README.md                        "${STAGE}/" || true
           # Path layout inside the tarball mirrors the args spfy_synth
           # expects, so users can extract and run from the package root.
           mkdir -p installer/dist
-          tar -czvf "installer/dist/${PKG}.tar.gz" -C /tmp/spfy-linux-stage "${PKG}"
+          tar -czf "installer/dist/${PKG}.tar.gz" \
+            -C "${RUNNER_TEMP}/spfy-stage" "${PKG}"
           ls -la installer/dist/
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
-          name: spfy-installer-linux-${{ needs.setup.outputs.version }}
+          name: spfy-installer-${{ matrix.id }}-${{ needs.setup.outputs.version }}
           path: installer/dist/*.tar.gz
           if-no-files-found: error
           retention-days: 30
@@ -303,22 +356,20 @@ jobs:
   # --------------------------------------------------------------------
 
   release:
-    needs: [setup, build-windows, build-linux]
+    needs: [setup, build-windows, build-unix]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Windows installer
+      # One pattern pull grabs the Windows installer plus every matrix
+      # tarball (linux-x86 / linux-x86_64 / linux-arm64 / macos-*), so
+      # adding a target to the matrix needs no change here.
+      - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
-          name: spfy-installer-windows-${{ needs.setup.outputs.version }}
+          pattern: spfy-installer-*-${{ needs.setup.outputs.version }}
           path: dist
-
-      - name: Download Linux tarball
-        uses: actions/download-artifact@v8
-        with:
-          name: spfy-installer-linux-${{ needs.setup.outputs.version }}
-          path: dist
+          merge-multiple: true
 
       - name: List release payload
         run: ls -la dist/
@@ -345,4 +396,4 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/spfy-setup-${{ needs.setup.outputs.version }}.exe
-            dist/spfy-linux-x86-${{ needs.setup.outputs.version }}.tar.gz
+            dist/*.tar.gz

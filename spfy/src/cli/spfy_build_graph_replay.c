@@ -955,7 +955,10 @@ static void process_entry(const char *fe_path, const char *vit_path,
     for (const char *q = fe_path; *q; ++q)
         if (*q == '/' || *q == '\\') base = q + 1;
     char eid[64] = {0};
-    snprintf(eid, sizeof eid, "%s", base);
+    /* Display id only — a pathologically long basename is deliberately
+     * truncated. The result is inspected so GCC doesn't flag the
+     * truncation as unintended (-Wformat-truncation warns on unused). */
+    if (snprintf(eid, sizeof eid, "%s", base) < 0) eid[0] = '\0';
     char *dot = strrchr(eid, '.');
     if (dot) *dot = 0;
 

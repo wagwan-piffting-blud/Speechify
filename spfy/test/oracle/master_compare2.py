@@ -34,6 +34,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -435,7 +436,12 @@ def main() -> None:
     ap.add_argument("--show-diff", action="store_true")
     ap.add_argument("--json", default=None)
     ap.add_argument("--quiet", action="store_true")
-    ap.add_argument("--tmpdir", default=os.environ.get("TEMP", "c:/tmp"))
+    # Platform-agnostic scratch dir: gettempdir() honours TMPDIR (macOS /
+    # Linux) and TEMP/TMP (Windows), falling back to the right OS default.
+    # It used to read TEMP with a literal "c:/tmp" fallback, which silently
+    # handed every worker an unwritable path on macOS/Linux -- the synth
+    # loaded the voice, then failed writing its WAV and exited 1.
+    ap.add_argument("--tmpdir", default=tempfile.gettempdir())
     # Multi-phrase comparison is the DEFAULT: the synth runner always
     # synthesizes every phrase (it pops SPFY_FIRST_PHRASE_ONLY), so the
     # engine-side comparison must align all phrases too. Single-phrase mode

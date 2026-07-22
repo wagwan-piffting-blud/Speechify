@@ -2052,40 +2052,50 @@ int main(int argc, char **argv)
     fprintf(stdout, "utterances           : %ld  (complete: %ld)\n",
             st.n_utts, st.n_utts_complete);
     fprintf(stdout, "slots total          : %ld\n", st.n_slots_total);
+    /* Percentages cast their long counters to double explicitly: on 64-bit
+     * hosts `long` is 64-bit and GCC's -Wconversion flags the implicit
+     * widening as possibly lossy. These are slot/call tallies that never
+     * approach 2^53, so the cast is exact — it just states the intent. */
     fprintf(stdout, "slots PRSL hit       : %ld  (%.1f%%)\n",
             st.n_slots_prsl_hit,
-            st.n_slots_total ? 100.0 * st.n_slots_prsl_hit / st.n_slots_total : 0);
+            st.n_slots_total
+            ? 100.0 * (double)st.n_slots_prsl_hit / (double)st.n_slots_total : 0);
     fprintf(stdout, "slots chosen-in-pool : %ld  (%.1f%% of slots, %.1f%% of PRSL hits)\n",
             st.n_slots_chosen_in_pool,
-            st.n_slots_total ? 100.0 * st.n_slots_chosen_in_pool / st.n_slots_total : 0,
-            st.n_slots_prsl_hit ? 100.0 * st.n_slots_chosen_in_pool / st.n_slots_prsl_hit : 0);
+            st.n_slots_total
+            ? 100.0 * (double)st.n_slots_chosen_in_pool / (double)st.n_slots_total : 0,
+            st.n_slots_prsl_hit
+            ? 100.0 * (double)st.n_slots_chosen_in_pool / (double)st.n_slots_prsl_hit : 0);
     if (have_cap) {
         fprintf(stdout, "slots pool=capture   : %ld  (%.1f%% of PRSL hits) "
                 "[C-side pool exactly equals engine's captured pool]\n",
                 st.n_slots_pool_matches_capture,
                 st.n_slots_prsl_hit
-                ? 100.0 * st.n_slots_pool_matches_capture / st.n_slots_prsl_hit
+                ? 100.0 * (double)st.n_slots_pool_matches_capture
+                        / (double)st.n_slots_prsl_hit
                 : 0);
     }
     fprintf(stdout, "slots matched        : %ld  (%.1f%%)\n",
             st.n_slots_matched,
-            st.n_slots_total ? 100.0 * st.n_slots_matched / st.n_slots_total : 0);
+            st.n_slots_total
+            ? 100.0 * (double)st.n_slots_matched / (double)st.n_slots_total : 0);
     /* DAG-path join cost diagnostics (plan 02-02 THIRD scope revision). */
     if (g_dag_total > 0) {
         fprintf(stdout, "dag join calls       : %ld\n", g_dag_total);
         fprintf(stdout, "  same-rec adjacent  : %ld  (%.2f%%)\n",
                 g_dag_same_rec,
-                100.0 * g_dag_same_rec / g_dag_total);
+                100.0 * (double)g_dag_same_rec / (double)g_dag_total);
         fprintf(stdout, "  hash hits          : %ld  (%.2f%%)\n",
                 g_dag_hash_hit,
-                100.0 * g_dag_hash_hit / g_dag_total);
+                100.0 * (double)g_dag_hash_hit / (double)g_dag_total);
         fprintf(stdout, "  hash misses        : %ld  (%.2f%%)\n",
                 g_dag_miss_total,
-                100.0 * g_dag_miss_total / g_dag_total);
+                100.0 * (double)g_dag_miss_total / (double)g_dag_total);
         fprintf(stdout, "    of which gate fire: %ld  (%.2f%% of misses)\n",
                 g_dag_miss_gate_fire,
                 g_dag_miss_total
-                  ? 100.0 * g_dag_miss_gate_fire / g_dag_miss_total : 0);
+                  ? 100.0 * (double)g_dag_miss_gate_fire
+                          / (double)g_dag_miss_total : 0);
     }
 
     if (st.n_slots_chosen_in_pool == 0 && st.n_slots_total > 0) {

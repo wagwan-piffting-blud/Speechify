@@ -449,6 +449,14 @@ int main(int argc, char **argv)
     spfy_proscost_matrix_t pros[SPFY_PROSCOST_N] = {0};
     spfy_hash_t hash = {0};
     uint8_t *hpc = NULL; uint32_t hpc_n = 0;
+    /* Declared here rather than at first use: every `goto fail` below
+     * lands in the shared cleanup block, which frees these. Declaring
+     * them further down means an early failure jumps over the
+     * initialisation and cleanup then frees indeterminate pointers. */
+    spfy_viterbi_slot_t *vslots = NULL;
+    uint32_t **cbuf = NULL;
+    float    **tbuf = NULL;
+    uint32_t   n_slots = 0;
     int rc;
 
     if ((rc = spfy_vin_load(vin_path, &vin))            != SPFY_OK) goto fail;
@@ -485,7 +493,6 @@ int main(int argc, char **argv)
     static slot_input_t slots[MAX_SLOTS];
     memset(slots, 0, sizeof slots);
     char path[1024];
-    uint32_t n_slots = 0;
     snprintf(path, sizeof path, "%s/prsl_slot/%s.jsonl", traces_dir, text_id);
     if (load_prsl_slot_utt0(path, slots, &n_slots) != 0) {
         rc = SPFY_E_IO; goto fail;
@@ -514,10 +521,9 @@ int main(int argc, char **argv)
      *   - boundary slots (where ctx[2] is silence sentinel) keep 1 cand
      *     with cost 0 (terminal) so the DP can still walk through.
      */
-    spfy_viterbi_slot_t *vslots = (spfy_viterbi_slot_t *)
-        calloc(n_slots, sizeof *vslots);
-    uint32_t **cbuf = (uint32_t **)calloc(n_slots, sizeof *cbuf);
-    float    **tbuf = (float    **)calloc(n_slots, sizeof *tbuf);
+    vslots = (spfy_viterbi_slot_t *)calloc(n_slots, sizeof *vslots);
+    cbuf   = (uint32_t **)calloc(n_slots, sizeof *cbuf);
+    tbuf   = (float    **)calloc(n_slots, sizeof *tbuf);
     if (!vslots || !cbuf || !tbuf) { rc = SPFY_E_NOMEM; goto fail; }
 
     for (uint32_t s = 0; s < n_slots; ++s) {
@@ -737,7 +743,9 @@ fail_wav:
 fail:
     if (rc != 0) fprintf(stderr, "error: %s\n", spfy_strerror(rc));
 cleanup:
-    if (vslots) {
+    /* Guard on the arrays actually indexed below: vslots can allocate
+     * while cbuf/tbuf fail, and n_slots is 0 on any early failure. */
+    if (cbuf && tbuf) {
         for (uint32_t i = 0; i < n_slots; ++i) {
             free(cbuf[i]); free(tbuf[i]);
         }

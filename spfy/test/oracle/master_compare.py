@@ -69,6 +69,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -554,7 +555,12 @@ def main():
     ap.add_argument("--show-diff", action="store_true")
     ap.add_argument("--json", default=None)
     ap.add_argument("--quiet", action="store_true")
-    ap.add_argument("--tmpdir", default=os.environ.get("TEMP", "c:/tmp"))
+    # Platform-agnostic scratch dir: gettempdir() honours TMPDIR (macOS /
+    # Linux) and TEMP/TMP (Windows), falling back to the right OS default.
+    # It used to read TEMP with a literal "c:/tmp" fallback, which silently
+    # handed every worker an unwritable path on macOS/Linux -- the synth
+    # loaded the voice, then failed writing its WAV and exited 1.
+    ap.add_argument("--tmpdir", default=tempfile.gettempdir())
     args = ap.parse_args()
 
     if not args.exe:
@@ -563,7 +569,10 @@ def main():
     exe = Path(args.exe)
     if not exe.exists():
         print(f"ERROR: exe not found: {exe}", file=sys.stderr)
-        print("Build first: c:/tmp/build32.bat or c:/tmp/build64_handfe.bat",
+        print("Build first:  Windows: spfy\\build32.bat (x86) or "
+              "spfy\\build_emu.bat (x64)\n"
+              "              Linux:   spfy/build_linux.sh\n"
+              "              macOS:   spfy/build_macos.sh",
               file=sys.stderr)
         sys.exit(2)
     # Sanity: confirm tom8.vdb (never tom16); the C-side guard catches it
