@@ -270,13 +270,23 @@ jobs:
             cflags: ""
             ldflags: ""
             multilib: false
+          # Intel macOS. NOT macos-13 — that image was retired 2025-12-04
+          # (deprecation began 2025-09-22), and requesting a dead label
+          # doesn't error, it just queues until the job times out.
+          # macos-15-intel is the last Intel-based image; GitHub drops
+          # x86_64 macOS entirely when it retires in Fall 2027.
           - id: macos-x86_64
-            runner: macos-13
+            runner: macos-15-intel
             cflags: ""
             ldflags: ""
             multilib: false
 
     runs-on: ${{ matrix.runner }}
+
+    # Queue time counts against this, so a retired/unavailable runner label
+    # fails here in 20 minutes instead of hanging for the 6-hour default and
+    # blocking the release job behind it.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -357,7 +367,22 @@ jobs:
 
   release:
     needs: [setup, build-windows, build-unix]
-    if: github.event_name == 'push'
+    # `needs:` defaults to requiring EVERY listed job to succeed, so a single
+    # build-unix matrix leg failing (or being cancelled — e.g. a retired
+    # runner label that never gets picked up) used to skip the release
+    # entirely, throwing away the targets that did build.
+    #
+    # !cancelled() still honours cancelling the whole workflow run: that
+    # suppresses the release as you'd expect. What it no longer does is let
+    # one optional target veto publishing. The real gate is below — the
+    # version resolved and the Windows installer built; unix tarballs are
+    # published if they made it, and any that didn't are flagged as
+    # warnings in the run summary.
+    if: >-
+      !cancelled()
+      && github.event_name == 'push'
+      && needs.setup.result == 'success'
+      && needs.build-windows.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -371,8 +396,26 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # A partial release is allowed (see the job's `if:`), so make it
+      # loud rather than silently short: annotate every target that didn't
+      # produce a tarball.
       - name: List release payload
-        run: ls -la dist/
+        run: |
+          set -eu
+          echo "Publishing:"
+          ls -la dist/
+          missing=0
+          for t in linux-x86 linux-x86_64 linux-arm64 macos-arm64 macos-x86_64; do
+            if ! ls dist/spfy-"$t"-*.tar.gz >/dev/null 2>&1; then
+              echo "::warning title=Missing target::no artifact for $t — release is partial"
+              missing=$((missing + 1))
+            fi
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::warning title=Partial release::$missing target(s) missing from this release"
+          else
+            echo "all 5 unix targets present"
+          fi
 
       - name: Resolve release tag
         id: tag
@@ -393,7 +436,13 @@ jobs:
           name: "spfy ${{ steps.tag.outputs.tag }}"
           tag_name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true
-          fail_on_unmatched_files: true
+          # false, deliberately: the setting is all-or-nothing across every
+          # pattern, so with a partial release allowed, `dist/*.tar.gz`
+          # matching nothing (every unix leg failed) would hard-fail here and
+          # throw away the Windows installer too. The job's `if:` already
+          # guarantees build-windows succeeded, so the .exe is always there,
+          # and the payload step above annotates anything missing.
+          fail_on_unmatched_files: false
           files: |
             dist/spfy-setup-${{ needs.setup.outputs.version }}.exe
             dist/*.tar.gz
