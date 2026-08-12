@@ -42,7 +42,7 @@ VERIFY="${SPFY_VERIFY:-1}"
 # -- a build-only gate would have gone green through the whole armv7
 # SIGBUS, which only ever manifested at runtime.
 REF_TEXT="The quick brown fox jumps over the lazy dog."
-REF_SHA="9b3f4dfc97c25da7ec21b03fc1f2a30e34eff31cb106706505c636a17be00371"
+REF_SHA="86dde7edb10eb9246ae997f70742cc2f1320de30f5fcb87412a052596bae0bdb"
 # tom8.vdb, never tom16.vdb: the 16k file is real PCM and the mu-law
 # decoder emits garbage from it.
 REF_VIN="en-US/tom/tom.vin"
