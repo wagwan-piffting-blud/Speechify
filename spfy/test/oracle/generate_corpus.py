@@ -138,18 +138,32 @@ def _verify_counts(path: Path) -> int:
         dup = [i for i in ids if ids.count(i) > 1]
         print(f"FAIL: duplicate ids: {sorted(set(dup))[:10]}", file=sys.stderr)
         ok = False
-    if counts["phn"] != 50:
-        print(f"FAIL: phn={counts['phn']} != 50", file=sys.stderr)
+
+    # ⚠ THE CHECK THAT WAS MISSING. Distinct ids were verified from the start;
+    # distinct TEXT never was, so 14 rows across 13 groups repeated material
+    # the corpus already contained -- "I.", "Aye.", "Hello, world." and the
+    # rest -- and every audit denominator counted them as separate evidence.
+    seen: dict[tuple, str] = {}
+    text_dups: list[str] = []
+    for r in rows:
+        key = (r.get("mode"), r["text"])
+        if key in seen:
+            text_dups.append(f"{r['id']}=={seen[key]}")
+        else:
+            seen[key] = r["id"]
+    if text_dups:
+        print(f"FAIL: {len(text_dups)} rows duplicate an earlier row's text: "
+              f"{', '.join(text_dups[:10])}", file=sys.stderr)
         ok = False
-    if counts["mp"] != 50:
-        print(f"FAIL: mp={counts['mp']} != 50", file=sys.stderr)
-        ok = False
-    if counts["nat"] != 50:
-        print(f"FAIL: nat={counts['nat']} != 50", file=sys.stderr)
-        ok = False
-    if counts["edge"] < 50:
-        print(f"FAIL: edge={counts['edge']} < 50", file=sys.stderr)
-        ok = False
+
+    # Per-stratum minimums. Each generator still emits 50; these floors are
+    # what SURVIVES dedupe against the seed block, so they are lower than the
+    # generated counts by exactly the overlap. Raising a generator's yield of
+    # DISTINCT probes raises these.
+    for short, floor in (("phn", 50), ("mp", 50), ("nat", 49), ("edge", 39)):
+        if counts[short] < floor:
+            print(f"FAIL: {short}={counts[short]} < {floor}", file=sys.stderr)
+            ok = False
     return 0 if ok else 1
 
 
@@ -160,6 +174,37 @@ def _row_to_line(row: dict) -> str:
     this corpus file is operator-readable.
     """
     return json.dumps(row)
+
+
+def _dedupe(lines: list[str]) -> tuple[list[str], list[tuple[str, str, str]]]:
+    """Drop rows whose (mode, text) already appeared earlier in emit order.
+
+    ⚠ A duplicate is NOT harmless padding. Five corpus entries said "I." or
+    "Aye." and two more said `\\![.1Sa.0kIG]`, so one terminal-unit defect in
+    the jill audio gate read as five independent failures, and every
+    denominator those rows sat in was inflated by material the gate had
+    already measured. The id check in main() never saw it -- the ids were all
+    distinct; only the TEXT repeated.
+
+    Seed rows (text_*/spr_*) are emitted first and therefore always win, which
+    also keeps the seed block byte-exact: nothing surviving is rewritten. The
+    dropped rows' tags are NOT merged into the survivor for the same reason;
+    the caller prints exactly what went, so the loss is on the record.
+
+    Returns (kept_lines, [(dropped_id, kept_id, text), ...]).
+    """
+    seen: dict[tuple, str] = {}
+    kept: list[str] = []
+    dropped: list[tuple[str, str, str]] = []
+    for ln in lines:
+        row = json.loads(ln)
+        key = (row.get("mode"), row["text"])
+        if key in seen:
+            dropped.append((row["id"], seen[key], row["text"]))
+            continue
+        seen[key] = row["id"]
+        kept.append(ln)
+    return kept, dropped
 
 
 def _build_output_lines(
@@ -188,7 +233,7 @@ def _build_output_lines(
     if stratum_filter == "all" or regenerate:
         new_blocks = [STRATA[k]() for k in ("phn", "mp", "nat", "edge")]
         new_lines = [_row_to_line(r) for blk in new_blocks for r in blk]
-        return seed_lines + new_lines
+        return _report_dedupe(seed_lines + new_lines)
 
     # Per-stratum replacement: keep existing non-seed rows AS-IS (their
     # raw bytes, so we don't perturb already-written strata), replace
@@ -210,7 +255,17 @@ def _build_output_lines(
     out = list(seed_lines)
     for short in ("phn", "mp", "nat", "edge"):
         out.extend(by_short[short])
-    return out
+    return _report_dedupe(out)
+
+
+def _report_dedupe(lines: list[str]) -> list[str]:
+    kept, dropped = _dedupe(lines)
+    if dropped:
+        print(f"deduped: dropped {len(dropped)} row(s) whose text already "
+              f"appeared earlier in emit order")
+        for did, kid, text in dropped:
+            print(f"    {did:<12} == {kid:<12} {text[:52]!r}")
+    return kept
 
 
 def main() -> int:
@@ -230,12 +285,21 @@ def main() -> int:
         help="rewrite ALL non-seed rows; preserves seed (text_*/spr_*) rows.",
     )
     ap.add_argument("--verify-counts", action="store_true")
+    ap.add_argument(
+        "--dedupe-only", action="store_true",
+        help="drop duplicate-text rows from the EXISTING file and write it "
+             "back verbatim otherwise. Runs no generator, so captured traces "
+             "and rendered references for the surviving ids stay valid.")
     args = ap.parse_args()
 
     corpus_path: Path = args.corpus.resolve()
 
     existing = _load_existing(corpus_path)
-    final_lines = _build_output_lines(existing, args.stratum, args.regenerate)
+    if args.dedupe_only:
+        final_lines = _report_dedupe([raw for (_row, raw) in existing])
+    else:
+        final_lines = _build_output_lines(existing, args.stratum,
+                                          args.regenerate)
 
     # Sanity guards before writing -- parse each line to extract its id.
     ids: list[str] = [json.loads(ln)["id"] for ln in final_lines]

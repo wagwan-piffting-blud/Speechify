@@ -1,0 +1,342 @@
+{
+  "generated": "2026-08-10T03:31:26",
+  "format_khz": 8,
+  "renders": [
+    {
+      "kind": "engine",
+      "id": "aicraig",
+      "voice": "aicraig",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_aicraig.txt",
+      "wav": "demos/engine/aicraig.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 159430,
+        "rate": 8000,
+        "seconds": 19.929
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "aimara",
+      "voice": "aimara",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_aimara.txt",
+      "wav": "demos/engine/aimara.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 158664,
+        "rate": 8000,
+        "seconds": 19.833
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "aimara2",
+      "voice": "aimara2",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_aimara2.txt",
+      "wav": "demos/engine/aimara2.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 159886,
+        "rate": 8000,
+        "seconds": 19.986
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "felix",
+      "voice": "felix",
+      "lang": "fr-CA",
+      "synthetic": false,
+      "text_file": "demos/text/demo_felix.txt",
+      "wav": "demos/engine/felix.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 118514,
+        "rate": 8000,
+        "seconds": 14.814
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "javier",
+      "voice": "javier",
+      "lang": "es-MX",
+      "synthetic": false,
+      "text_file": "demos/text/demo_javier.txt",
+      "wav": "demos/engine/javier.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 148116,
+        "rate": 8000,
+        "seconds": 18.515
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "jill",
+      "voice": "jill",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/demo_jill.txt",
+      "wav": "demos/engine/jill.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 173554,
+        "rate": 8000,
+        "seconds": 21.694
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "paulina",
+      "voice": "paulina",
+      "lang": "es-MX",
+      "synthetic": false,
+      "text_file": "demos/text/demo_paulina.txt",
+      "wav": "demos/engine/paulina.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 158690,
+        "rate": 8000,
+        "seconds": 19.836
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "tom",
+      "voice": "tom",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/demo_tom.txt",
+      "wav": "demos/engine/tom.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 159140,
+        "rate": 8000,
+        "seconds": 19.892
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "aicraig",
+      "voice": "aicraig",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_aicraig.txt",
+      "wav": "demos/spfy/aicraig.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 159430,
+        "rate": 8000,
+        "seconds": 19.929
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "aimara",
+      "voice": "aimara",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_aimara.txt",
+      "wav": "demos/spfy/aimara.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 158666,
+        "rate": 8000,
+        "seconds": 19.833
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "aimara2",
+      "voice": "aimara2",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_aimara2.txt",
+      "wav": "demos/spfy/aimara2.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 159886,
+        "rate": 8000,
+        "seconds": 19.986
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "felix",
+      "voice": "felix",
+      "lang": "fr-CA",
+      "synthetic": false,
+      "text_file": "demos/text/demo_felix.txt",
+      "wav": "demos/spfy/felix.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 118654,
+        "rate": 8000,
+        "seconds": 14.832
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "javier",
+      "voice": "javier",
+      "lang": "es-MX",
+      "synthetic": false,
+      "text_file": "demos/text/demo_javier.txt",
+      "wav": "demos/spfy/javier.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 148062,
+        "rate": 8000,
+        "seconds": 18.508
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "jill",
+      "voice": "jill",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/demo_jill.txt",
+      "wav": "demos/spfy/jill.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 173850,
+        "rate": 8000,
+        "seconds": 21.731
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "paulina",
+      "voice": "paulina",
+      "lang": "es-MX",
+      "synthetic": false,
+      "text_file": "demos/text/demo_paulina.txt",
+      "wav": "demos/spfy/paulina.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 158534,
+        "rate": 8000,
+        "seconds": 19.817
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "tom",
+      "voice": "tom",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/demo_tom.txt",
+      "wav": "demos/spfy/tom.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 159140,
+        "rate": 8000,
+        "seconds": 19.892
+      }
+    },
+    {
+      "kind": "spfy4m",
+      "id": "basement",
+      "voice": "tom",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/s4_basement.txt",
+      "wav": "demos/spfy4m/basement.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 29842,
+        "rate": 8000,
+        "seconds": 3.73
+      }
+    },
+    {
+      "kind": "spfy4m",
+      "id": "cem_bulletin",
+      "voice": "tom",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "cem.txt",
+      "wav": "demos/spfy4m/cem_bulletin.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 516762,
+        "rate": 8000,
+        "seconds": 64.595
+      }
+    },
+    {
+      "kind": "spfy4m",
+      "id": "highs_60s",
+      "voice": "tom",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/s4_highs_60s.txt",
+      "wav": "demos/spfy4m/highs_60s.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 12426,
+        "rate": 8000,
+        "seconds": 1.553
+      }
+    },
+    {
+      "kind": "spfy4m",
+      "id": "nws_tornado",
+      "voice": "tom",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/s4_nws_tornado.txt",
+      "wav": "demos/spfy4m/nws_tornado.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 42590,
+        "rate": 8000,
+        "seconds": 5.324
+      }
+    },
+    {
+      "kind": "spfy4m",
+      "id": "radar_threat",
+      "voice": "tom",
+      "lang": "en-US",
+      "synthetic": false,
+      "text_file": "demos/text/s4_radar_threat.txt",
+      "wav": "demos/spfy4m/radar_threat.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 13344,
+        "rate": 8000,
+        "seconds": 1.668
+      }
+    }
+  ]
+}

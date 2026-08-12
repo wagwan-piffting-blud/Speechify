@@ -1,14 +1,4 @@
-/* spfy_dump_voice -- M0a verification CLI.
- *
- *   spfy_dump_voice <voice.vin> <voice.vdb> <voice.vcf>
- *       Load + summarise, then probe a few VCF params.
- *
- *   spfy_dump_voice --roundtrip-vin <in.vin> <out.vin>
- *   spfy_dump_voice --roundtrip-vdb <in.vdb> <out.vdb>
- *       Read, deobfuscate, re-obfuscate, write to out. The output must
- *       be byte-identical to the input (`cmp in out`); this is the
- *       M0a definition-of-done check for chunk-byte roundtripping.
- */
+/* spfy_dump_voice -- M0a verification CLI. */
 
 #include <spfy/spfy.h>
 #include <spfy/spfy_voice.h>
@@ -39,7 +29,6 @@ static int do_roundtrip(const char *in_path, const char *out_path)
         fprintf(stderr, "read %s: %s\n", in_path, spfy_strerror(rc));
         return 1;
     }
-    /* deobfuscate then re-obfuscate -- symmetric, must yield identical bytes */
     spfy_unobfuscate_ce(buf, n);
     spfy_unobfuscate_ce(buf, n);
 
@@ -229,7 +218,6 @@ static int do_prsl(const char *vin_path, uint32_t key)
         if (n_cands > 16) printf("...");
         printf("\n");
     } else {
-        /* Print neighbors so we can eyeball the fallback structure. */
         printf("\nlookup key=%u -> miss\n", key);
         printf("nearby keys (lo decompose: l=%u c=%u r=%u):\n",
                key / 10000u, (key / 100u) % 100u, key % 100u);
@@ -247,7 +235,6 @@ static int do_prsl(const char *vin_path, uint32_t key)
             printf("  closest above : %u  (l=%u c=%u r=%u)\n",
                    closest_hi, closest_hi/10000u,
                    (closest_hi/100u)%100u, closest_hi%100u);
-        /* Also probe documented fallback keys: drop right, drop center, etc. */
         uint32_t l = key / 10000u, c = (key / 100u) % 100u, r = key % 100u;
         struct { const char *name; uint32_t k; } probes[] = {
             { "drop right (r=0)", l * 10000u + c * 100u },
@@ -291,7 +278,6 @@ static int do_ccos(const char *vin_path, uint32_t hp_class, uint32_t slot)
         fprintf(stderr, "out of range hp_class=%u slot=%u\n", hp_class, slot);
         spfy_ccos_free(&c); spfy_vin_free(&vin); return 1;
     }
-    /* Print row 32 (silence label) all cols if requested. */
     {
         const char *r_env = getenv("SPFY_CCOS_ROW");
         if (r_env) {
@@ -307,7 +293,6 @@ static int do_ccos(const char *vin_path, uint32_t hp_class, uint32_t slot)
             }
         }
     }
-    /* Print top-left 6x6 corner. */
     printf("table (top-left 6x6):\n");
     for (uint32_t i = 0; i < 6 && i < c.n_labels; ++i) {
         printf("  ");
@@ -316,12 +301,10 @@ static int do_ccos(const char *vin_path, uint32_t hp_class, uint32_t slot)
         }
         printf("\n");
     }
-    /* Diagonal sanity check (must be 0). */
     int diag_ok = 1;
     for (uint32_t i = 0; i < c.n_labels; ++i) {
         if (t[i * c.n_labels + i] != 0.0f) { diag_ok = 0; break; }
     }
-    /* Symmetry check. */
     int sym_ok = 1;
     for (uint32_t i = 0; i < c.n_labels && sym_ok; ++i) {
         for (uint32_t j = 0; j < i; ++j) {
@@ -394,9 +377,7 @@ done:
 }
 
 /* Derive the per-unit hp_class table from the VIN alone and, when a
- * reference file is supplied, diff it against that. The reference is a
- * Frida-dumped hpclass.bin (one byte per unit); an exact match proves the
- * derivation can replace the capture. */
+ * reference file is supplied, diff it against that. */
 static int do_hpclass(const char *vin_path, const char *ref_path)
 {
     spfy_vin_t vin = {0};
@@ -485,8 +466,7 @@ static int do_hpclass(const char *vin_path, const char *ref_path)
 
 /* List the voice's phone inventory in feat["name"] order -- the engine's
  * phone-id numbering, and the numbering hp_class and the FE's ctx[] are
- * both built on. Prints the VCF phoneset alongside it so a symbol the FE
- * emits but the VIN does not carry is visible at a glance. */
+ * both built on. */
 static int do_phones(const char *vin_path, const char *vcf_path)
 {
     spfy_vin_t vin = {0};
@@ -536,6 +516,62 @@ static int do_phones(const char *vin_path, const char *vcf_path)
     return 0;
 }
 
+/* Every unit as one TSV row -- the whole voice as a phonetic index.
+ *
+ * WHY THIS EXISTS. "Does this voice actually contain the word X?" could only
+ * be answered by looking at the candidate POOLS of a render, which answers a
+ * narrower question (what the preselect surfaced for one slot) and cannot say
+ * anything about a word nobody rendered. This dumps the table itself, once,
+ * so any coverage question becomes a substring search downstream.
+ *
+ * ⚠ The half-phone SIDE is the unit id's parity, not the `is_first_half`
+ * byte -- see spfy_phone_order_hpclass. `is_first_half` is emitted anyway
+ * because the anchor scorer's gate reads it, but nothing here derives the
+ * side from it, and a consumer that does will get every pair backwards.
+ *
+ * The phone NAME is the VIN's feat["name"] order, i.e. what --phones lists:
+ * the on-disk phone_center is a LABL index and is permuted through
+ * labl_to_feat first. Emitting the raw byte would silently swap d/dh/dx and
+ * en/er, which are exactly the phones a pronunciation question turns on. */
+static int do_index(const char *vin_path)
+{
+    spfy_vin_t vin = {0};
+    int rc = spfy_vin_load(vin_path, &vin);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "vin_load: %s\n", spfy_strerror(rc));
+        return 1;
+    }
+    spfy_phone_order_t po = {0};
+    rc = spfy_phone_order_build(&vin, &po);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "phone_order_build: %s\n", spfy_strerror(rc));
+        spfy_vin_free(&vin); return 1;
+    }
+    spfy_unit_table_t ut = {0};
+    rc = spfy_unit_table_load(&vin, &ut);
+    if (rc != SPFY_OK) {
+        fprintf(stderr, "unit_table_load: %s\n", spfy_strerror(rc));
+        spfy_phone_order_free(&po); spfy_vin_free(&vin); return 1;
+    }
+
+    printf("#uid\tfile_idx\tlocal_pos_ms\tdur_like_ms\tphone\tside\tfirst_half\n");
+    for (uint32_t uid = 0; uid < ut.n_units; ++uid) {
+        spfy_unit_record_t r;
+        if (spfy_unit_record_get(&ut, uid, &r) != SPFY_OK)
+            continue;
+        uint8_t feat = (r.phone_center < po.n_labels)
+                     ? po.labl_to_feat[r.phone_center] : SPFY_PHONE_NONE;
+        const char *nm = (feat < po.n_phones) ? po.phone_names[feat] : "?";
+        printf("%u\t%u\t%u\t%u\t%s\t%c\t%u\n",
+               uid, r.file_idx, r.local_pos, r.dur_like, nm,
+               (uid & 1u) ? 'R' : 'L', (unsigned)r.is_first_half);
+    }
+
+    spfy_phone_order_free(&po);
+    spfy_vin_free(&vin);
+    return 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -548,9 +584,10 @@ static void usage(const char *argv0)
         "       %s --ccos <voice.vin> <hp_class> <slot>\n"
         "       %s --resolve <voice.vin> <voice.vdb> <unit_id>\n"
         "       %s --hpclass <voice.vin> [reference_hpclass.bin]\n"
-        "       %s --phones <voice.vin> [voice.vcf]\n",
+        "       %s --phones <voice.vin> [voice.vcf]\n"
+        "       %s --index <voice.vin>          (TSV, one row per unit)\n",
         argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0,
-        argv0);
+        argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -565,6 +602,8 @@ int main(int argc, char **argv)
         return do_hpclass(argv[2], argc == 4 ? argv[3] : NULL);
     if ((argc == 3 || argc == 4) && strcmp(argv[1], "--phones") == 0)
         return do_phones(argv[2], argc == 4 ? argv[3] : NULL);
+    if (argc == 3 && strcmp(argv[1], "--index") == 0)
+        return do_index(argv[2]);
     if (argc == 5 && strcmp(argv[1], "--hash") == 0) {
         spfy_vin_t vin = {0};
         if (spfy_vin_load(argv[2], &vin) != SPFY_OK) {

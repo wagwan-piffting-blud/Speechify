@@ -28,7 +28,6 @@
 #define FOURCC_SVIN SPFY_FOURCC('s','v','i','n')
 #define FOURCC_LIST SPFY_FOURCC('L','I','S','T')
 
-/* sub-chunk fourcc literals */
 #define FCC_VERS SPFY_FOURCC('v','e','r','s')
 #define FCC_CNTS SPFY_FOURCC('c','n','t','s')
 #define FCC_FEAT SPFY_FOURCC('f','e','a','t')
@@ -55,7 +54,6 @@ static uint32_t le_u32(const uint8_t *p)
 
 static int parse_hash_subchunks(spfy_vin_t *v, const uint8_t *data, size_t n)
 {
-    /* Three nested RIFF-style sub-chunks: head (8B), rows, cell. */
     spfy_riff_iter it;
     spfy_riff_iter_init(&it, data, n);
     spfy_chunk c;
@@ -89,10 +87,8 @@ int spfy_vin_load(const char *path, spfy_vin_t *out)
     int rc = spfy_slurp_file(path, &buf, &n);
     if (rc != SPFY_OK) return rc;
 
-    /* Whole file XOR'd with 0xCE. Symmetric: same op deobfuscates. */
     spfy_unobfuscate_ce(buf, n);
 
-    /* Top-level: 'RIFF' u32 size 'svin' [chunks...] */
     if (n < 12) { free(buf); return SPFY_E_FORMAT; }
     if (le_u32(buf) != FOURCC_RIFF) {
         spfy_log_err("vin: expected 'RIFF' at offset 0");
@@ -112,7 +108,6 @@ int spfy_vin_load(const char *path, spfy_vin_t *out)
     out->bytes   = buf;
     out->n_bytes = n;
 
-    /* Walk top-level chunks starting at offset 12. */
     spfy_riff_iter it;
     spfy_riff_iter_init(&it, buf + 12, (size_t)riff_size - 4);
     spfy_chunk c;
@@ -136,7 +131,7 @@ int spfy_vin_load(const char *path, spfy_vin_t *out)
             rc = parse_hash_subchunks(out, c.data, c.size);
             if (rc != SPFY_OK) { spfy_vin_free(out); return rc; }
             break;
-        case FOURCC_LIST: /* metadata; ignore for now */ break;
+        case FOURCC_LIST:  break;
         default: {
             char fcc[5]; spfy_fourcc_str(c.fourcc, fcc);
             spfy_log_warn("vin: unknown top-level chunk '%s' (size=%u)",
@@ -147,7 +142,6 @@ int spfy_vin_load(const char *path, spfy_vin_t *out)
     }
     if (ir < 0) { spfy_vin_free(out); return SPFY_E_FORMAT; }
 
-    /* Required chunks for an M0a "complete" voice. */
     if (!out->feat || !out->unit || !out->hash || !out->f0tr || !out->durt) {
         spfy_log_err("vin: missing required chunk(s) "
                      "(feat=%p unit=%p hash=%p f0tr=%p durt=%p)",

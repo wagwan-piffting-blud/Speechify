@@ -1,17 +1,4 @@
-/* spfy_hash_replay -- M3.3 acceptance harness.
- *
- * Replays a captured hash_probe JSONL trace through our C hash table and
- * verifies every (uid_left, uid_right) probe gives the same hit/miss
- * result and the same f32 cost as the engine.
- *
- *   spfy_hash_replay <voice.vin> <hash_probes.jsonl>
- *
- * The JSONL is produced by:
- *   python spfy/test/oracle/run_frida_capture.py --hook hash_lookup ...
- *
- * Each line is one engine probe with fields: uid_left, uid_right, hit,
- * cost, stored. We re-run the lookup in C and compare.
- */
+/* spfy_hash_replay -- M3.3 acceptance harness. */
 
 #include <spfy/spfy.h>
 
@@ -51,7 +38,6 @@ static int parse_long_at(const char *p, const char *end, long *out)
 static int parse_double_at(const char *p, const char *end, double *out)
 {
     while (p < end && (*p == ' ' || *p == '\t')) ++p;
-    /* "null" -> NaN sentinel (we don't care about value on miss) */
     if (p + 4 <= end && memcmp(p, "null", 4) == 0) { *out = 0.0; return 1; }
     char *e = NULL;
     double v = strtod(p, &e);
@@ -113,7 +99,6 @@ int main(int argc, char **argv)
         if (!p || parse_long_at(p, end, &uid_right)) continue;
         p = find_key(buf, end, "hit");
         if (!p) continue;
-        /* "true" / "false" */
         while (p < end && (*p == ' ' || *p == '\t')) ++p;
         if (p + 4 <= end && memcmp(p, "true", 4) == 0)        hit_int = 1;
         else if (p + 5 <= end && memcmp(p, "false", 5) == 0)  hit_int = 0;
@@ -161,8 +146,7 @@ int main(int argc, char **argv)
 
     fprintf(stdout, "\nprobes total      : %ld\n", n_probes);
     /* Explicit (double) casts: `long` is 64-bit on 64-bit hosts and
-     * -Wconversion flags the implicit widening. Probe counts never reach
-     * 2^53, so the cast is exact. */
+     * -Wconversion flags the implicit widening. */
     fprintf(stdout, "hit/miss match    : %ld  (%.2f%%)\n",
             n_match,
             100.0 * (double)n_match / (double)(n_probes ? n_probes : 1));

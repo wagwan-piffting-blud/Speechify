@@ -1,8 +1,4 @@
-/* Stage 6 (alt): ESPR text emitter.
- *
- * Walks %word + %syl + %phoneme streams and produces a valid ESPR
- * document for the original Speechify engine.
- */
+/* Stage 6 (alt): ESPR text emitter. */
 
 #include "stage_espr.h"
 #include "stage_prosody.h"
@@ -17,42 +13,32 @@
 #include <stdio.h>
 #include <string.h>
 
-/* SAMPA-vocab-id -> ARPAbet 2-letter name. Captures the phoneme set
- * the engine accepts (verified via Frida hook on parsePhoneme; see
- * spfy/build/fe_phoneset.json for the full inventory).
- *
- * Vocab IDs come from spfy/build/fe_symbol_table.json. The 1-char
- * SAMPA names our LTS emits map to the ARPAbet equivalents as listed
- * in project_fe_f0_eloquence.md. Phonemes our LTS doesn't currently
- * produce (oy, ax, dx, ix, en, jh, etc) are added for completeness so
- * future LTS revisions can use them by symbol-vocab ID. */
+/* SAMPA-vocab-id -> ARPAbet 2-letter name. */
 typedef struct {
     uint16_t vocab_id;
     const char *arpabet;
 } sampa_to_arpa_t;
 
 static const sampa_to_arpa_t SAMPA_TO_ARPA[] = {
-    /* Vowels */
-    { 271, "ae" },   /* a -> ae (cat) */
-    { 259, "aa" },   /* A -> aa (father) */
-    { 258, "eh" },   /* E -> eh (set) */
-    { 257, "ey" },   /* e -> ey (say) */
-    { 255, "iy" },   /* i -> iy (see) */
-    { 256, "ih" },   /* I -> ih (sit) */
-    { 274, "ow" },   /* o -> ow (go) */
-    { 278, "ao" },   /* O -> ao (thought) */
-    { 272, "uw" },   /* u -> uw (boot) */
-    { 273, "uh" },   /* U -> uh (put) */
-    { 266, "ax" },   /* @ -> ax (schwa) */
-    { 276, "ay" },   /* Y -> ay (boy/by) */
-    { 277, "aw" },   /* W -> aw (now) */
-    { 260, "ah" },   /* X -> ah (cup) */
-    { 264, "er" },   /* R -> er (bird) */
-    { 265, "ah" },   /* L (syllabic) -> ah */
-    { 261, "ix" },   /* reduced /ɪ/ — engine emits for "the X" before C */
-    /* Consonants */
-    { 233, "dx" },   /* flap-t (intervocalic t/d) */
-    { 263, "en" },   /* syllabic n */
+    { 271, "ae" },
+    { 259, "aa" },
+    { 258, "eh" },
+    { 257, "ey" },
+    { 255, "iy" },
+    { 256, "ih" },
+    { 274, "ow" },
+    { 278, "ao" },
+    { 272, "uw" },
+    { 273, "uh" },
+    { 266, "ax" },
+    { 276, "ay" },
+    { 277, "aw" },
+    { 260, "ah" },
+    { 264, "er" },
+    { 265, "ah" },
+    { 261, "ix" },
+    { 233, "dx" },
+    { 263, "en" },
     { 229, "b"  },
     { 230, "p"  },
     { 231, "d"  },
@@ -61,18 +47,18 @@ static const sampa_to_arpa_t SAMPA_TO_ARPA[] = {
     { 236, "g"  },
     { 240, "f"  },
     { 239, "v"  },
-    { 238, "th" },   /* T -> th */
-    { 237, "dh" },   /* D -> dh */
+    { 238, "th" },
+    { 237, "dh" },
     { 242, "s"  },
     { 241, "z"  },
-    { 244, "sh" },   /* S -> sh */
-    { 243, "zh" },   /* Z -> zh */
-    { 246, "ch" },   /* C -> ch */
-    { 245, "jh" },   /* J -> jh */
-    { 247, "hh" },   /* h -> hh */
+    { 244, "sh" },
+    { 243, "zh" },
+    { 246, "ch" },
+    { 245, "jh" },
+    { 247, "hh" },
     { 248, "m"  },
     { 249, "n"  },
-    { 250, "ng" },   /* G -> ng */
+    { 250, "ng" },
     { 251, "r"  },
     { 252, "l"  },
     { 253, "y"  },
@@ -89,7 +75,6 @@ static const char *arpabet_for_id(uint16_t vocab_id)
     return NULL;
 }
 
-/* Buffered writer with overflow guard. */
 typedef struct {
     char  *buf;
     size_t cap;
@@ -132,7 +117,6 @@ static void w_printf(writer_t *w, const char *fmt, ...)
     }
 }
 
-/* Emit the normalized text of a word (lowercase, ASCII letters only). */
 static void emit_norm_text(writer_t *w, const char *text,
                             uint16_t off, uint16_t len)
 {
@@ -147,11 +131,8 @@ static void emit_norm_text(writer_t *w, const char *text,
     w_puts(w, tmp);
 }
 
-/* Emit a single word's ESPR record: <NormText [phonemes]>
- *
- * For the first iteration we omit PhraseType and GramCat. The
- * minimal `<text [phonemes]>` form is what we test first. If the
- * engine's parser rejects, we'll add stubs in iteration 2. */
+/* Emit a single word's ESPR record: <NormText [phonemes]> For the first
+ * iteration we omit PhraseType and GramCat. */
 static void emit_word(writer_t *w, const spfy_fe_token_t *word,
                        const char *text,
                        const spfy_fe_token_t *syls, uint32_t n_syls,
@@ -161,16 +142,14 @@ static void emit_word(writer_t *w, const spfy_fe_token_t *word,
     emit_norm_text(w, text, word->fields[0], word->fields[1]);
     w_puts(w, " ");
 
-    /* Optional VolumeRate from prosody hints (rate/volume). */
     int rate_pct = (int16_t)word->fields[SPFY_PROSODY_FIELD_RATE_PCT];
     int pitch_st = (int16_t)word->fields[SPFY_PROSODY_FIELD_PITCH_ST];
     if (rate_pct != 0) {
-        /* `(rN)` -- rate adjustment percent. Engine multiplies. */
         int rate_value = 100 + rate_pct;
         if (rate_value < 10) rate_value = 10;
         w_printf(w, "(r%d) ", rate_value);
     }
-    (void)pitch_st;        /* pitch is per-phoneme via F0 in [...] */
+    (void)pitch_st;
 
     /* SylPhones: walk syllables of this word, emitting their phonemes
      * grouped by syllable boundary markers. */
@@ -183,23 +162,19 @@ static void emit_word(writer_t *w, const spfy_fe_token_t *word,
 
         uint16_t syl_pos = syls[si].fields[2];
         uint16_t syl_total = syls[si].fields[3];
-        /* Syllable marker: .<index>.  We use 1-based stress (1 = primary,
-         * 0 = none) -- engine pattern is `.1,...;...` with the int as
-         * stress level by some conventions. */
-        int stress_level = (syls[si].name == 442) ? 1 : 0;   /* 442=str */
+        /* Syllable marker: .<index>. */
+        int stress_level = (syls[si].name == 442) ? 1 : 0;
         w_printf(w, ".%d ", stress_level);
         (void)syl_pos; (void)syl_total;
 
-        /* Emit each phoneme in this syllable. */
         for (uint32_t pi = 0; pi < n_phons; ++pi) {
             if (phons[pi].syl_id != si) continue;
             const char *arpa = arpabet_for_id(phons[pi].name);
             if (!arpa) continue;
-            /* Phoneme parameter `p` defaults to 1.0 (relative duration).
-             * Future: scale by emphasis_level or rate hints. */
+            /* Phoneme parameter `p` defaults to 1.0 (relative duration). */
             float p = 1.0f;
             uint16_t emph = phons[pi].fields[SPFY_PROSODY_FIELD_EMPHASIS];
-            if (emph >= 3)      p = 1.20f;     /* strong: stretch 20% */
+            if (emph >= 3)      p = 1.20f;
             else if (emph == 2) p = 1.10f;
             w_printf(w, "%s(p%.2f) ", arpa, p);
         }
@@ -226,15 +201,12 @@ int spfy_fe_espr_emit(const spfy_fe_t *fe,
     const spfy_fe_token_t *xs  = spfy_fe_stream_tokens(delta, SPFY_STREAM_SYL,     &n_syl);
     const spfy_fe_token_t *xph = spfy_fe_stream_tokens(delta, SPFY_STREAM_PHONEME, &n_phon);
 
-    /* ESPR document opener. */
     w_puts(&w, "\\!SWIespr0 %% { ");
 
-    /* Walk words ordered by phrase, emitting phrase boundaries. */
     uint16_t cur_phrase = (n_word > 0) ? xw[0].phrase_id : 0;
     int wrote_phrase_open = 0;
     for (uint32_t i = 0; i < n_word; ++i) {
         if (i > 0 && xw[i].phrase_id != cur_phrase) {
-            /* End current phrase, start new one with a short pause. */
             w_puts(&w, " pau(p0.20) ");
             cur_phrase = xw[i].phrase_id;
         }
@@ -247,7 +219,6 @@ int spfy_fe_espr_emit(const spfy_fe_t *fe,
         emit_word(&w, &xw[i], original_text, xs, n_syl, xph, n_phon);
     }
 
-    /* Document closer. */
     w_puts(&w, " } %% \\!SWIespr1");
 
     if (w.overflowed) return SPFY_E_OOB;

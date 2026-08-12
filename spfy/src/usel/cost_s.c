@@ -1,4 +1,3 @@
-/* S (context / ccos) cost component. */
 
 #include "cost.h"
 
@@ -23,10 +22,7 @@ float spfy_cost_s(const float   *ccos,
     for (int s = 0; s < SPFY_CCOS_N_SLOTS; ++s) {
         uint8_t t_phone = target_ctx[s];
         uint8_t c_phone = cand_ctx[s];
-        /* TARGET sentinel (>= n_phones, e.g. 255 = no context) skips.
-         * The engine reads target through a remap table which doesn't
-         * go past 93 in valid use; with halfphone-class targets we never
-         * hit 255 here in practice. Keep the guard for safety. */
+        /* TARGET sentinel (>= n_phones, e.g. */
         if (t_phone >= n_phones) continue;
         uint32_t ti = L[t_phone];
         if (ti >= n_labels) continue;

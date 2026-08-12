@@ -1,4 +1,3 @@
-/* CART loader: parses f0tr / durt chunks into spfy_cart_t. */
 
 #include "cart.h"
 
@@ -37,9 +36,9 @@ static int parse_trhd(const uint8_t *data, size_t n, spfy_cart_t *c)
         if (sc.fourcc == FCC_LABL) {
             if (sc.size < 4) return SPFY_E_FORMAT;
             c->n_labels = le_u32(sc.data);
-            /* Strings follow but we don't need them keyed by name --
-             * the engine and our CART evaluator both use phone-label
-             * indices, not names. */
+            /* Strings follow but we don't need them keyed by name -- the
+             * engine and our CART evaluator both use phone-label indices,
+             * not names. */
         } else if (sc.fourcc == FCC_QUES) {
             if (sc.size < 4) return SPFY_E_FORMAT;
             const uint8_t *p   = sc.data;
@@ -74,7 +73,6 @@ static int parse_one_tree(const uint8_t *data, size_t n,
         t->n_nodes = 0; t->nodes = NULL;
         return SPFY_OK;
     }
-    /* Defensive cap: 100k nodes is more than any documented tree. */
     if (n_nodes > 100000u) return SPFY_E_FORMAT;
 
     spfy_cart_node_t *nodes = (spfy_cart_node_t *)calloc(n_nodes, sizeof *nodes);
@@ -84,23 +82,20 @@ static int parse_one_tree(const uint8_t *data, size_t n,
     const uint8_t *end = data + n;
     for (uint32_t i = 0; i < n_nodes; ++i) {
         if ((size_t)(end - p) < 12) { free(nodes); return SPFY_E_FORMAT; }
-        /* Common 12B prefix:
-         *   u32  node_index   (dead, sequential)
-         *   s32  yes_child    (>= 0: branch, child index; < 0: leaf marker)
-         *   u32  no_child     (branch: child index; leaf: 0xFFFFFFFF sentinel) */
+        /* Common 12B prefix: u32 node_index (dead, sequential) s32
+         * yes_child (>= 0: branch, child index; < 0: leaf marker) u32
+         * no_child (branch: child index; leaf: 0xFFFFFFFF sentinel) */
         uint32_t  dead       = le_u32(p);     (void)dead;        p += 4;
         int32_t   yes_child  = (int32_t)le_u32(p);                p += 4;
         uint32_t  no_child   = le_u32(p);                          p += 4;
         nodes[i].yes_child = yes_child;
         nodes[i].no_child  = no_child;
         if (yes_child >= 0) {
-            /* Branch: 4 more bytes for q_index -> 16B total. */
             if ((size_t)(end - p) < 4) { free(nodes); return SPFY_E_FORMAT; }
             nodes[i].q_index = le_u32(p);                          p += 4;
             nodes[i].leaf_mean = 0.0f;
             nodes[i].leaf_var  = 0.0f;
         } else {
-            /* Leaf: 8 more bytes for mean (f32) + variance (f32) -> 20B total. */
             if ((size_t)(end - p) < 8) { free(nodes); return SPFY_E_FORMAT; }
             nodes[i].q_index   = 0xFFFFFFFFu;
             nodes[i].leaf_mean = le_f32(p);                        p += 4;
@@ -117,14 +112,13 @@ static int load_chunk(const uint8_t *chunk_data, size_t chunk_n,
 {
     memset(out, 0, sizeof *out);
 
-    /* The chunk body is a sequence of nested sub-chunks: one trhd
-     * followed by one or more tree chunks. */
+    /* The chunk body is a sequence of nested sub-chunks: one trhd followed
+     * by one or more tree chunks. */
     spfy_riff_iter it;
     spfy_riff_iter_init(&it, chunk_data, chunk_n);
     spfy_chunk sc;
     int rc;
 
-    /* First pass: count tree subchunks, parse trhd. */
     uint32_t n_trees = 0;
     int saw_trhd = 0;
     while ((rc = spfy_riff_iter_next(&it, &sc)) == 1) {
@@ -149,7 +143,6 @@ static int load_chunk(const uint8_t *chunk_data, size_t chunk_n,
     out->trees   = (spfy_cart_tree_t *)calloc(n_trees, sizeof *out->trees);
     if (!out->trees) { spfy_cart_free(out); return SPFY_E_NOMEM; }
 
-    /* Second pass: parse trees. */
     spfy_riff_iter_init(&it, chunk_data, chunk_n);
     uint32_t ti = 0;
     while (spfy_riff_iter_next(&it, &sc) == 1) {
@@ -171,10 +164,7 @@ int spfy_cart_load_durt(const spfy_vin_t *vin, spfy_cart_t *out)
 {
     if (!vin || !out) return SPFY_E_INVAL;
     if (!vin->durt || vin->durt_n == 0) return SPFY_E_FORMAT;
-    /* One durt tree per phone label. The count is the durt chunk's OWN
-     * trhd label count, which is not a fixed 47 -- that is only Tom's
-     * (46 phones + a trailing empty label). Jill/Felix have 46, and the
-     * es-MX voices have 31. */
+    /* One durt tree per phone label. */
     int rc = load_chunk(vin->durt, vin->durt_n, 0u, out);
     if (rc != SPFY_OK) return rc;
     if (out->n_trees != out->n_labels) {

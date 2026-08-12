@@ -31,13 +31,13 @@
  */
 
 typedef enum {
-    SPFY_HINT_EMPHASIS = 0,    /* strong/moderate/reduced/none */
-    SPFY_HINT_PITCH,           /* relative pitch shift (semitones) */
-    SPFY_HINT_RATE,            /* speaking rate (% of normal) */
-    SPFY_HINT_BREAK,           /* pause insertion (ms) */
-    SPFY_HINT_PHONEME,         /* override pronunciation with explicit SPR */
-    SPFY_HINT_VOICE,           /* voice / speaker change */
-    SPFY_HINT_LANG,            /* language / dialect override */
+    SPFY_HINT_EMPHASIS = 0,
+    SPFY_HINT_PITCH,
+    SPFY_HINT_RATE,
+    SPFY_HINT_BREAK,
+    SPFY_HINT_PHONEME,
+    SPFY_HINT_VOICE,
+    SPFY_HINT_LANG,
     SPFY_HINT__MAX
 } spfy_hint_kind_t;
 
@@ -51,20 +51,18 @@ typedef enum {
 typedef struct {
     spfy_hint_kind_t kind;
 
-    /* Half-open byte range in the input text [start, end). */
     uint32_t byte_start;
     uint32_t byte_end;
 
-    /* Tag-specific value union. Caller fills the matching arm based
-     * on `kind`. */
+    /* Tag-specific value union. */
     union {
-        spfy_emphasis_t emphasis;     /* HINT_EMPHASIS */
-        int8_t          pitch_st;     /* HINT_PITCH (semitones, -12..+12) */
-        int16_t         rate_pct;     /* HINT_RATE (-50..+200, 0=normal) */
-        uint16_t        break_ms;     /* HINT_BREAK */
-        const char     *phoneme_spr;  /* HINT_PHONEME (NUL-term SPR) */
-        const char     *voice_name;   /* HINT_VOICE */
-        const char     *lang_tag;     /* HINT_LANG (e.g., "es-MX") */
+        spfy_emphasis_t emphasis;
+        int8_t          pitch_st;
+        int16_t         rate_pct;
+        uint16_t        break_ms;
+        const char     *phoneme_spr;
+        const char     *voice_name;
+        const char     *lang_tag;
     } v;
 } spfy_prosody_hint_t;
 
@@ -74,13 +72,11 @@ typedef struct {
     uint32_t             cap;
 } spfy_prosody_hints_t;
 
-/* Empty hints bundle. Caller appends with spfy_prosody_hints_add(). */
 void spfy_prosody_hints_init(spfy_prosody_hints_t *h);
 void spfy_prosody_hints_free(spfy_prosody_hints_t *h);
 int  spfy_prosody_hints_add (spfy_prosody_hints_t *h,
                               spfy_prosody_hint_t   hint);
 
-/* Convenience constructors -- these are the most common cases. */
 int  spfy_prosody_emphasize (spfy_prosody_hints_t *h,
                               uint32_t byte_start, uint32_t byte_end,
                               spfy_emphasis_t level);
@@ -94,13 +90,7 @@ int  spfy_prosody_break      (spfy_prosody_hints_t *h,
                               uint32_t byte_pos,
                               uint16_t duration_ms);
 
-/* Parse SSML-flavoured input into (plain_text, hints) pair.
- * Recognises <emphasis level=...>, <prosody pitch=... rate=...>,
- * <break time=...>, <phoneme alphabet="SPR" ph="...">, and a few
- * other Speechify-compatible tags. NUL-terminates *out_plain.
- * Caller frees *out_plain with free() and *out_hints with
- * spfy_prosody_hints_free.
- */
+/* Parse SSML-flavoured input into (plain_text, hints) pair. */
 int  spfy_prosody_parse_ssml(const char            *ssml,
                               char                 **out_plain,
                               spfy_prosody_hints_t  *out_hints);

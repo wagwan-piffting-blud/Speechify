@@ -1,12 +1,4 @@
-/* VCF proscost matrix loader.
- *
- * Scans the decrypted VCF XML for <param name="tts.voiceCfg.proscost.MATRIX.ROW">
- * blocks, extracts <namedValue name="COL"> FLOAT </namedValue> children,
- * stacks rows in encounter order, and builds a row-major f32 matrix with
- * accompanying name arrays.
- *
- * The XML schema is small and rigid; we use the same hand-rolled scanner
- * approach as vcf_loader.c (no libexpat dep). */
+/* VCF proscost matrix loader. */
 
 #include "vcf_matrix.h"
 #include "voice.h"
@@ -31,8 +23,8 @@
 static const char *KIND_NAME[SPFY_PROSCOST_N] = {
     "sylInPhraseCosts",
     "sylTypeCosts",
-    "sylInWordCosts",      /* index 2 in engine order */
-    "wordInPhraseCosts",   /* index 3 in engine order */
+    "sylInWordCosts",
+    "wordInPhraseCosts",
     "phoneInSylCosts",
 };
 
@@ -66,8 +58,8 @@ static void free_string_array(char **arr, uint32_t n)
  * collect <namedValue name="COL"> VALUE </namedValue> children. */
 typedef struct {
     char    *row_name;
-    char   **col_names;       /* nv_count entries */
-    float   *col_values;      /* nv_count entries */
+    char   **col_names;
+    float   *col_values;
     uint32_t nv_count;
 } parsed_row_t;
 
@@ -81,12 +73,11 @@ static void free_parsed_row(parsed_row_t *r)
 
 static int parse_one_row(const char *param_open,
                          const char *param_close,
-                         const char *kind_prefix, /* e.g. "sylInPhraseCosts." */
+                         const char *kind_prefix,
                          parsed_row_t *out)
 {
     memset(out, 0, sizeof *out);
 
-    /* Extract row name: name="...kind_prefix.ROW" -> row name */
     const char *name_attr = bounded_str(param_open,
                                         (size_t)(param_close - param_open),
                                         "name=\"");
@@ -103,7 +94,6 @@ static int parse_one_row(const char *param_open,
     out->row_name = xstrdup_n(row_start, (size_t)(row_end - row_start));
     if (!out->row_name) return SPFY_E_NOMEM;
 
-    /* Walk <namedValue> entries. Cap at 64 to bound the allocation. */
     char    *names[64];
     float    vals[64];
     uint32_t n = 0;
@@ -121,7 +111,6 @@ static int parse_one_row(const char *param_open,
         while (nameq_end < param_close && *nameq_end != '"') ++nameq_end;
         if (nameq_end >= param_close) break;
 
-        /* Find '>' then float, then '</namedValue>'. */
         const char *gt = bounded_str(nameq_end,
                                      (size_t)(param_close - nameq_end), ">");
         if (!gt) break;
@@ -135,7 +124,6 @@ static int parse_one_row(const char *param_open,
                    for (uint32_t i = 0; i < n; ++i) free(names[i]);
                    return SPFY_E_NOMEM; }
 
-        /* Parse float between gt+1 and close. */
         char buf[32];
         size_t num_n = (size_t)(close - (gt + 1));
         if (num_n >= sizeof buf) num_n = sizeof buf - 1;
@@ -146,7 +134,7 @@ static int parse_one_row(const char *param_open,
         names[n] = cn;
         vals[n]  = v;
         ++n;
-        p = close + 13;        /* past "</namedValue>" */
+        p = close + 13;
     }
 
     if (n == 0) { free_parsed_row(out); return SPFY_E_FORMAT; }
@@ -169,14 +157,12 @@ static int load_one_kind(const char *xml, size_t xml_n,
 {
     memset(out, 0, sizeof *out);
 
-    /* Build the search prefix: "tts.voiceCfg.proscost.<kind>." */
     char prefix[128];
     int rc = snprintf(prefix, sizeof prefix,
                       "tts.voiceCfg.proscost.%s.", kind);
     if (rc < 0 || (size_t)rc >= sizeof prefix) return SPFY_E_FORMAT;
 
-    /* Pass 1: discover all <param> blocks for this matrix. We hold up to
-     * 64 rows. */
+    /* Pass 1: discover all <param> blocks for this matrix. */
     parsed_row_t rows[64];
     uint32_t     n_rows = 0;
     const char  *p   = xml;
@@ -189,9 +175,8 @@ static int load_one_kind(const char *xml, size_t xml_n,
                                               (size_t)(end - param_open),
                                               "</param>");
         if (!param_close) break;
-        param_close += 8;     /* include "</param>" */
+        param_close += 8;
 
-        /* Match this <param> against our prefix. */
         const char *prefix_pos = bounded_str(param_open,
                                              (size_t)(param_close - param_open),
                                              prefix);
@@ -199,7 +184,6 @@ static int load_one_kind(const char *xml, size_t xml_n,
             int prc = parse_one_row(param_open, param_close, prefix,
                                     &rows[n_rows]);
             if (prc != SPFY_OK) {
-                /* Roll back any rows already parsed. */
                 for (uint32_t i = 0; i < n_rows; ++i) free_parsed_row(&rows[i]);
                 return prc;
             }
@@ -209,7 +193,6 @@ static int load_one_kind(const char *xml, size_t xml_n,
     }
 
     if (n_rows == 0) {
-        /* Matrix not present (e.g. phoneInSylCosts may be missing in Tom). */
         return SPFY_OK;
     }
 
@@ -235,7 +218,6 @@ static int load_one_kind(const char *xml, size_t xml_n,
         }
     }
 
-    /* Build output: flat row-major float array + name arrays. */
     out->data = (float *)calloc((size_t)n_rows * n_cols, sizeof *out->data);
     out->row_names = (char **)calloc(n_rows, sizeof *out->row_names);
     out->col_names = (char **)calloc(n_cols, sizeof *out->col_names);
@@ -248,18 +230,7 @@ static int load_one_kind(const char *xml, size_t xml_n,
     out->n_rows = n_rows;
     out->n_cols = n_cols;
 
-    /* Place each row at the index whose col_name matches the row_name.
-     * The engine indexes the matrix as [row_label_idx][col_label_idx]
-     * with row_label and col_label drawn from the SAME label vocabulary
-     * (e.g. "PhrInitial" maps to label index 1 both as a target row and
-     * a candidate column). VCF rows arrive in encounter order which
-     * does NOT match the col-label order, so we need to remap.
-     *
-     * Rows whose name doesn't appear in col_names (e.g. "ContextUnknown",
-     * "FirstPA") get appended at the END (row indices >= n_cols). The
-     * engine's lookup of those rows still works because the actual usage
-     * is always row=col_label_idx. The engine never asks for row indices
-     * past n_cols-1 in normal scoring. */
+    /* Place each row at the index whose col_name matches the row_name. */
     uint8_t placed[64] = {0};
     for (uint32_t i = 0; i < n_rows; ++i) {
         int placed_at = -1;
@@ -272,7 +243,6 @@ static int load_one_kind(const char *xml, size_t xml_n,
             }
         }
         if (placed_at < 0) {
-            /* Append at end. */
             for (uint32_t k = n_cols; k < n_rows; ++k) {
                 if (!placed[k]) {
                     placed_at = (int)k;
@@ -281,14 +251,13 @@ static int load_one_kind(const char *xml, size_t xml_n,
                 }
             }
         }
-        if (placed_at < 0) placed_at = (int)i;     /* fallback */
+        if (placed_at < 0) placed_at = (int)i;
         out->row_names[placed_at] = rows[i].row_name;
         rows[i].row_name = NULL;
         for (uint32_t k = 0; k < n_cols; ++k) {
             out->data[(size_t)placed_at * n_cols + k] = rows[i].col_values[k];
         }
     }
-    /* Adopt col_names from row 0; free others. */
     for (uint32_t k = 0; k < n_cols; ++k) {
         out->col_names[k] = rows[0].col_names[k];
         rows[0].col_names[k] = NULL;

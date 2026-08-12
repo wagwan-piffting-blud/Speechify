@@ -1,4 +1,3 @@
-/* CART tree traversal + question evaluation. */
 
 #include "cart.h"
 
@@ -25,21 +24,18 @@ int spfy_cart_traverse(const spfy_cart_t *c, uint32_t tree_idx,
     const spfy_cart_tree_t *t = &c->trees[tree_idx];
     if (t->n_nodes == 0) return SPFY_E_FORMAT;
 
-    /* Bound traversal depth to catch malformed cycles. Real durt trees max
-     * out at ~12 deep; 256 is generous. */
+    /* Bound traversal depth to catch malformed cycles. */
     uint32_t depth = 0;
-    uint32_t idx   = 0;        /* always start at root */
+    uint32_t idx   = 0;
     while (depth++ < 256u) {
         if (idx >= t->n_nodes) return SPFY_E_FORMAT;
         const spfy_cart_node_t *n = &t->nodes[idx];
 
         if (n->yes_child < 0) {
-            /* Leaf */
             *out_mean = n->leaf_mean;
             *out_var  = n->leaf_var;
             return SPFY_OK;
         }
-        /* Branch: evaluate the question */
         if (n->q_index >= c->n_ques) return SPFY_E_FORMAT;
         const spfy_ques_t *q = &c->ques[n->q_index];
 
@@ -48,5 +44,5 @@ int spfy_cart_traverse(const spfy_cart_t *c, uint32_t tree_idx,
 
         idx = yes ? (uint32_t)n->yes_child : n->no_child;
     }
-    return SPFY_E_FORMAT;     /* depth exceeded -- malformed */
+    return SPFY_E_FORMAT;
 }

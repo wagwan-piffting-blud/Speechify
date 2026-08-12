@@ -26,7 +26,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- helpers ---- */
 
 static void guest_strn_in(uint32_t src, char *out, int maxlen) {
     int i = 0;
@@ -46,11 +45,9 @@ static void guest_str_out(uint32_t dst, const char *s) {
 
 static int g_clock_tick = 0;
 
-/* ---- KERNEL32 ---- */
 
 void s_DisableThreadLibraryCalls(void) {
-    /* HMODULE arg ignored. Return TRUE = thread attach/detach won't fire,
-     * which matches our single-thread emulator anyway. */
+    /* HMODULE arg ignored. */
     ret_set(1);
 }
 
@@ -62,11 +59,9 @@ void s_SearchPathA(void) {
     ret_set(0);
 }
 
-/* ---- USER32 / WINMM stubs ---- */
 
-void s_winmm_zero(void) { ret_set(0); }   /* timeGetDevCaps / timeKillEvent / timeSetEvent */
+void s_winmm_zero(void) { ret_set(0); }
 
-/* ---- MSVCR71 — string / mem ---- */
 
 void s_strdup(void) {
     uint32_t src = arg32(0);
@@ -105,7 +100,6 @@ void s_strchr(void) {
 }
 
 void s_strtol(void) {
-    /* long strtol(const char *str, char **endptr, int base) */
     uint32_t s = arg32(0), endp = arg32(1);
     int base = (int)arg32(2);
     char buf[64];
@@ -117,15 +111,13 @@ void s_strtol(void) {
 }
 
 void s_strtod(void) {
-    /* double strtod(const char *str, char **endptr) — returns in ST(0) */
     uint32_t s = arg32(0), endp = arg32(1);
     char buf[64];
     guest_strn_in(s, buf, (int)sizeof buf);
     char *end_host = NULL;
     double v = strtod(buf, &end_host);
     if (endp) wr32(endp, s + (uint32_t)(end_host - buf));
-    /* x87 ABI: push result on ST(0). MSVC dwords are returned in EAX:EDX,
-     * but doubles are returned in ST(0). */
+    /* x87 ABI: push result on ST(0). */
     CPU.fpu_top = (CPU.fpu_top - 1) & 7;
     CPU.st[CPU.fpu_top] = v;
 }
@@ -146,11 +138,11 @@ void s_atoi(void) {
     ret_set((uint32_t)atoi(buf));
 }
 
-void s_atol(void) { s_atoi(); }   /* same ABI: long == int on 32-bit Windows */
+void s_atol(void) { s_atoi(); }
 
 void s_ldiv(void) {
-    /* ldiv_t ldiv(long num, long denom) — returns the 8-byte struct in EDX:EAX
-     * (quotient in EAX, remainder in EDX). */
+    /* ldiv_t ldiv(long num, long denom) — returns the 8-byte struct in
+     * EDX:EAX (quotient in EAX, remainder in EDX). */
     long num = (long)(int32_t)arg32(0);
     long den = (long)(int32_t)arg32(1);
     if (den == 0) { CPU.r[EAX] = 0; CPU.r[EDX] = 0; return; }
@@ -162,45 +154,32 @@ void s_toupper(void) { ret_set((uint32_t)toupper((int)(arg32(0) & 0xff))); }
 void s_isdigit(void) { ret_set(isdigit((int)(arg32(0) & 0xff)) ? 1 : 0); }
 void s_isspace(void) { ret_set(isspace((int)(arg32(0) & 0xff)) ? 1 : 0); }
 
-/* ---- MSVCR71 — stdio (best-effort: most calls happen during init,
- *      where reading missing resource files just degrades to defaults) ---- */
+/* ---- MSVCR71 — stdio (best-effort: most calls happen during init, where
+ * reading missing resource files just degrades to defaults) ---- */
 
-void s_fopen(void)   { ret_set(0); }              /* NULL FILE* */
+void s_fopen(void)   { ret_set(0); }
 void s_fclose(void)  { ret_set(0); }
-void s_fread(void)   { ret_set(0); }              /* 0 items read */
-void s_fwrite(void)  { ret_set(arg32(2)); }       /* pretend all written */
+void s_fread(void)   { ret_set(0); }
+void s_fwrite(void)  { ret_set(arg32(2)); }
 void s_fseek(void)   { ret_set(0); }
 void s_ftell(void)   { ret_set(0); }
-void s_rewind(void)  { /* void */ }
+void s_rewind(void)  {  }
 void s_fflush(void)  { ret_set(0); }
 void s_fputs(void)   { ret_set(0); }
 void s_fgets(void)   { ret_set(0); }
-void s_getchar(void) { ret_set((uint32_t)-1); }   /* EOF */
+void s_getchar(void) { ret_set((uint32_t)-1); }
 void s_fileno(void)  { ret_set((uint32_t)-1); }
-void s_stat(void)    { ret_set((uint32_t)-1); }   /* "no such file" */
+void s_stat(void)    { ret_set((uint32_t)-1); }
 void s_fstat(void)   { ret_set((uint32_t)-1); }
 
-/* The _iob symbol is a *variable* in real MSVCR71: an array of three
- * FILE structs (stdin/stdout/stderr). The import dispatch can't return
- * a variable address through ret_set + ret_imm pop because the guest
- * loads it via `mov reg,[__imp__iob]`. The donor handles this for
- * __acrt_iob_func; for the variable-style _iob, the IAT slot has to
- * point at a real memory region rather than a function. For now we
- * point it at a static 64-byte zero region; any code that does
- * fprintf(stderr, ...) just gets nothing useful, but won't crash.
- *
- * NOTE: registering _iob as a "function" shim is wrong; the guest will
- * *read* the IAT slot directly. The proper fix is to allocate a guest
- * region and patch the IAT to point there post-load. Track as Phase-2
- * follow-up; the no-op function is harmless for boot. */
+/* The _iob symbol is a *variable* in real MSVCR71: an array of three FILE
+ * structs (stdin/stdout/stderr). */
 void s_iob_var(void) { ret_set(0); }
 
 void s_vsprintf(void) {
-    /* int vsprintf(char *buf, const char *fmt, va_list ap) */
     uint32_t bufp = arg32(0), fmtp = arg32(1), apv = arg32(2);
     char fmt[512]; guest_strn_in(fmtp, fmt, (int)sizeof fmt);
-    /* Minimal printf: only "%s" / "%d" / "%u" / "%x" / "%c" / "%%" handled.
-     * Full printf is a Phase-2 niceness; for boot we just need *something*. */
+    /* Minimal printf: only "%s" / "%d" / "%u" / "%x" / "%c" / "%%" handled. */
     char out[1024]; int oi = 0;
     int ap_off = 0;
     for (const char *p = fmt; *p && oi < (int)sizeof out - 2; p++) {
@@ -242,10 +221,8 @@ void s_vsprintf(void) {
 }
 
 void s_sprintf(void) {
-    /* sprintf(buf, fmt, ...) — variadic. Treat the variadic stack as
-     * a flat array starting at [arg2..] and forward to vsprintf logic. */
+    /* sprintf(buf, fmt, ...) — variadic. */
     uint32_t bufp = arg32(0), fmtp = arg32(1);
-    /* Synthesize ap pointing at the first variadic arg slot. */
     char fmt[512]; guest_strn_in(fmtp, fmt, (int)sizeof fmt);
     char out[1024]; int oi = 0;
     int arg_idx = 2;
@@ -282,14 +259,12 @@ void s_sprintf(void) {
     ret_set((uint32_t)oi);
 }
 
-void s_sscanf(void)  { ret_set(0); }            /* 0 fields parsed */
+void s_sscanf(void)  { ret_set(0); }
 void s_vfprintf(void){ ret_set(0); }
 void s_fprintf(void) { ret_set(0); }
 
-/* ---- MSVCR71 — math (cdecl form, takes args on the stack as doubles
- *      and returns in ST(0)). The donor's s_libm_pow / s_libm_log /
- *      s_libm_exp use the SSE2 ABI (XMM regs). MSVCR71's pow/log/exp
- *      take their args on the cdecl stack and return in ST(0). ---- */
+/* ---- MSVCR71 — math (cdecl form, takes args on the stack as doubles and
+ * returns in ST(0)). */
 
 static double cdecl_pop_double(int slot) {
     uint64_t lo = rd32(CPU.r[ESP] + 4 + slot * 4);
@@ -309,19 +284,17 @@ void s_pow_cdecl(void) { cdecl_ret_double(pow(cdecl_pop_double(0), cdecl_pop_dou
 void s_log_cdecl(void) { cdecl_ret_double(log(cdecl_pop_double(0))); }
 void s_exp_cdecl(void) { cdecl_ret_double(exp(cdecl_pop_double(0))); }
 
-/* ---- MSVCR71 — SEH / CRT misc ---- */
 
 /* s_CxxFrameHandler is provided by win32_donor.c (returns 1 =
- * ExceptionContinueSearch). We re-use it for the unnumbered
- * `__CxxFrameHandler` MSVCR71 entry. */
-void s_except_handler3(void)         { ret_set(0); }   /* ditto */
-void s_CppXcptFilter(void)           { ret_set(0); }   /* EXCEPTION_CONTINUE_SEARCH */
-void s_security_error_handler(void)  { /* void */ }
+ * ExceptionContinueSearch). */
+void s_except_handler3(void)         { ret_set(0); }
+void s_CppXcptFilter(void)           { ret_set(0); }
+void s_security_error_handler(void)  {  }
 void s_terminate_msvc(void)          { CPU.halted = 1; CPU.faulted = 1; CPU.fault_msg = "?terminate@@YAXXZ"; }
 void s_adjust_fdiv(void)             { ret_set(0); }
-void s_dllonexit(void)               { ret_set(arg32(0)); }   /* return the registration arg unchanged */
+void s_dllonexit(void)               { ret_set(arg32(0)); }
 void s_onexit(void)                  { ret_set(arg32(0)); }
-void s_setjmp3(void)                 { ret_set(0); }   /* 0 = first call */
+void s_setjmp3(void)                 { ret_set(0); }
 void s_longjmp(void)                 { CPU.halted = 1; CPU.faulted = 1; CPU.fault_msg = "longjmp not implemented"; }
 void s_exit_cdecl(void)              { CPU.halted = 1; if (getenv("SPFY_EMU_VERBOSE")) fprintf(stderr, "[shim] exit(%u) called\n", arg32(0)); }
 void s_clock(void)                   { ret_set((uint32_t)(g_clock_tick += 1000)); }

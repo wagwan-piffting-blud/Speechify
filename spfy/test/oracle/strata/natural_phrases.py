@@ -22,7 +22,7 @@ NAT_SEED: int = 42
 
 
 # Candidate sentence pool. Each bucket has at least 17 entries. Sourced
-# from demos/, doc/, MEMORY.md regression history, and standard-issue
+# from demos/, doc/, regression history, and standard-issue
 # TTS demo/IVR-style utterances. Kept as a literal so the script needs
 # no external file at run time.
 CANDIDATES: list[str] = [

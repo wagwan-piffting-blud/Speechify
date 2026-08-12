@@ -8,6 +8,7 @@ add_library(spfy_usel STATIC
     viterbi.c
     build_graph.c
     slot_ctx.c
+    syl_span.c
     anchor_score.c
 )
 target_include_directories(spfy_usel

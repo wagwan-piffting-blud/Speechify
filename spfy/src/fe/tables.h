@@ -29,39 +29,34 @@
 #define SPFY_FE_REG_B_N   173
 
 typedef struct {
-    const uint8_t *data;        /* points into shared arena */
+    const uint8_t *data;
     uint32_t       size;
-    /* Pre-computed cache of record offsets within this table for
-     * O(1) random access. NULL until spfy_fe_table_index() is called. */
+    /* Pre-computed cache of record offsets within this table for O(1)
+     * random access. */
     uint32_t      *record_offs;
     uint32_t       n_records;
 } spfy_fe_table_t;
 
 typedef struct {
-    /* Registry-A: 553 lexical tables. */
     spfy_fe_table_t a[SPFY_FE_REG_A_N];
-    /* Registry-B: 173 phonetic tables. */
     spfy_fe_table_t b[SPFY_FE_REG_B_N];
     /* Single arena holding all 726 blobs back-to-back so we can free
-     * everything with one call. NULL when not loaded. */
+     * everything with one call. */
     uint8_t        *arena;
     size_t          arena_size;
 } spfy_fe_tables_t;
 
-/* Load all 726 tables from two directories of *.bin files. Each file
- * is named tNNN.bin where NNN is the slot index (zero-padded). */
+/* Load all 726 tables from two directories of *.bin files. */
 int  spfy_fe_tables_load(const char       *tables_a_dir,
                           const char       *tables_b_dir,
                           spfy_fe_tables_t *out);
 
 void spfy_fe_tables_free(spfy_fe_tables_t *t);
 
-/* Build the per-table record-offset cache (lazy; safe to call
- * repeatedly). Returns the number of records found. */
+/* Build the per-table record-offset cache (lazy; safe to call repeatedly). */
 uint32_t spfy_fe_table_index(spfy_fe_table_t *t);
 
-/* Walk records of a table sequentially. cb returns 0 to continue,
- * non-zero to stop. Returns the number of records visited. */
+/* Walk records of a table sequentially. */
 typedef int (*spfy_fe_record_cb)(const uint8_t *bytes,
                                   uint32_t       n_bytes,
                                   uint32_t       record_idx,

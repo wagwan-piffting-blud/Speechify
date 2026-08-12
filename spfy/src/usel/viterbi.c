@@ -1,41 +1,14 @@
-/* Viterbi DP for unit selection.
- *
- * See viterbi.h for the API contract and an overview of how this fits the
- * engine pipeline. This file is the DP only -- target costs come in
- * pre-scored, join costs come in via callback.
- *
- * Implementation notes:
- *
- *   - The forward table is allocated as a single flat long-double buffer
- *     plus a u32 predecessor buffer. Per-slot widths can vary (PRSL pools
- *     are not uniform), so we keep a small offsets[] table that maps slot
- *     index to row start. Compared to the obvious 2D-array shape this
- *     halves the allocator pressure and gives clean cache behaviour.
- *
- *   - Long-double accumulator. The target cost arrives as f32 (caller has
- *     already done the long-double summation in cost_d/f0/sp/s). Joins are
- *     also f32 (engine stores them f32). The forward sum is long double;
- *     the per-slot best is long double. The final cast to float happens
- *     once at return.
- *
- *   - "Forbidden" transitions: any join < 0 OR target_cost < 0 is treated
- *     as forbidden and the transition is skipped. We don't synthesise a
- *     fake +infinity because long double infinities and NaN are awkward
- *     to keep out of subsequent comparisons; explicit skip is simpler.
- *
- *   - If a slot has no reachable predecessor, we report SPFY_E_OOB. The
- *     out_path is left untouched in that case.
- */
+/* Viterbi DP for unit selection. */
 
 #include "viterbi.h"
+#include "env.h"
 
 #include "../../include/spfy/spfy.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define FORBIDDEN_THRESH 0.0f      /* values < this in target/join => skip */
+#define FORBIDDEN_THRESH 0.0f
 
 int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
                      uint32_t                   n_slots,
@@ -47,7 +20,6 @@ int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
     if (!slots || n_slots == 0)            return SPFY_E_INVAL;
     if (!out_total_cost && !out_path)      return SPFY_E_INVAL;
 
-    /* Validate + compute total candidate count and per-slot offsets. */
     size_t total_cands = 0;
     for (uint32_t s = 0; s < n_slots; ++s) {
         if (slots[s].n_cands == 0)         return SPFY_E_INVAL;
@@ -72,20 +44,19 @@ int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
         }
     }
 
-    /* Slot 0: forward = target_cost, no predecessor. */
     {
         const spfy_viterbi_slot_t *s0 = &slots[0];
         for (uint32_t c = 0; c < s0->n_cands; ++c) {
             float t = s0->target_cost[c];
             if (t < FORBIDDEN_THRESH) continue;
             fwd[offsets[0] + c]   = (long double)t;
-            pred[offsets[0] + c]  = 0;     /* unused for s == 0 */
+            pred[offsets[0] + c]  = 0;
             valid[offsets[0] + c] = 1;
         }
     }
 
-    /* Slots 1..N-1: forward[s][c] = T[s][c]
-     *                            + min over p of (forward[s-1][p] + join(p,c)) */
+    /* Slots 1..N-1: forward[s][c] = T[s][c] + min over p of
+     * (forward[s-1][p] + join(p,c)) */
     for (uint32_t s = 1; s < n_slots; ++s) {
         const spfy_viterbi_slot_t *sp = &slots[s - 1];
         const spfy_viterbi_slot_t *sc = &slots[s];
@@ -126,7 +97,6 @@ int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
         }
     }
 
-    /* Pick best end-of-sequence candidate. */
     uint32_t    last      = n_slots - 1;
     size_t      off_last  = offsets[last];
     long double end_best  = 0.0L;
@@ -146,7 +116,6 @@ int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
         return SPFY_E_OOB;
     }
 
-    /* Backtrack to recover path. Write out_path[s] = chosen UID at slot s. */
     if (out_path) {
         uint32_t cur = end_idx;
         for (int32_t s = (int32_t)last; s >= 0; --s) {
@@ -160,9 +129,6 @@ int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
     return SPFY_OK;
 }
 
-/* --------------------------------------------------------------------- */
-/* DAG variant                                                          */
-/* --------------------------------------------------------------------- */
 
 int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
                          uint32_t                       n_slots,
@@ -171,15 +137,14 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
                          uint32_t                      *out_path_slot,
                          uint32_t                      *out_path_uid,
                          uint32_t                      *out_path_len,
-                         float                         *out_total_cost)
+                         float                         *out_total_cost,
+                         int                            path_f0_flag)
 {
     if (!slots || n_slots == 0) return SPFY_E_INVAL;
     if (!out_total_cost && !(out_path_slot && out_path_uid && out_path_len))
         return SPFY_E_INVAL;
 
-    /* Compute total candidate count and per-slot offsets. Slots with
-     * n_cands==0 are valid graph nodes (e.g., word/syllable boundary
-     * markers) and contribute nothing to the DP. */
+    /* Compute total candidate count and per-slot offsets. */
     size_t total_cands = 0;
     for (uint32_t s = 0; s < n_slots; ++s) {
         if (slots[s].n_cands > 0 && !slots[s].cands)        return SPFY_E_INVAL;
@@ -193,12 +158,7 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
     uint32_t    *predslot  = calloc(total_cands ? total_cands : 1, sizeof *predslot);
     uint32_t    *predcidx  = calloc(total_cands ? total_cands : 1, sizeof *predcidx);
     uint8_t     *valid     = calloc(total_cands ? total_cands : 1, sizeof *valid);
-    /* Engine-faithful run-length state propagated through the DP. Tracks
-     * cand+0x7c (f0 history) and cand+0x80 (run-length count) for the
-     * cand reached via its best predecessor path. Always allocated; if
-     * the caller didn't supply per-cand state arrays we just leave them
-     * at 0, which makes the F0-curve gate (`prev_c80 < 15 &&
-     * prev_c7c > 20`) never fire — engine behaves identically. */
+    /* Engine-faithful run-length state propagated through the DP. */
     int32_t     *fwd_c7c   = calloc(total_cands ? total_cands : 1, sizeof *fwd_c7c);
     int32_t     *fwd_c80   = calloc(total_cands ? total_cands : 1, sizeof *fwd_c80);
     if (!offsets || !fwd || !predslot || !predcidx || !valid
@@ -215,18 +175,17 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
         }
     }
 
-    /* Forward DP. Iterate slots in given order (caller guarantees topo). */
     for (uint32_t s = 0; s < n_slots; ++s) {
         const spfy_viterbi_dag_slot_t *sc = &slots[s];
         uint32_t nc = sc->n_cands;
         if (nc == 0) continue;
 
         /* Determine if this slot is a "source": no valid (non-empty)
-         * predecessor. If so, fwd = target. */
+         * predecessor. */
         int has_live_pred = 0;
         for (uint32_t pi = 0; pi < sc->n_preds; ++pi) {
             uint32_t p = sc->preds[pi];
-            if (p >= s)                continue;     /* topo violation */
+            if (p >= s)                continue;
             if (slots[p].n_cands == 0) continue;
             has_live_pred = 1;
             break;
@@ -321,9 +280,34 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
              * counter; matches our old behavior pre-2026-05-14-evening).
              */
             if (sc->c68 && sc->c78) {
-                static int c7c_legacy = -1;
-                if (c7c_legacy < 0)
-                    c7c_legacy = (getenv("SPFY_C7C_LEGACY") != NULL);
+                /* 2026-08-10: cfg+0x94 is `tts.voiceCfg.GET_RID_OF_PATH_F0`,
+                 * and it is PER-VOICE -- not the constant this used to be.
+                 *
+                 * Recovered from the config loader at 0x08e913e0..0x08e91470,
+                 * a strict `push <key>; call lookup; store` chain:
+                 *     ACCENT_PHRASE_SINGLE -> [esi+0x88]
+                 *     (unnamed)            -> [esi+0x8c]
+                 *     APPLY_ALL_F0_EDGE    -> [esi+0x90]
+                 *     GET_RID_OF_PATH_F0   -> [esi+0x94]   <-- this
+                 * Controls in the same chain land where the DP decompile says
+                 * they should (MISSING_JOIN_COST -> +0x84, F0_EDGE_CHANGE_
+                 * WEIGHT -> +0x28), so the mapping is not a coincidence.
+                 *
+                 * The VCFs agree: tom and felix set it to 1, paulina and
+                 * javier OMIT it (so 0). Hard-coding the != 0 branch (right
+                 * for tom, verified 2026-05-14) pinned c80 to 100 for the
+                 * es-MX voices, which made the join-miss gate
+                 * (`prev.c80 < 15`) unable to fire and cost them the F0-edge
+                 * penalty entirely -- our missing-join price was a flat
+                 * 1000.0 where the engine charged 1000.18.
+                 *
+                 * Measured: selecting the counter branch gains paulina +7 and
+                 * javier +2 and costs tom -5 / felix -1, so it MUST be read
+                 * per voice, never fixed.
+                 *
+                 * SPFY_C7C_LEGACY=1 still forces the counter branch. */
+                int c7c_legacy = (spfy_env("SPFY_C7C_LEGACY") != NULL)
+                                 || !path_f0_flag;
                 uint32_t my68 = sc->c68[c];
                 if ((int32_t)my68 >= 21) {
                     fwd_c7c[offsets[s] + c] = (int32_t)my68;
@@ -337,7 +321,7 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
                         : 100;
                 }
             }
-            if (getenv("SPFY_DAG_FWD_DUMP")) {
+            if (spfy_env("SPFY_DAG_FWD_DUMP")) {
                 fprintf(stderr, "{\"fwd\":1,\"slot\":%u,\"c\":%u,"
                                 "\"uid\":%u,\"pre_dp\":%.6f,"
                                 "\"bestp_s\":%u,\"bestp_c\":%u,"
@@ -390,8 +374,7 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
     }
 
     /* Backtrack along predslot/predcidx until we hit a source (where
-     * predslot points back to itself). Build the path in reverse, then
-     * flip into out_path_slot / out_path_uid. */
+     * predslot points back to itself). */
     if (out_path_slot && out_path_uid && out_path_len) {
         uint32_t cur_s = (uint32_t)last;
         uint32_t cur_c = end_idx;
@@ -411,11 +394,10 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
             if (hops > n_slots) break;
             uint32_t ps = predslot[offsets[cur_s] + cur_c];
             uint32_t pc = predcidx[offsets[cur_s] + cur_c];
-            if (ps == cur_s) break;     /* source */
+            if (ps == cur_s) break;
             cur_s = ps;
             cur_c = pc;
         }
-        /* Reverse into output. */
         for (uint32_t i = 0; i < hops; ++i) {
             out_path_slot[i] = tmp_s[hops - 1 - i];
             out_path_uid [i] = tmp_u[hops - 1 - i];

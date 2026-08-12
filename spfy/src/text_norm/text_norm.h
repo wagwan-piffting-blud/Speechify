@@ -1,27 +1,4 @@
-/* Text normalization — Phase 3 of the in-house FE.
- *
- * Takes arbitrary input text and emits a token stream that the Phase 4
- * tagged-output assembler can directly walk. Handles:
- *
- *   * Whitespace + word tokenization
- *   * Cardinal numbers up to 999,999,999  ("42" → "forty two")
- *   * 4-digit years (1000-2999)            ("1990" → "nineteen ninety")
- *   * Decimal numbers                      ("3.14" → "three point one four")
- *   * Punctuation → phrase / sentence break tokens
- *   * Lowercasing for downstream G2P lookup
- *
- * Intentionally NOT in this phase (kept for iteration later):
- *
- *   * Abbreviation expansion (Mr./Dr./St.)
- *   * Currency / unit recognition ($5, 5%)
- *   * Date / time parsing
- *   * Acronym vs. word disambiguation
- *
- * The tokenizer keeps numbers as separate words from their successors —
- * "I had 3 apples" → ["i", "had", "three", "apples"]. Phrase / sentence
- * breaks are emitted as their own tokens with empty .text so downstream
- * stages can choose silence durations / prosody.
- */
+/* Text normalization — Phase 3 of the in-house FE. */
 
 #ifndef SPFY_TEXT_NORM_H
 #define SPFY_TEXT_NORM_H
@@ -34,53 +11,27 @@ extern "C" {
 #endif
 
 typedef enum {
-    SPFY_TOKEN_WORD            = 0,  /* lexical content; .text populated */
-    SPFY_TOKEN_PHRASE_BREAK    = 1,  /* ,  ;  :  ( ) -- short pause */
-    SPFY_TOKEN_SENTENCE_BREAK  = 2,  /* .  !  ?         -- long pause */
-    SPFY_TOKEN_CUSTOM_PAUSE    = 3,  /* SSML <break time="..."> -- explicit ms */
+    SPFY_TOKEN_WORD            = 0,
+    SPFY_TOKEN_PHRASE_BREAK    = 1,
+    SPFY_TOKEN_SENTENCE_BREAK  = 2,
+    SPFY_TOKEN_CUSTOM_PAUSE    = 3,
 } spfy_token_type_t;
 
-/* Token capacity caps. Words rarely exceed 32 chars; the few that do
- * (long compounds, expanded numbers) fit comfortably here. */
+/* Token capacity caps. */
 #define SPFY_TOKEN_TEXT_MAX      64
-#define SPFY_TOKEN_PHONEMES_MAX  96   /* SSML <phoneme ph="..."> override */
+#define SPFY_TOKEN_PHONEMES_MAX  96
 
 typedef struct {
     spfy_token_type_t type;
     char              text[SPFY_TOKEN_TEXT_MAX];
-    /* SSML extensions. Zero / empty by default; set only when the
-     * input was wrapped in the relevant tag.
-     *
-     *   phonemes    ARPAbet space-separated string ("T OW0 M EY1 T OW0").
-     *               When non-empty on a WORD token, fe_internal bypasses
-     *               CMU / LTS / FUNC_RED / LEX_OVERRIDE and feeds these
-     *               phonemes straight into split_phonemes + syllabify.
-     *   pause_ms    Duration (milliseconds) for a CUSTOM_PAUSE token.
-     *               fe_internal emits `pau(p<N>)` with the precise
-     *               duration instead of the terminator-class defaults.
-     *   pitch_st    Pitch shift in semitones for a WORD token (signed).
-     *               Carried through fe_internal → tagged text → fe_parse
-     *               → slot->pitch_offset_st → synth's f0tr_mean scaling.
-     *               Zero = neutral.
-     *   rate_pct    Speed delta in percent for a WORD token (signed).
-     *               +N = N% faster (shorter durations); -N = N% slower.
-     *               Applied as durt_mean *= 100 / (100 + rate_pct).
-     *               Zero = neutral. */
+    /* SSML extensions. */
     char              phonemes[SPFY_TOKEN_PHONEMES_MAX];
     uint16_t          pause_ms;
     int8_t            pitch_st;
     int8_t            rate_pct;
 } spfy_token_t;
 
-/* Tokenize + normalize `input`. Caller provides a fixed-cap output
- * array; we fill up to `cap` tokens and report the actual count via
- * `*out_n`. If the input would overflow, we stop emitting tokens and
- * return 1 (so caller can detect partial output). 0 = clean fit.
- * Returns -1 on bad args.
- *
- * Recommended cap: roughly 2 × wordcount + 10 — punctuation can
- * inflate counts slightly via break tokens.
- */
+/* Tokenize + normalize `input`. */
 int spfy_text_normalize(const char *input,
                         spfy_token_t *out, size_t cap, size_t *out_n);
 
@@ -88,4 +39,4 @@ int spfy_text_normalize(const char *input,
 }
 #endif
 
-#endif /* SPFY_TEXT_NORM_H */
+#endif

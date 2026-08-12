@@ -1,16 +1,4 @@
-/* g2p.c — multi-stage word→phoneme lookup. See g2p.h for the contract.
- *
- * Stages:
- *   1. CMU dict binsearch (fastest, exact)
- *   2. Suffix stripping with consonant-doubling collapse
- *   3. Letter-to-sound rules (last-resort synthesis)
- *
- * Stage 2 covers the common English inflection patterns -s / -ed / -ing
- * / -ly / -er / -est / -ness / -tion / -ity. The suffix's phonemes are
- * context-dependent on the stem's final phoneme: e.g., "-s" after a
- * voiceless consonant is "S", after voiced is "Z", after a sibilant is
- * "IH0 Z". We decode the stem's final phoneme from its lookup result
- * to pick the right realisation. */
+/* g2p.c — multi-stage word→phoneme lookup. */
 
 #include "g2p.h"
 #include "cmudict_data.h"
@@ -20,7 +8,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ---- shared helpers ------------------------------------------------ */
 
 static int to_lower_ascii(int c)
 {
@@ -39,8 +26,7 @@ static int ascii_strcasecmp(const char *a, const char *b)
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
-/* Binsearch the CMU dict. Returns the phoneme string on hit, NULL on
- * miss. The pointer is into the static dict — do NOT free. */
+/* Binsearch the CMU dict. */
 static const char *dict_lookup(const char *word)
 {
     size_t lo = 0, hi = cmudict_n_entries;
@@ -54,7 +40,6 @@ static const char *dict_lookup(const char *word)
     return NULL;
 }
 
-/* Copy a phoneme string into out, truncating if needed. */
 static void copy_out(const char *src, char *out, size_t out_n)
 {
     size_t n = strlen(src);
@@ -64,7 +49,7 @@ static void copy_out(const char *src, char *out, size_t out_n)
 }
 
 /* Append " <phonemes>" to out (with a leading space if out already has
- * content). Truncates safely. */
+ * content). */
 static void append_phonemes(char *out, size_t out_n, const char *more)
 {
     size_t cur = strlen(out);
@@ -81,12 +66,11 @@ static void append_phonemes(char *out, size_t out_n, const char *more)
 }
 
 /* Extract the final ARPAbet phoneme (no stress digit) from a CMU-style
- * string like "HH AH0 L OW1". Returns "" if the string is empty. */
+ * string like "HH AH0 L OW1". */
 static void last_phoneme(const char *phon, char *buf, size_t buf_n)
 {
     buf[0] = '\0';
     if (!phon || !*phon) return;
-    /* Find last token (space-separated). */
     const char *end = phon + strlen(phon);
     const char *start = end;
     while (start > phon && start[-1] != ' ') --start;
@@ -94,12 +78,10 @@ static void last_phoneme(const char *phon, char *buf, size_t buf_n)
     if (n + 1 > buf_n) n = buf_n - 1;
     memcpy(buf, start, n);
     buf[n] = '\0';
-    /* Strip trailing stress digit. */
     size_t L = strlen(buf);
     if (L > 0 && (buf[L-1] >= '0' && buf[L-1] <= '9')) buf[L-1] = '\0';
 }
 
-/* Voicing / sibilant classification for the suffix-phoneme picker. */
 static int is_sibilant(const char *p)
 {
     return strcmp(p, "S")  == 0 || strcmp(p, "Z")  == 0
@@ -121,23 +103,8 @@ static int ends_with_t_or_d(const char *p)
     return strcmp(p, "T") == 0 || strcmp(p, "D") == 0;
 }
 
-/* ---- Stage 2: suffix stripping ------------------------------------- */
 
-/* Recover the stem of a possibly-inflected word and look it up.
- *
- *   word         the OOV word
- *   suffix       the literal suffix to strip ("ed", "ing", ...)
- *   out_stem_ph  on success, points into the static dict (don't free)
- *   stem_buf     scratch for stem candidates; required, >= 64 bytes
- *
- * Handles two stem-form heuristics:
- *   (a) plain strip:        "running" → "runn"     (stem "runn" rarely
- *                                                  exists, fall through)
- *   (b) consonant collapse: "running" → "run"      (doubled final
- *                                                  consonant in stem)
- *   (c) drop-e restore:     "lik-ing" → "like"     (silent-e stem)
- *
- * Tries each variant and returns the first dict hit. */
+/* Recover the stem of a possibly-inflected word and look it up. */
 static const char *stem_lookup(const char *word, const char *suffix,
                                 char *stem_buf, size_t stem_buf_n)
 {
@@ -145,7 +112,6 @@ static const char *stem_lookup(const char *word, const char *suffix,
     size_t sn = strlen(suffix);
     if (sn >= wn || sn == 0) return NULL;
 
-    /* Word must end in suffix (case-insensitive). */
     for (size_t i = 0; i < sn; ++i) {
         if (to_lower_ascii((unsigned char)word[wn - sn + i])
             != to_lower_ascii((unsigned char)suffix[i])) return NULL;
@@ -154,13 +120,11 @@ static const char *stem_lookup(const char *word, const char *suffix,
     size_t stem_len = wn - sn;
     if (stem_len == 0 || stem_len + 2 > stem_buf_n) return NULL;
 
-    /* (a) plain strip */
     memcpy(stem_buf, word, stem_len);
     stem_buf[stem_len] = '\0';
     const char *hit = dict_lookup(stem_buf);
     if (hit) return hit;
 
-    /* (b) consonant-doubling collapse: "runn-" → "run-" */
     if (stem_len >= 2
         && to_lower_ascii((unsigned char)stem_buf[stem_len - 1])
            == to_lower_ascii((unsigned char)stem_buf[stem_len - 2])
@@ -169,11 +133,10 @@ static const char *stem_lookup(const char *word, const char *suffix,
         stem_buf[stem_len - 1] = '\0';
         hit = dict_lookup(stem_buf);
         if (hit) return hit;
-        stem_buf[stem_len - 1] = stem_buf[stem_len - 2];  /* restore */
+        stem_buf[stem_len - 1] = stem_buf[stem_len - 2];
         stem_buf[stem_len] = '\0';
     }
 
-    /* (c) drop-e restore: "lik-" + "ing" → "like" */
     if (stem_len + 1 < stem_buf_n) {
         stem_buf[stem_len] = 'e';
         stem_buf[stem_len + 1] = '\0';
@@ -184,9 +147,7 @@ static const char *stem_lookup(const char *word, const char *suffix,
     return NULL;
 }
 
-/* Append the suffix realization for "-s" given the stem's final phone.
- * English plural / 3sg / possessive: sibilant → IH0 Z, voiceless → S,
- * else → Z. */
+/* Append the suffix realization for "-s" given the stem's final phone. */
 static void append_s_suffix(const char *last_ph, char *out, size_t out_n)
 {
     if (is_sibilant(last_ph))                append_phonemes(out, out_n, "IH0 Z");
@@ -194,7 +155,6 @@ static void append_s_suffix(const char *last_ph, char *out, size_t out_n)
     else                                     append_phonemes(out, out_n, "Z");
 }
 
-/* Append "-ed" realization: post-T/D → IH0 D, voiceless → T, else D. */
 static void append_ed_suffix(const char *last_ph, char *out, size_t out_n)
 {
     if (ends_with_t_or_d(last_ph))           append_phonemes(out, out_n, "IH0 D");
@@ -202,18 +162,15 @@ static void append_ed_suffix(const char *last_ph, char *out, size_t out_n)
     else                                     append_phonemes(out, out_n, "D");
 }
 
-/* Suffix table — order matters: try LONGER suffixes first so "-ness"
- * beats "-s". `phon` is a fixed appendage when the suffix doesn't
- * depend on the stem's final phone; for the variable ones (-s, -ed)
- * we set phon=NULL and dispatch in the loop. */
+/* Suffix table — order matters: try LONGER suffixes first so "-ness" beats
+ * "-s". */
 typedef struct {
-    const char *suffix;      /* lowercase letters */
-    const char *phon;        /* fixed phonemes, or NULL for variable */
-    int         min_stem;    /* refuse if stem would be shorter */
+    const char *suffix;
+    const char *phon;
+    int         min_stem;
 } suffix_rule_t;
 
 static const suffix_rule_t g_suffix_rules[] = {
-    /* longest first to avoid -s eating "-ness" etc. */
     { "ization", "AH0 Z EY1 SH AH0 N", 3 },
     { "ational", "EY1 SH AH0 N AH0 L", 3 },
     { "tional",  "SH AH0 N AH0 L",     3 },
@@ -231,8 +188,8 @@ static const suffix_rule_t g_suffix_rules[] = {
     { "ing",     "IH0 NG",             2 },
     { "est",     "AH0 S T",            2 },
     { "er",      "ER0",                2 },
-    { "ed",      NULL,                 2 },  /* T/D/IH0 D — context */
-    { "s",       NULL,                 2 },  /* S/Z/IH0 Z   — context */
+    { "ed",      NULL,                 2 },
+    { "s",       NULL,                 2 },
 };
 static const size_t g_n_suffix_rules =
     sizeof(g_suffix_rules) / sizeof(g_suffix_rules[0]);
@@ -264,49 +221,38 @@ static int try_suffix_strip(const char *word, char *out, size_t out_n)
     return 0;
 }
 
-/* ---- Stage 3: letter-to-sound rules -------------------------------- */
 
 /* The LTS step is intentionally simple — better than silence on truly
  * unknown words like "zyzzyva", but it's not going to win any quality
- * awards. Patterns are processed in order; longer ones first.
- *
- * Format:  pattern → phoneme string (uppercase ARPAbet, may be multi-
- *          phoneme like "AH0 NG" for "ung").
- *
- * Each pattern is matched against the current position in the word.
- * On hit we emit its phonemes and advance by the pattern length. */
+ * awards. */
 typedef struct {
     const char *pat;
     const char *phon;
 } lts_rule_t;
 
 static const lts_rule_t g_lts_rules[] = {
-    /* === 4-letter digraphs / trigraphs first === */
-    { "ough",  "AO1 F" },   /* "cough" path — many "ough" forms; this is a guess */
+    { "ough",  "AO1 F" },
     { "augh",  "AO1 F" },
     { "tion",  "SH AH0 N" },
     { "sion",  "ZH AH0 N" },
-    /* === 3-letter === */
     { "ing",  "IH0 NG" },
     { "ang",  "AE1 NG" },
     { "ong",  "AO1 NG" },
     { "ung",  "AH1 NG" },
-    /* === 2-letter consonant digraphs === */
     { "ch",   "CH" },
     { "sh",   "SH" },
     { "th",   "TH" },
     { "ph",   "F"  },
-    { "gh",   ""   },           /* mostly silent in modern English */
+    { "gh",   ""   },
     { "wh",   "W"  },
     { "qu",   "K W" },
     { "ck",   "K"  },
     { "ng",   "NG" },
-    /* === 2-letter vowel digraphs === */
     { "ai",   "EY1" },
     { "ay",   "EY1" },
     { "ee",   "IY1" },
-    { "ea",   "IY1" },          /* mostly; "head" is an exception */
-    { "ie",   "AY1" },          /* "die"; not great for "field" */
+    { "ea",   "IY1" },
+    { "ie",   "AY1" },
     { "oa",   "OW1" },
     { "oe",   "OW1" },
     { "oi",   "OY1" },
@@ -316,17 +262,13 @@ static const lts_rule_t g_lts_rules[] = {
     { "ow",   "AW1" },
     { "ue",   "UW1" },
     { "ui",   "UW1" },
-    /* === single vowels === */
     { "a",    "AE1" },
     { "e",    "EH1" },
     { "i",    "IH1" },
     { "o",    "AA1" },
     { "u",    "AH1" },
-    { "y",    "IY1" },          /* "y" as vowel — final position; we
-                                 * don't distinguish "y" as consonant
-                                 * here, dropping to AY1 would also be
-                                 * defensible */
-    /* === single consonants === */
+    { "y",    "IY1" },          /* "y" as vowel — final position; we don't distinguish "y" as consonant
+ * here, dropping to AY1 would also be defensible */
     { "b",    "B"  }, { "c",    "K"  }, { "d",    "D"  },
     { "f",    "F"  }, { "g",    "G"  }, { "h",    "HH" },
     { "j",    "JH" }, { "k",    "K"  }, { "l",    "L"  },
@@ -361,17 +303,14 @@ static void lts_synthesize(const char *word, char *out, size_t out_n)
                 match = &g_lts_rules[i]; break;
             }
         }
-        if (!match) { ++p; continue; }   /* unknown char — skip */
+        if (!match) { ++p; continue; }
 
         const char *phon = match->phon;
         size_t plen = strlen(match->pat);
-        if (*phon == '\0') { p += plen; continue; }   /* silent (gh) */
+        if (*phon == '\0') { p += plen; continue; }
 
-        /* The LTS table marks every primary stress as 1 (we don't
-         * actually know where stress belongs in an unseen word). Keep
-         * the first stressed vowel as primary, demote the rest to 0.
-         * This produces a single-stress prosody that's at least
-         * acceptable. */
+        /* The LTS table marks every primary stress as 1 (we don't actually
+         * know where stress belongs in an unseen word). */
         char buf[32];
         size_t n = strlen(phon);
         if (n + 1 > sizeof buf) n = sizeof buf - 1;
@@ -379,7 +318,6 @@ static void lts_synthesize(const char *word, char *out, size_t out_n)
         if (stress_assigned) {
             for (char *q = buf; *q; ++q) if (*q == '1') *q = '0';
         } else {
-            /* Mark stress_assigned if any digit '1' is present. */
             for (char *q = buf; *q; ++q) {
                 if (*q == '1') { stress_assigned = 1; break; }
             }
@@ -387,14 +325,13 @@ static void lts_synthesize(const char *word, char *out, size_t out_n)
         append_phonemes(out, out_n, buf);
         p += plen;
     }
-    /* If we never assigned stress (all-consonant word?), promote the
-     * first vowel we wrote to '1'. */
+    /* If we never assigned stress (all-consonant word?), promote the first
+     * vowel we wrote to '1'. */
     if (!stress_assigned) {
         for (char *q = out; *q; ++q) if (*q == '0') { *q = '1'; break; }
     }
 }
 
-/* ---- Public API ---------------------------------------------------- */
 
 int spfy_g2p_word_lookup_ex(const char *word, char *out, size_t out_n,
                              spfy_g2p_origin_t *origin)
@@ -425,8 +362,8 @@ int spfy_g2p_word_lookup(const char *word, char *out, size_t out_n)
     if (!word || !out || out_n == 0) return -2;
     out[0] = '\0';
 
-    /* Legacy path — dict-only; preserves the original "-1 on miss"
-     * contract callers that pre-date stage 2/3 relied on. */
+    /* Legacy path — dict-only; preserves the original "-1 on miss" contract
+     * callers that pre-date stage 2/3 relied on. */
     const char *hit = dict_lookup(word);
     if (!hit) return -1;
     copy_out(hit, out, out_n);

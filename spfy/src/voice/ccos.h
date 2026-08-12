@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "voice.h"   /* spfy_vin_t */
+#include "voice.h"
 
 /* ccos: precomputed phone-context distance tables used by the S cost.
  *
@@ -33,23 +33,20 @@
 #define SPFY_CCOS_N_SLOTS 4
 
 typedef struct {
-    /* Flat row-major float buffer of size n_labels^2 per (hp_class, slot).
-     * Indexed as data[hp_class * SPFY_CCOS_N_SLOTS + slot] which is itself
-     * a length-(n_labels^2) array. */
-    float    *tables;           /* heap, owned */
-    uint32_t  n_labels;         /* 47 for Tom */
-    uint32_t  n_hp_classes;     /* 2 * n_labels = 94 for Tom */
+    /* Flat row-major float buffer of size n_labels^2 per (hp_class, slot). */
+    float    *tables;
+    uint32_t  n_labels;
+    uint32_t  n_hp_classes;
 } spfy_ccos_t;
 
 int  spfy_ccos_load(const spfy_vin_t *vin, spfy_ccos_t *out);
 void spfy_ccos_free(spfy_ccos_t *c);
 
 /* Direct accessor: returns a pointer to the (n_labels x n_labels) matrix
- * for the given (hp_class, slot). NULL on out-of-bounds. */
+ * for the given (hp_class, slot). */
 const float *spfy_ccos_table(const spfy_ccos_t *c,
                              uint32_t hp_class, uint32_t slot);
 
-/* Single-cell accessor with bounds check. Returns 0 on OOB. */
 float spfy_ccos_cell(const spfy_ccos_t *c,
                      uint32_t hp_class, uint32_t slot,
                      uint32_t i, uint32_t j);

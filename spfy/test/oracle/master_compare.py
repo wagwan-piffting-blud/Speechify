@@ -87,10 +87,6 @@ DEFAULT_TRACES = ORACLE / "traces"
 DEFAULT_VIN    = REPO / "en-US" / "tom" / "tom.vin"
 DEFAULT_VDB    = REPO / "en-US" / "tom" / "tom8.vdb"   # NEVER tom16.vdb
 DEFAULT_VCF    = REPO / "en-US" / "tom" / "tom.vcf"
-DEFAULT_HPC    = REPO / "spfy" / "data" / "tom_hpclass.bin"
-DEFAULT_VOC    = REPO / "spfy" / "build" / "fe_symbol_table.json"
-DEFAULT_TA     = REPO / "spfy" / "data" / "fe_tables_a"
-DEFAULT_TB     = REPO / "spfy" / "data" / "fe_tables"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 PATH_LINE_RE = re.compile(r"^\s*hp\s+(\d+):\s*uid=(\d+)")
@@ -279,7 +275,7 @@ class SynthResult:
 def run_one(args):
     """Worker: run spfy_synth once and parse stdout/stderr.
     Args is a tuple to keep multiprocessing serialization simple."""
-    (tid, text, exe, vin, vdb, vcf, hpc, voc, ta, tb, tmpdir) = args
+    (tid, text, exe, vin, vdb, vcf, tmpdir) = args
     out_wav = os.path.join(tmpdir, f"_master_{os.getpid()}_{tid}.wav")
     env = os.environ.copy()
     env["SPFY_SYNTH_DEBUG"]       = "1"
@@ -290,7 +286,7 @@ def run_one(args):
     t0 = time.time()
     try:
         r = subprocess.run(
-            [exe, vin, vdb, vcf, hpc, voc, ta, tb, text, out_wav],
+            [exe, vin, vdb, vcf, text, out_wav],
             capture_output=True, text=True, env=env, timeout=120)
     except subprocess.TimeoutExpired:
         return SynthResult(tid=tid, ok=False, err="timeout",
@@ -544,10 +540,6 @@ def main():
     ap.add_argument("--vin", default=str(DEFAULT_VIN))
     ap.add_argument("--vdb", default=str(DEFAULT_VDB))
     ap.add_argument("--vcf", default=str(DEFAULT_VCF))
-    ap.add_argument("--hpc", default=str(DEFAULT_HPC))
-    ap.add_argument("--voc", default=str(DEFAULT_VOC))
-    ap.add_argument("--ta",  default=str(DEFAULT_TA))
-    ap.add_argument("--tb",  default=str(DEFAULT_TB))
     ap.add_argument("--filter", default=None,
                     help="regex on phrase id (e.g. '^text_0[0-9]+')")
     ap.add_argument("--modes", default="both",
@@ -625,8 +617,7 @@ def main():
     # Dispatch workers
     work = [
         (it["id"], it["text"], str(exe),
-         args.vin, args.vdb, args.vcf, args.hpc, args.voc, args.ta, args.tb,
-         args.tmpdir)
+         args.vin, args.vdb, args.vcf, args.tmpdir)
         for it in items
     ]
     text_by_tid = {it["id"]: it["text"] for it in items}

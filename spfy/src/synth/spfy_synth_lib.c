@@ -1,10 +1,5 @@
 /* spfy_voice_load / spfy_voice_free — voice loading lifted out of the
- * spfy_synth CLI's main() (formerly lines 673..867). Logic is unchanged;
- * the only change is that all the per-call locals now live in a
- * spfy_voice_t. The voicing-table build (engine-faithful per-HP-label
- * walk of the VIN "name" feat chunk) is preserved verbatim and is the
- * trickiest piece — keep [[project_voicing_gate_2026_05_12]] in mind
- * before touching it. */
+ * spfy_synth CLI's main() (formerly lines 673..867). */
 
 #include "spfy_synth_lib.h"
 
@@ -21,22 +16,18 @@ void spfy_synth_set_pitch_semitones(spfy_voice_t *v, float semitones)
 {
     if (!v) return;
     if (semitones == 0.0f) {
-        /* Exact 1.0 — pitch path becomes a true no-op. */
         v->pitch_scale = 1.0f;
         return;
     }
-    /* Clamp to a sane octave around baseline; useful range is much
-     * smaller (Tom's recorded corpus has roughly +-3 st of natural
-     * variation). */
+    /* Clamp to a sane octave around baseline; useful range is much smaller
+     * (Tom's recorded corpus has roughly +-3 st of natural variation). */
     if (semitones >  12.0f) semitones =  12.0f;
     if (semitones < -12.0f) semitones = -12.0f;
     v->pitch_scale = powf(2.0f, semitones / 12.0f);
 }
 
-/* Tom's corpus 1-99% f0_mid range probed via spfy_dump_f0:
- *   median = 118 Hz, p1 = 101 Hz (-2.69 st), p99 = 130 Hz (+1.68 st).
- * We use slightly tighter limits so selection stays within a healthy
- * pool density (not at the corpus tails). */
+/* Tom's corpus 1-99% f0_mid range probed via spfy_dump_f0: median = 118 Hz,
+ * p1 = 101 Hz (-2.69 st), p99 = 130 Hz (+1.68 st). */
 #define SPFY_PITCH_SEL_UP     1.5f
 #define SPFY_PITCH_SEL_DOWN  -2.0f
 
@@ -68,7 +59,7 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
 
     if ((rc = spfy_vin_load(paths->vin, &v->vin))                   != SPFY_OK) goto fail;
     if ((rc = spfy_vdb_load(paths->vdb, &v->vdb))                   != SPFY_OK) goto fail;
-    if ((rc = spfy_vdb_require_8k_mulaw(&v->vdb, paths->vdb))       != SPFY_OK) goto fail;
+    if ((rc = spfy_vdb_require_supported(&v->vdb, paths->vdb))       != SPFY_OK) goto fail;
     if ((rc = spfy_vcf_load(paths->vcf, &v->vcf))                   != SPFY_OK) goto fail;
     if ((rc = spfy_unit_table_load(&v->vin, &v->units))             != SPFY_OK) goto fail;
     if ((rc = spfy_feat_table_load(&v->vin, &v->feat))              != SPFY_OK) goto fail;
@@ -100,7 +91,6 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
                                            &v->hpc, &v->hpc_n))     != SPFY_OK) goto fail;
     }
 
-    /* Build per-HP-class candidate fallback index (lifted verbatim). */
     v->bucket_n   = (uint32_t *)calloc(v->hpc_buckets, sizeof *v->bucket_n);
     v->bucket_cap = (uint32_t *)calloc(v->hpc_buckets, sizeof *v->bucket_cap);
     v->bucket     = (uint32_t **)calloc(v->hpc_buckets, sizeof *v->bucket);
@@ -134,15 +124,22 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
     v->av.n_feat_phones = v->phone_order.n_phones;
     spfy_anchor_voice_set_weights_from_vcf(&v->av, &v->vcf);
 
-    /* v100005 voices (Paulina) ship no on-disk ccos phone context; derive it
-     * from recording adjacency exactly as the engine does post-load. No-op
-     * (ctx4 stays NULL) for v100006/8, which keep their raw on-disk bytes. */
+    /* v100005 voices (Paulina) ship no on-disk ccos phone context; derive
+     * it from recording adjacency exactly as the engine does post-load. */
     if ((rc = spfy_anchor_build_ctx4(&v->av, &v->ctx4_buf)) != SPFY_OK) goto fail;
 
     v->hp_prune_thresh = spfy_vcf_f32(&v->vcf, "HALFPHONE_CAND_PRUNE_THRESH",
                                       0.8f);
     v->hp_prune_slope  = spfy_vcf_f32(&v->vcf, "HALFPHONE_CAND_PRUNE_SLOPE",
                                       0.005f);
+    {
+        /* Engine default 0x32 = 50 (constructor, 0x08e90e64); a VCF value is
+         * converted through _ftol and clamped to at least 1 (0x08e916ea). */
+        float mx = spfy_vcf_f32(&v->vcf, "HALFPHONE_CAND_MAX_UNITS", 50.0f);
+        long  mi = (long)mx;
+        if (mi < 1) mi = 1;
+        v->hp_prune_max = (uint32_t)mi;
+    }
 
     /* FE host: hosts the SWIttsFe image for THIS voice's language, then
      * sets the per-voice VCF. The VCF is already parsed above, so the
@@ -156,31 +153,21 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
     }
     if ((rc = spfy_fe_set_voice_vcf(v->fe, paths->vcf))             != SPFY_OK) goto fail;
     /* Give the FE this voice's own phone-symbol -> engine-id table
-     * (feat["name"] order, the same numbering hp_class uses). Replaces
-     * the compiled-in en-US ARPAbet table, which left fr-CA/es-MX phones
-     * unmapped and falling back to VCF ids. Verified a no-op for en-US:
-     * that table is exactly this order. v->phone_order owns the strings
-     * and outlives v->fe. */
+     * (feat["name"] order, the same numbering hp_class uses). */
     spfy_fe_set_phone_names(v->fe, v->phone_order.phone_names,
                             v->phone_order.n_phones);
 
     /* Enable the FE's ESPR mode so it emits the engine's fully-reduced
-     * phones (ix/dx) directly, from THIS voice's VCF config. This replaces
-     * the R1/R3/flap heuristic entirely (the hosted backend turns the
-     * heuristic off on success). Values are the VCF's own tts.voiceCfg.*:
-     * phoneset "swi_plus_ix" for en-US carries the barred-i; the es-MX/
-     * fr-CA voices use "swi". On backends without a hosted DLL (in-house
-     * FE / emulator / wasm) this declines and the heuristic stays on. */
+     * phones (ix/dx) directly, from THIS voice's VCF config. */
     spfy_fe_set_espr_config(v->fe,
                             spfy_vcf_str(&v->vcf, "name"),
                             spfy_vcf_str(&v->vcf, "gender"),
                             spfy_vcf_str(&v->vcf, "phoneset"),
                             spfy_vcf_str(&v->vcf, "version"));
 
-    /* Engine-faithful voicing table — see [[project_voicing_gate_2026_05_12]]
-     * and the in-line comment in spfy_synth.c for the rationale (the
-     * "name" feat chunk in the VIN is alphabetical and the canonical
-     * source of HP-label positional indices). Lifted verbatim. */
+    /* Engine-faithful voicing table — see and the in-line comment in
+     * spfy_synth.c for the rationale (the "name" feat chunk in the VIN is
+     * alphabetical and the canonical source of HP-label... */
     {
         const spfy_phoneset_t *ps = spfy_fe_phoneset(v->fe);
         if (ps && ps->n_phones > 0 && v->vin.feat && v->vin.feat_n > 0) {
@@ -220,7 +207,7 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
                     if (q + nlen + 4 > end) break;
                     const char *nm = (const char *)q;
                     q += nlen;
-                    q += 4;     /* skip stored_id */
+                    q += 4;
                     if (nlen < 2) continue;
                     char base[SPFY_PHONESET_NAME_MAX + 1];
                     uint16_t blen = (uint16_t)(nlen - 1);

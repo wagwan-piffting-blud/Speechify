@@ -1,5 +1,5 @@
-// mem.c - guest virtual memory. Region list (for setup/teardown) + a flat page map
-// (software TLB) that translates any guest VA to a host pointer in O(1) - no linear scan.
+/* (software TLB) that translates any guest VA to a host pointer in O(1) -
+ * no linear scan. */
 #include "emu.h"
 #include <stdlib.h>
 #include <string.h>
@@ -9,10 +9,11 @@ mem_t MEM;
 
 #define PAGE_BITS 12
 #define PAGE_SIZE 4096u
-#define NUM_PAGES (1u << (32 - PAGE_BITS))   // 1,048,576 entries covering the full 4 GB VA space
+#define NUM_PAGES (1u << (32 - PAGE_BITS))
 
-// g_pagemap[va>>12] = host pointer for guest VA (page<<12), or NULL if unmapped. All regions are
-// page-aligned (IMAGE_BASE/STACK/HEAP/TEB/... are >=0x1000 aligned), so each page maps to one region.
+/* g_pagemap[va>>12] = host pointer for guest VA (page<<12), or NULL if
+ * unmapped. */
+/* page-aligned (IMAGE_BASE/STACK/HEAP/TEB/... */
 static uint8_t** g_pagemap = NULL;
 
 static inline uint8_t* xlat(uint32_t va) {
@@ -29,7 +30,7 @@ void mem_init(void) {
 
 uint8_t* mem_map(uint32_t va, uint32_t size, const char* name) {
     if (MEM.nreg >= MAX_REGIONS) { fprintf(stderr, "mem_map: too many regions\n"); exit(1); }
-    size = (size + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1);   // whole pages so the page map is always safe
+    size = (size + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1);
     uint8_t* host = (uint8_t*)calloc(1, size);
     if (!host) { fprintf(stderr, "mem_map: OOM %u for %s\n", size, name); exit(1); }
     MEM.regions[MEM.nreg].va = va;
@@ -54,9 +55,9 @@ region_t* mem_region_of(uint32_t va) {
 
 uint8_t* mem_host(uint32_t va) { return xlat(va); }
 
-// JIT: base address of the page-map array (a host pointer = a WASM linear-memory offset). Stable for
-// the process lifetime (the array is calloc'd once and never freed). Compiled blocks inline
-// g_pagemap[va>>12] to translate guest VAs without a call.
+/* JIT: base address of the page-map array (a host pointer = a WASM
+ * linear-memory offset). */
+/* the process lifetime (the array is calloc'd once and never freed). */
 uint32_t mem_pagemap_base(void){ return (uint32_t)(uintptr_t)g_pagemap; }
 
 static int g_faults = 0;
@@ -67,7 +68,8 @@ static void fault(uint32_t va, const char* what) {
                 what, va, CPU.eip, CPU.r[EDI], CPU.r[ECX]);
 }
 
-// Hot path: one page-map lookup, then native little-endian load/store (host is LE: x86/x64/wasm).
+/* Hot path: one page-map lookup, then native little-endian load/store (host
+ * is LE: x86/x64/wasm). */
 uint8_t  rd8 (uint32_t va){ uint8_t* p=xlat(va); if(!p){fault(va,"rd8"); return 0;} return *p; }
 uint16_t rd16(uint32_t va){ uint8_t* p=xlat(va); if(!p){fault(va,"rd16");return 0;} uint16_t v; memcpy(&v,p,2); return v; }
 uint32_t rd32(uint32_t va){ uint8_t* p=xlat(va); if(!p){fault(va,"rd32");return 0;} uint32_t v; memcpy(&v,p,4); return v; }

@@ -1,10 +1,4 @@
-/* spfy_fe_test -- sanity-test the FE skeleton.
- *
- * Loads vocabulary + 726 tables, prints stats, and runs a hand-decoded
- * verification of two known tables (t000 = TLDs, t001 = units of
- * measure) so we can be sure the on-disk format + symbol vocabulary
- * are wired up correctly before we start writing actual stages.
- */
+/* spfy_fe_test -- sanity-test the FE skeleton. */
 
 #include "../fe/fe.h"
 #include "../fe/stage_morph.h"
@@ -44,7 +38,6 @@ static int record_cb(const uint8_t *bytes, uint32_t n, uint32_t idx, void *user)
         }
     }
     d->buf[d->len] = 0;
-    /* Print first 12 records, then summarise. */
     if (idx < 12) {
         fprintf(stdout, "    [%2u] %s\n", idx, d->buf);
     } else if (idx == 12) {
@@ -69,18 +62,14 @@ int main(int argc, char **argv)
     }
     spfy_fe_print_stats(fe);
 
-    /* Hand-verify t000 (TLDs) and t001 (unit-of-measure words). */
     spfy_fe_t *raw = fe;
     extern int spfy_fe_test_walk_table(spfy_fe_t *fe, int reg, uint32_t idx);
     (void)raw;
 
-    /* Walk t000 (TLD recognition table). */
     fprintf(stdout, "\n=== reg-A t000 (TLD recognition) ===\n");
     record_decoder_t d = {0};
-    /* Hack: re-fetch the vocabulary via a tiny accessor; easier is to
-     * just open the vocab again. For first iteration we know the
-     * fe_t internals enough to wire this through fe.c -- for now
-     * we'll just re-load the vocab here. */
+    /* Hack: re-fetch the vocabulary via a tiny accessor; easier is to just
+     * open the vocab again. */
     spfy_fe_vocab_t v = {0};
     rc = spfy_fe_vocab_load(argv[1], &v);
     if (rc != SPFY_OK) {
@@ -110,12 +99,11 @@ int main(int argc, char **argv)
     spfy_fe_tables_free(&t);
     spfy_fe_vocab_free(&v);
 
-    /* Stage 1 sanity: run text-norm on a short phrase + prosody hint. */
     fprintf(stdout, "\n=== Stage 1 (text-norm) sanity ===\n");
     const char *sample = "Re-running the testing process is unkindness.";
     spfy_prosody_hints_t hints;
     spfy_prosody_hints_init(&hints);
-    spfy_prosody_emphasize(&hints, 25, 32, SPFY_EMPH_STRONG);  /* "process" */
+    spfy_prosody_emphasize(&hints, 25, 32, SPFY_EMPH_STRONG);
 
     spfy_fe_delta_t delta;
     rc = spfy_fe_textnorm_only(fe, sample, &hints, &delta);
@@ -166,7 +154,6 @@ int main(int argc, char **argv)
     fprintf(stdout, "\n");
     (void)xk;
 
-    /* Stage 2: morphological analysis. */
     fprintf(stdout, "\n=== Stage 2 (morph) sanity ===\n");
     rc = spfy_fe_morph_run(fe, sample, &delta);
     if (rc != SPFY_OK) {
@@ -192,7 +179,6 @@ int main(int argc, char **argv)
                 xm[i].word_id, kind ? kind : "?", buf);
     }
 
-    /* Stage 3: syllabification + lexical stress. */
     fprintf(stdout, "\n=== Stage 3 (syl + stress) sanity ===\n");
     rc = spfy_fe_syl_run(fe, sample, &delta);
     if (rc != SPFY_OK) {
@@ -222,7 +208,6 @@ int main(int argc, char **argv)
                 stress ? stress : "?");
     }
 
-    /* Stage 4: LTS letter-to-phoneme. */
     fprintf(stdout, "\n=== Stage 4 (LTS) sanity ===\n");
     rc = spfy_fe_lts_run(fe, sample, &delta);
     if (rc != SPFY_OK) {
@@ -236,7 +221,6 @@ int main(int argc, char **argv)
     const spfy_fe_token_t *xph =
         spfy_fe_stream_tokens(&delta, SPFY_STREAM_PHONEME, &n_phon);
     fprintf(stdout, "  %%phoneme=%u tokens\n", n_phon);
-    /* Group phonemes by word for readability. */
     uint16_t cur_word = 0xFFFFu;
     fprintf(stdout, "  ");
     for (uint32_t i = 0; i < n_phon; ++i) {
@@ -249,7 +233,6 @@ int main(int argc, char **argv)
     }
     fprintf(stdout, "\n");
 
-    /* Stage 5: Propagate prosody hints up the stream stack. */
     fprintf(stdout, "\n=== Stage 5 (prosody propagation) sanity ===\n");
     rc = spfy_fe_prosody_run(fe, &delta);
     if (rc != SPFY_OK) {
@@ -259,7 +242,6 @@ int main(int argc, char **argv)
         spfy_fe_close(fe);
         return 1;
     }
-    /* Show per-word emphasis after propagation. */
     uint32_t n_word2 = 0;
     const spfy_fe_token_t *xw2 =
         spfy_fe_stream_tokens(&delta, SPFY_STREAM_WORD, &n_word2);
@@ -277,7 +259,6 @@ int main(int argc, char **argv)
                 xw2[i].word_id, buf, (unsigned)emph);
     }
 
-    /* Stage 6: SPR formatter -> per-slot ctx[5]/sp[5]. */
     fprintf(stdout, "\n=== Stage 6 (SPR formatter) sanity ===\n");
     spfy_fe_utterance_t utt = {0};
     rc = spfy_fe_spr_run(fe, &delta, &utt);
@@ -302,7 +283,6 @@ int main(int argc, char **argv)
     }
     free(utt.slots);
 
-    /* Stage 7: SSML parser sanity. */
     fprintf(stdout, "\n=== Stage 7 (SSML parser) sanity ===\n");
     const char *ssml =
         "Hello <emphasis level=\"strong\">world</emphasis>. "

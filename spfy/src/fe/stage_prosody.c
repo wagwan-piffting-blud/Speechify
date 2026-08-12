@@ -1,8 +1,4 @@
-/* Stage 5: Prosody-hint propagation.
- *
- * Climbs prosody tags from %text -> %word -> %syl -> %phoneme via
- * byte-range overlap.
- */
+/* Stage 5: Prosody-hint propagation. */
 
 #include "stage_prosody.h"
 #include "stage_textnorm.h"
@@ -14,8 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Reduce-functions: max for emphasis (unsigned 0..3),
- * max-abs (signed) for pitch and rate. */
+/* Reduce-functions: max for emphasis (unsigned 0..3), max-abs (signed) for
+ * pitch and rate. */
 static uint16_t reduce_emph(uint16_t a, uint16_t b)
 {
     return a > b ? a : b;
@@ -51,10 +47,7 @@ int spfy_fe_prosody_run(const spfy_fe_t *fe,
         (spfy_fe_token_t *)spfy_fe_stream_tokens(delta, SPFY_STREAM_PHONEME,
                                                   &n_phon);
 
-    /* Build a per-byte indexed map of prosody values from %text.
-     * %text fields[2] = original byte_off; fields[3] = emphasis;
-     * fields[4] = pitch_st; fields[5] = rate_pct. We'll index by
-     * byte_off into a flat array sized by max byte offset seen. */
+    /* Build a per-byte indexed map of prosody values from %text. */
     uint16_t max_byte_off = 0;
     for (uint32_t i = 0; i < n_text; ++i) {
         uint16_t off = xt[i].fields[SPFY_TEXT_FIELD_BYTE_OFF];
@@ -76,7 +69,6 @@ int spfy_fe_prosody_run(const spfy_fe_t *fe,
         byte_rate[off]  = (int16_t)xt[i].fields[SPFY_TEXT_FIELD_RATE_PCT];
     }
 
-    /* Reduce a byte range [lo, lo+len) into per-token prosody fields. */
     #define REDUCE_RANGE(tok, lo, len)                                     \
         do {                                                               \
             uint16_t emph = 0;                                             \
@@ -93,21 +85,18 @@ int spfy_fe_prosody_run(const spfy_fe_t *fe,
             (tok).fields[SPFY_PROSODY_FIELD_RATE_PCT] = (uint16_t)rate;    \
         } while (0)
 
-    /* %word: fields[0]=byte_start, fields[1]=byte_len. */
     for (uint32_t i = 0; i < n_word; ++i) {
         uint16_t off = xw[i].fields[0];
         uint16_t len = xw[i].fields[1];
         REDUCE_RANGE(xw[i], off, len);
     }
 
-    /* %syl: fields[0]=byte_start, fields[1]=byte_len. */
     for (uint32_t i = 0; i < n_syl; ++i) {
         uint16_t off = xs[i].fields[0];
         uint16_t len = xs[i].fields[1];
         REDUCE_RANGE(xs[i], off, len);
     }
 
-    /* %phoneme: inherit from parent %syl (linked via syl_id). */
     for (uint32_t i = 0; i < n_phon; ++i) {
         uint16_t sid = xp[i].syl_id;
         if (sid < n_syl) {

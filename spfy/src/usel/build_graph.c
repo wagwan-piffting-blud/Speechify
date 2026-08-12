@@ -1,8 +1,8 @@
 /* BuildGraph + post-order slot allocation, plus LinkGraph predecessor
- * derivation. See build_graph.h for the algorithm overview and the
- * engine-side mapping. */
+ * derivation. */
 
 #include "build_graph.h"
+#include "syl_span.h"
 
 #include "../../include/spfy/spfy.h"
 
@@ -31,6 +31,8 @@ void spfy_fe_utt_free(spfy_fe_utt_t *u)
     free(u->syl_stress);
     free(u->syl_accent);
     free(u->syl_btone);
+    free(u->syl_cont_prev);
+    free(u->syl_acctype);
     memset(u, 0, sizeof *u);
 }
 
@@ -44,20 +46,16 @@ void spfy_slot_tree_free(spfy_slot_tree_t *t)
     memset(t, 0, sizeof *t);
 }
 
-/* Internal "tree node" used during construction. We allocate a flat
- * pool sized to (1 phrase + n_words + n_syls + 2 * n_segs). After the
- * tree is built we run a post-order DFS to fill in `post_idx` and emit
- * the final slots[] array indexed by post-order. */
+/* Internal "tree node" used during construction. */
 typedef struct tnode {
     spfy_slot_kind_t kind;
     uint32_t         fe_shared;
     uint32_t         halfphone_side;
-    /* Children: flat indices into the pool. */
     uint32_t        *child_idx;
     uint32_t         n_children;
     uint32_t         children_cap;
-    uint32_t         parent;          /* index into pool; UINT32_MAX = root */
-    uint32_t         post_idx;        /* set during post-order pass */
+    uint32_t         parent;
+    uint32_t         post_idx;
 } tnode_t;
 
 static int tnode_add_child(tnode_t *parent, uint32_t child_pool_idx)
@@ -74,7 +72,7 @@ static int tnode_add_child(tnode_t *parent, uint32_t child_pool_idx)
 }
 
 /* Recursive post-order traversal: assign post_idx in DFS-leaves-first
- * order. counter is shared across the whole tree. */
+ * order. */
 static void post_order_walk(tnode_t *pool, uint32_t cur, uint32_t *counter)
 {
     tnode_t *n = &pool[cur];
@@ -89,7 +87,6 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out)
     if (!in || !out) return SPFY_E_INVAL;
     memset(out, 0, sizeof *out);
 
-    /* Sanity: word_n_syls and syl_n_segs sizes match. */
     uint32_t expected_n_syls = 0;
     for (uint32_t i = 0; i < in->n_words; ++i)
         expected_n_syls += in->word_n_syls ? in->word_n_syls[i] : 0;
@@ -100,20 +97,27 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out)
         expected_n_segs += in->syl_n_segs ? in->syl_n_segs[g] : 0;
     if (expected_n_segs != in->n_segs) return SPFY_E_FORMAT;
 
-    /* Allocate pool of tnodes. */
-    uint32_t pool_cap = 1u + in->n_words + in->n_syls + 2u * in->n_segs;
+    /* fr-CA liaison: a syllable that straddles a word boundary arrives as
+     * TWO FE records (see syl_span.h), and the engine's tree holds ONE node
+     * for it, parented to the word where it starts. */
+    uint32_t n_syl_nodes = 0;
+    for (uint32_t g = 0; g < in->n_syls; ++g) {
+        if (n_syl_nodes > 0 && spfy_syl_continues_prev(in, g)) continue;
+        ++n_syl_nodes;
+    }
+
+    uint32_t pool_cap = 1u + in->n_words + n_syl_nodes + 2u * in->n_segs;
     if (pool_cap == 0) return SPFY_E_INVAL;
     tnode_t *pool = (tnode_t *)calloc(pool_cap, sizeof *pool);
     if (!pool) return SPFY_E_NOMEM;
     uint32_t pool_n = 0;
 
-    /* 1. Phrase root. */
     uint32_t phrase = pool_n++;
     pool[phrase].kind   = SPFY_SK_PHRASE;
     pool[phrase].parent = UINT32_MAX;
 
-    /* 2. Words (in FE order). */
     uint32_t syl_global = 0;
+    uint32_t prev_syl_node = UINT32_MAX;
     for (uint32_t w = 0; w < in->n_words; ++w) {
         uint32_t word = pool_n++;
         pool[word].kind      = SPFY_SK_WORD;
@@ -123,24 +127,30 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out)
 
         uint32_t n_syls_in_word = in->word_n_syls[w];
         for (uint32_t s = 0; s < n_syls_in_word; ++s, ++syl_global) {
-            uint32_t syl = pool_n++;
-            pool[syl].kind      = SPFY_SK_SYLLABLE;
-            pool[syl].parent    = word;
-            pool[syl].fe_shared = in->word_syls[w][s];
-            if (tnode_add_child(&pool[word], syl) != 0) goto oom;
+            uint32_t syl;
+            if (prev_syl_node != UINT32_MAX
+                && spfy_syl_continues_prev(in, syl_global)) {
+                /* No node of its own: these segments extend the syllable
+                 * this record completes, which hangs off the PREVIOUS word. */
+                syl = prev_syl_node;
+            } else {
+                syl = pool_n++;
+                pool[syl].kind      = SPFY_SK_SYLLABLE;
+                pool[syl].parent    = word;
+                pool[syl].fe_shared = in->word_syls[w][s];
+                if (tnode_add_child(&pool[word], syl) != 0) goto oom;
+                prev_syl_node = syl;
+            }
 
-            /* Segments under this syllable. */
             uint32_t n_segs_in_syl = in->syl_n_segs[syl_global];
             for (uint32_t g = 0; g < n_segs_in_syl; ++g) {
                 uint32_t seg_shared = in->syl_segs[syl_global][g];
-                /* Halfphone left. */
                 uint32_t hpL = pool_n++;
                 pool[hpL].kind = SPFY_SK_HALFPHONE;
                 pool[hpL].parent = syl;
                 pool[hpL].fe_shared = seg_shared;
                 pool[hpL].halfphone_side = 0;
                 if (tnode_add_child(&pool[syl], hpL) != 0) goto oom;
-                /* Halfphone right. */
                 uint32_t hpR = pool_n++;
                 pool[hpR].kind = SPFY_SK_HALFPHONE;
                 pool[hpR].parent = syl;
@@ -151,16 +161,13 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out)
         }
     }
     if (pool_n != pool_cap) {
-        /* Shouldn't happen if the FE input is consistent. */
         goto badf;
     }
 
-    /* 3. Post-order traversal: assign post_idx contiguously. */
     uint32_t counter = 0;
     post_order_walk(pool, phrase, &counter);
     if (counter != pool_n) goto badf;
 
-    /* 4. Emit final slots[] array indexed by post_idx. */
     spfy_slot_node_t *slots = (spfy_slot_node_t *)
         calloc(pool_n, sizeof *slots);
     if (!slots) goto oom;
@@ -179,7 +186,6 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out)
             s->child_idx = (uint32_t *)malloc(n->n_children *
                                               sizeof *s->child_idx);
             if (!s->child_idx) {
-                /* Roll back the entire slots array. */
                 for (uint32_t j = 0; j <= i; ++j) {
                     free(slots[j].child_idx);
                 }
@@ -192,7 +198,6 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out)
         }
     }
 
-    /* Free internal pool. */
     for (uint32_t i = 0; i < pool_n; ++i) free(pool[i].child_idx);
     free(pool);
 
@@ -200,11 +205,10 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out)
     out->n_slots     = pool_n;
     out->n_phrase    = 1;
     out->n_word      = in->n_words;
-    out->n_syl       = in->n_syls;
+    out->n_syl       = n_syl_nodes;
     out->n_halfphone = 2u * in->n_segs;
     return SPFY_OK;
 
-    /* fall-through to error labels not used here */
 
 oom:
     for (uint32_t i = 0; i < pool_n; ++i) free(pool[i].child_idx);
@@ -216,9 +220,6 @@ badf:
     return SPFY_E_FORMAT;
 }
 
-/* --------------------------------------------------------------------- */
-/* LinkGraph                                                              */
-/* --------------------------------------------------------------------- */
 
 void spfy_slot_preds_table_free(spfy_slot_preds_table_t *t)
 {
@@ -245,8 +246,18 @@ static uint32_t prev_sibling(const spfy_slot_tree_t *t, uint32_t slot)
     return UINT32_MAX;
 }
 
+/* Can this subtree END anything -- i.e. */
+static int subtree_has_hp(const spfy_slot_tree_t *t, uint32_t slot)
+{
+    if (t->slots[slot].kind == SPFY_SK_HALFPHONE) return 1;
+    for (uint32_t i = 0; i < t->slots[slot].n_children; ++i) {
+        if (subtree_has_hp(t, t->slots[slot].child_idx[i])) return 1;
+    }
+    return 0;
+}
+
 /* Build the exit chain: [P, P.last_child, P.last_child.last_child, ...]
- * outer-first, ending at a leaf. Caller-allocated dynamic array. */
+ * outer-first, ending at a leaf. */
 static int build_exit_chain(const spfy_slot_tree_t *t, uint32_t root,
                             uint32_t **out_chain, uint32_t *out_n)
 {
@@ -264,7 +275,7 @@ static int build_exit_chain(const spfy_slot_tree_t *t, uint32_t root,
         arr[cnt++] = cur;
         const spfy_slot_node_t *n = &t->slots[cur];
         if (n->n_children == 0) break;
-        cur = n->child_idx[n->n_children - 1];   /* last child */
+        cur = n->child_idx[n->n_children - 1];
     }
     *out_chain = arr;
     *out_n     = cnt;
@@ -287,15 +298,17 @@ int spfy_link_graph(const spfy_slot_tree_t *tree,
         r->n_preds = 0;
 
         if (tree->slots[s].parent_idx == UINT32_MAX) {
-            /* Root: no predecessors. */
             continue;
         }
 
-        /* Walk up looking for first ancestor with a left sibling. */
+        /* Walk up looking for the first ancestor with a left sibling that
+         * can end something. */
         uint32_t cur = s;
         uint32_t left = UINT32_MAX;
         while (cur != UINT32_MAX) {
             uint32_t ls = prev_sibling(tree, cur);
+            while (ls != UINT32_MAX && !subtree_has_hp(tree, ls))
+                ls = prev_sibling(tree, ls);
             if (ls != UINT32_MAX) { left = ls; break; }
             cur = tree->slots[cur].parent_idx;
         }
@@ -305,7 +318,6 @@ int spfy_link_graph(const spfy_slot_tree_t *tree,
             continue;
         }
 
-        /* Exit chain of left sibling subtree. */
         uint32_t *chain = NULL;
         uint32_t  chain_n = 0;
         if (build_exit_chain(tree, left, &chain, &chain_n) != 0) {

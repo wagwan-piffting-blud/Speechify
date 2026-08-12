@@ -1,11 +1,4 @@
-/* spfy_dump_f0 — print Tom's per-unit F0 byte distribution.
- *
- * Uses the production unit-table loader so we never desync from the
- * actual on-disk row format. Output is a one-line summary of f0_start,
- * f0_end, f0_mid byte stats (min/max/median + 1/5/50/95/99 percentile)
- * plus the semitone range available above and below median. Used once
- * to size the unit-selection-only pitch range before falling back to
- * PSOLA for wider shifts. */
+/* spfy_dump_f0 — print Tom's per-unit F0 byte distribution. */
 
 #include <spfy/spfy.h>
 #include "../voice/voice.h"
@@ -21,7 +14,6 @@ static int u8cmp(const void *a, const void *b) {
 }
 
 static void stats(const char *label, uint8_t *vals, size_t n) {
-    /* Filter out 0 (no F0 marker = unvoiced unit). */
     size_t k = 0;
     for (size_t i = 0; i < n; ++i) if (vals[i]) vals[k++] = vals[i];
     if (k == 0) { printf("%s: empty\n", label); return; }

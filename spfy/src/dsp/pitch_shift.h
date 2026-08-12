@@ -29,26 +29,22 @@
 extern "C" {
 #endif
 
-/* Out-of-place TD-PSOLA pitch shift.
- *
- *   in, n_in        input PCM
- *   out             output buffer, must be allocated to >= n_in samples
- *   semitones       +/- semitones; positive = pitch up
- *   sample_rate     PCM rate (only used to scale period search range;
- *                   8000 is the natively-tuned setpoint)
- *
- * Returns 0 on success.
- */
+/* Out-of-place TD-PSOLA pitch shift. */
 int spfy_pitch_shift_block(const int16_t *in, size_t n_in,
                            int16_t *out,
                            float semitones, int sample_rate);
 
-/* Convenience: allocate internal output buffer, write back in place. */
 int spfy_pitch_shift_inplace(int16_t *samples, size_t n,
                              float semitones, int sample_rate);
+
+/* Time-varying TD-PSOLA F0 RETARGET — tame over-high pitch ACCENTS while
+ * preserving the natural rise-and-fall. */
+int spfy_f0_retarget_block(const int16_t *in, size_t n_in,
+                           int16_t *out,
+                           float base_hz, float ratio, int sample_rate);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* SPFY_DSP_PITCH_SHIFT_H */
+#endif

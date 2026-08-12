@@ -1,20 +1,4 @@
-/* text_norm.c — see text_norm.h.
- *
- * Tokenization strategy: single-pass walk through the input. We classify
- * each character into one of {alpha, digit, punct-break, sentence-end,
- * whitespace, other}, and accumulate runs.
- *
- *   - Alpha runs become WORD tokens (lowercased).
- *   - Digit runs (with optional embedded '.') become number-expansion
- *     WORD tokens — multi-token output for "42" → "forty" + "two".
- *   - Sentence-end punct (. ! ?) emits a SENTENCE_BREAK token.
- *   - Phrase-break punct (, ; : ( )) emits a PHRASE_BREAK token.
- *   - Other chars are silently dropped (treat as whitespace).
- *
- * Number expansion is a small hand-rolled English cardinal/year decoder.
- * Covers 0 - 999,999,999. Year heuristic kicks in for 4-digit numbers in
- * [1000, 2999] — those expand as "nineteen ninety" rather than "one
- * thousand nine hundred ninety". */
+/* text_norm.c — see text_norm.h. */
 
 #include "text_norm.h"
 
@@ -24,7 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---- output helpers ----------------------------------------------- */
 
 typedef struct {
     spfy_token_t *out;
@@ -33,7 +16,6 @@ typedef struct {
     int    overflowed;
 } sink_t;
 
-/* Zero the SSML-related extension fields on a freshly-claimed token. */
 static void zero_ext(spfy_token_t *t)
 {
     t->phonemes[0] = '\0';
@@ -43,8 +25,7 @@ static void zero_ext(spfy_token_t *t)
 }
 
 /* Apply the currently-active <prosody>/<rate>/<pitch> overrides to a
- * freshly-pushed WORD token. Called by both push_word and
- * push_word_with_phonemes after the token is in place. */
+ * freshly-pushed WORD token. */
 static void apply_prosody(spfy_token_t *t, int8_t pitch_st, int8_t rate_pct)
 {
     if (!t || t->type != SPFY_TOKEN_WORD) return;
@@ -65,8 +46,8 @@ static void push_word(sink_t *s, const char *word)
     t->text[k] = '\0';
 }
 
-/* Variant for SSML <phoneme ph="...">word</phoneme>: pushes the WORD
- * with the phoneme override attached so fe_internal bypasses lookup. */
+/* Variant for SSML <phoneme ph="...">word</phoneme>: pushes the WORD with
+ * the phoneme override attached so fe_internal bypasses lookup. */
 static void push_word_with_phonemes(sink_t *s, const char *word, const char *phonemes)
 {
     if (s->overflowed || !word || !*word) return;
@@ -89,20 +70,18 @@ static void push_word_with_phonemes(sink_t *s, const char *word, const char *pho
 static void push_break(sink_t *s, spfy_token_type_t type, char ch)
 {
     if (s->overflowed) return;
-    /* Collapse repeated breaks — "hello,,," yields one phrase break. */
     if (s->n > 0 && s->out[s->n - 1].type == type) return;
     if (s->n >= s->cap) { s->overflowed = 1; return; }
     spfy_token_t *t = &s->out[s->n++];
     t->type = type;
     zero_ext(t);
     /* Preserve the actual punctuation char so downstream can distinguish
-     * `.` / `!` / `?` and `,` / `;` / `:` when emitting boundary tones
-     * and opener tags. */
+     * `.` / `!` / `?` and `,` / `;` / `:` when emitting boundary tones and
+     * opener tags. */
     t->text[0] = ch;
     t->text[1] = '\0';
 }
 
-/* SSML <break time="500ms"/> — custom-duration pause token. */
 static void push_custom_pause(sink_t *s, uint16_t ms)
 {
     if (s->overflowed) return;
@@ -114,7 +93,6 @@ static void push_custom_pause(sink_t *s, uint16_t ms)
     t->text[0]  = '\0';
 }
 
-/* ---- number expansion --------------------------------------------- */
 
 static const char *under_20[] = {
     "zero","one","two","three","four","five","six","seven","eight","nine",
@@ -142,7 +120,6 @@ static void emit_under_1000(sink_t *s, int n)
     } else if (n > 0) {
         push_word(s, under_20[n]);
     } else {
-        /* n == 0: only emit "zero" if we're at top-level (caller's job) */
     }
 }
 
@@ -151,16 +128,13 @@ static void emit_year(sink_t *s, int year)
     int hi = year / 100;
     int lo = year % 100;
     if (lo == 0) {
-        /* "1900" → "nineteen hundred" */
         emit_under_1000(s, hi);
         push_word(s, "hundred");
     } else if (lo < 10) {
-        /* "1907" → "nineteen oh seven" */
         emit_under_1000(s, hi);
         push_word(s, "oh");
         push_word(s, under_20[lo]);
     } else {
-        /* "1990" → "nineteen ninety", "2024" → "twenty twenty four" */
         emit_under_1000(s, hi);
         emit_under_1000(s, lo);
     }
@@ -195,8 +169,7 @@ static void emit_cardinal(sink_t *s, long n)
 }
 
 /* Cardinal → ordinal word mapping for the LAST word of a multi-word
- * cardinal expansion. "twenty six" + "th" → swap "six" → "sixth" =
- * "twenty sixth". "twenty" + "th" → "twentieth". */
+ * cardinal expansion. */
 static const char *cardinal_to_ordinal(const char *card)
 {
     static const struct { const char *card; const char *ord; } map[] = {
@@ -251,7 +224,6 @@ static void make_last_word_ordinal(sink_t *s)
     last->text[k] = '\0';
 }
 
-/* Emit a digit-run as words. Detects 4-digit years and decimals. */
 static void emit_number(sink_t *s, const char *digits, size_t n,
                          const char *frac, size_t frac_n)
 {
@@ -271,10 +243,8 @@ static void emit_number(sink_t *s, const char *digits, size_t n,
         return;
     }
 
-    /* Year heuristic: 4-digit numbers in [1000, 2999] are pronounced
-     * as years rather than as a cardinal. Exception: 2000-2009 reads
-     * naturally as "two thousand [and N]" — fall through to the
-     * cardinal branch for that decade. */
+    /* Year heuristic: 4-digit numbers in [1000, 2999] are pronounced as
+     * years rather than as a cardinal. */
     if (n == 4) {
         char buf[8];
         memcpy(buf, digits, 4); buf[4] = '\0';
@@ -285,7 +255,6 @@ static void emit_number(sink_t *s, const char *digits, size_t n,
         }
     }
 
-    /* Otherwise: cardinal. */
     char buf[32];
     size_t k = n < sizeof buf - 1 ? n : sizeof buf - 1;
     memcpy(buf, digits, k); buf[k] = '\0';
@@ -293,12 +262,11 @@ static void emit_number(sink_t *s, const char *digits, size_t n,
     emit_cardinal(s, val);
 }
 
-/* ---- character classification ------------------------------------- */
 
 static int is_word_char(int c)
 {
-    /* Apostrophes are kept inside words: "don't", "speechify's" — only
-     * the dict / suffix-strip stage decides what to do with them. */
+    /* Apostrophes are kept inside words: "don't", "speechify's" — only the
+     * dict / suffix-strip stage decides what to do with them. */
     return isalpha((unsigned char)c) || c == '\'';
 }
 
@@ -313,7 +281,6 @@ static int is_phrase_break(int c)
         || c == '(' || c == ')' || c == '"';
 }
 
-/* Lowercase an ASCII word in place, with length cap. */
 static void to_lower_buf(char *s)
 {
     for (; *s; ++s) {
@@ -322,29 +289,8 @@ static void to_lower_buf(char *s)
 }
 
 /* ---- SSML scanner -------------------------------------------------- *
- *
- * Minimal subset that covers the high-value tags. NOT a conforming
- * XML parser: we don't validate nesting, don't track namespaces, and
- * unknown tags get silently stripped (their inner text still flows
- * through the normal tokenizer). Recognized:
- *
- *   <speak>…</speak>, <p>…</p>, <s>…</s>     wrappers — strip
- *   <break time="Nms" / strength="strong|medium|weak" />
- *                                            custom-pause token
- *   <sub alias="X">Y</sub>                   speak X, skip Y
- *   <say-as interpret-as="characters">ABC</say-as>
- *                                            spell-out per char
- *   <phoneme alphabet="arpabet" ph="..">w</phoneme>
- *                                            attach phoneme override
- *                                            to next WORD token(s)
- *   &amp; &lt; &gt; &apos; &quot;            entity decode
- *
- * `<phoneme alphabet="ipa" ph="...">` is also accepted; the ph value
- * is left as-is (we don't translate IPA → ARPAbet yet — engine will
- * fall back to LTS on unknown phones, which is the conservative move
- * until an IPA table is added). */
+ * Minimal subset that covers the high-value tags. */
 
-/* Case-insensitive prefix match (ASCII). Returns 1 if s starts with pre. */
 static int starts_with_ci(const char *s, const char *pre)
 {
     while (*pre) {
@@ -356,7 +302,6 @@ static int starts_with_ci(const char *s, const char *pre)
     return 1;
 }
 
-/* Strip surrounding whitespace, lowercase, copy into dst. */
 static void trim_lower(const char *src, size_t n, char *dst, size_t cap)
 {
     while (n > 0 && isspace((unsigned char)*src)) { ++src; --n; }
@@ -370,25 +315,18 @@ static void trim_lower(const char *src, size_t n, char *dst, size_t cap)
     dst[k] = '\0';
 }
 
-/* Locate attribute `name` inside the tag body [start, end). Returns 1
- * on hit and fills `val` with the attribute value (unquoted, no length
- * cap beyond `val_cap`); 0 on miss.
- *
- * Tolerates both `attr="value"` and `attr='value'`. Whitespace around
- * `=` is allowed. */
+/* Locate attribute `name` inside the tag body [start, end). */
 static int ssml_get_attr(const char *start, const char *end,
                          const char *name, char *val, size_t val_cap)
 {
     size_t name_len = strlen(name);
     const char *p = start;
     while (p < end) {
-        /* Walk to the next char that starts an identifier. */
         while (p < end && !isalpha((unsigned char)*p)) ++p;
         if (p >= end) break;
         const char *attr_start = p;
         while (p < end && (isalnum((unsigned char)*p) || *p == '-' || *p == ':')) ++p;
         size_t attr_len = (size_t)(p - attr_start);
-        /* Skip whitespace before `=`. */
         while (p < end && isspace((unsigned char)*p)) ++p;
         if (p >= end || *p != '=') continue;
         ++p;
@@ -400,7 +338,7 @@ static int ssml_get_attr(const char *start, const char *end,
         const char *val_start = p;
         while (p < end && *p != quote) ++p;
         size_t val_len = (size_t)(p - val_start);
-        if (p < end) ++p;   /* skip closing quote */
+        if (p < end) ++p;
 
         if (attr_len == name_len
             && starts_with_ci(attr_start, name)
@@ -415,9 +353,7 @@ static int ssml_get_attr(const char *start, const char *end,
     return 0;
 }
 
-/* Parse a duration spec from a `time="500ms"` value, returning ms.
- * Accepts `Nms`, `Ns` (seconds), or bare integer (interpreted as ms).
- * Returns 0 on malformed input. */
+/* Parse a duration spec from a `time="500ms"` value, returning ms. */
 static uint16_t parse_break_time_ms(const char *val)
 {
     if (!val || !*val) return 0;
@@ -430,18 +366,15 @@ static uint16_t parse_break_time_ms(const char *val)
         if (starts_with_ci(end, "s") && !isalpha((unsigned char)end[1])) {
             n *= 1000;
         }
-        /* Anything else (ms, or unknown unit) leaves n as ms. */
     }
     if (n > 65535) n = 65535;
     return (uint16_t)n;
 }
 
-/* Map <break strength="..."> to a millisecond budget. SSML spec
- * suggests these rough values; tuned to match this engine's existing
- * comma vs sentence-end pause durations. */
+/* Map <break strength="..."> to a millisecond budget. */
 static uint16_t break_strength_to_ms(const char *val)
 {
-    if (!val || !*val) return 250;                  /* default = medium */
+    if (!val || !*val) return 250;
     if (starts_with_ci(val, "none"))     return 0;
     if (starts_with_ci(val, "x-weak"))   return 60;
     if (starts_with_ci(val, "weak"))     return 100;
@@ -452,39 +385,9 @@ static uint16_t break_strength_to_ms(const char *val)
 }
 
 /* ---- prosody value parsing --------------------------------------- *
- *
  * Parses rate / pitch attribute strings from both SSML and Balabolka
- * conventions into our internal int8 representation:
- *
- *   pitch_st  signed semitones. 0 = neutral. Clamped to [-12, +12].
- *   rate_pct  signed percent. 0 = neutral. Positive = faster (durations
- *             shrink). -50 = half speed, +100 = double speed. Clamped
- *             to [-90, +127] so int8 range holds.
- *
- * Conventions handled:
- *
- *   SSML <prosody rate="...">
- *     "x-slow"  → -60   (~0.5x)
- *     "slow"    → -30   (~0.7x)
- *     "medium"  →   0
- *     "fast"    → +30   (~1.3x)
- *     "x-fast"  → +100  (~2.0x)
- *     "+50%" / "150%" → +50
- *     "+10%" → +10, "-25%" → -25
- *
- *   SSML <prosody pitch="...">
- *     "+5st" / "-5st"  → ±5 semitones
- *     "+5%" / "-5%"    → ±~0.85 semitones (5/12 mapping)
- *     "x-low" → -6, "low" → -3, "medium" → 0, "high" → +3, "x-high" → +6
- *
- *   Balabolka <rate absspeed="N"> / <pitch absmiddle="N">
- *     SAPI -10..+10 range. Rate factor = 3^(N/10), so:
- *       absspeed +10 → factor 3.0  → rate_pct = +200 (clamped to +127)
- *       absspeed  0  → factor 1.0  → rate_pct = 0
- *       absspeed -10 → factor 0.333 → rate_pct = -66
- *     Pitch is ~1:1 semitones (Balabolka uses a slightly different
- *     curve but for practical purposes absmiddle N ≈ N semitones).
- */
+ * conventions into our internal int8 representation: pitch_st signed
+ * semitones. */
 
 static int8_t clamp_int8(int v, int lo, int hi)
 {
@@ -493,7 +396,6 @@ static int8_t clamp_int8(int v, int lo, int hi)
     return (int8_t)v;
 }
 
-/* Parse SSML rate attribute. Returns rate_pct (signed percent delta). */
 static int8_t parse_ssml_rate(const char *val)
 {
     if (!val || !*val) return 0;
@@ -503,18 +405,15 @@ static int8_t parse_ssml_rate(const char *val)
     if (starts_with_ci(val, "default")) return 0;
     if (starts_with_ci(val, "x-fast")) return clamp_int8(100, -90, 127);
     if (starts_with_ci(val, "fast"))   return 30;
-    /* Numeric: "+50%", "-25%", "150%", "1.5" (multiplier). */
     char *end = NULL;
     double n = strtod(val, &end);
     if (end == val) return 0;
     while (*end == ' ') ++end;
     if (*end == '%') {
-        /* "+50%" → +50, "150%" → +50 (relative). If no sign, treat
-         * 100% as neutral. */
+        /* "+50%" → +50, "150%" → +50 (relative). */
         int rel = (val[0] == '+' || val[0] == '-') ? (int)n : (int)(n - 100);
         return clamp_int8(rel, -90, 127);
     }
-    /* Bare multiplier: 1.0 = neutral, 1.5 = +50, 0.5 = -50. */
     if (n > 0.0) {
         int rel = (int)((n - 1.0) * 100.0);
         return clamp_int8(rel, -90, 127);
@@ -522,7 +421,6 @@ static int8_t parse_ssml_rate(const char *val)
     return 0;
 }
 
-/* Parse SSML pitch attribute. Returns pitch_st (signed semitones). */
 static int8_t parse_ssml_pitch(const char *val)
 {
     if (!val || !*val) return 0;
@@ -532,49 +430,44 @@ static int8_t parse_ssml_pitch(const char *val)
     if (starts_with_ci(val, "default")) return 0;
     if (starts_with_ci(val, "x-high"))  return +6;
     if (starts_with_ci(val, "high"))    return +3;
-    /* Numeric. Suffix tells us unit. */
     char *end = NULL;
     double n = strtod(val, &end);
     if (end == val) return 0;
     while (*end == ' ') ++end;
-    if (!*end) return clamp_int8((int)n, -12, 12);    /* bare = semitones */
+    if (!*end) return clamp_int8((int)n, -12, 12);
     if (starts_with_ci(end, "st"))
         return clamp_int8((int)n, -12, 12);
     if (starts_with_ci(end, "hz")) {
-        /* Hz delta: assume neutral ~120 Hz; +12 Hz ≈ +1 ST.
-         * Rough but better than ignoring the attribute. */
+        /* Hz delta: assume neutral ~120 Hz; +12 Hz ≈ +1 ST. */
         return clamp_int8((int)(n / 12.0), -12, 12);
     }
     if (*end == '%') {
-        /* +N% of frequency ≈ N/8 semitones (since 2^(1/12) ≈ 1.06). */
         return clamp_int8((int)(n / 8.0), -12, 12);
     }
     return clamp_int8((int)n, -12, 12);
 }
 
-/* Balabolka SAPI absspeed (-10..+10) → rate_pct.
- * Factor curve = 3^(absspeed/10); rate_pct = (factor - 1) * 100. */
+/* Balabolka SAPI absspeed (-10..+10) → rate_pct. */
 static int8_t balabolka_absspeed_to_rate_pct(int absspeed)
 {
     if (absspeed < -10) absspeed = -10;
     if (absspeed >  10) absspeed =  10;
-    /* Precomputed (factor - 1) × 100 for integer absspeed values to
-     * avoid pulling in expf at this layer. */
+    /* Precomputed (factor - 1) × 100 for integer absspeed values to avoid
+     * pulling in expf at this layer. */
     static const int LUT[21] = {
-        /* -10..-1 */ -66, -61, -54, -47, -38, -29, -19, -7, +7, +21,
-        /*    0   */   0,
-        /* +1..+10*/ +27, +35, +44, +54, +64, +75, +88,+102,+117,+127
+         -66, -61, -54, -47, -38, -29, -19, -7, +7, +21,
+           0,
+         +27, +35, +44, +54, +64, +75, +88,+102,+117,+127
     };
-    /* LUT indexing: -10 → 0, 0 → 10 (NOT the middle index — it's
-     * positioned at the end of the negative bank). Recompute index. */
+    /* LUT indexing: -10 → 0, 0 → 10 (NOT the middle index — it's positioned
+     * at the end of the negative bank). */
     int idx;
-    if (absspeed <= -1)      idx = absspeed + 10;        /* -10..-1 → 0..9 */
+    if (absspeed <= -1)      idx = absspeed + 10;
     else if (absspeed == 0)  idx = 10;
-    else                     idx = absspeed + 10;        /* +1..+10 → 11..20 */
+    else                     idx = absspeed + 10;
     return clamp_int8(LUT[idx], -90, 127);
 }
 
-/* Balabolka SAPI absmiddle (-10..+10) → pitch_st. Roughly 1:1. */
 static int8_t balabolka_absmiddle_to_pitch_st(int absmiddle)
 {
     if (absmiddle < -12) absmiddle = -12;
@@ -583,26 +476,13 @@ static int8_t balabolka_absmiddle_to_pitch_st(int absmiddle)
 }
 
 /* Convert a Balabolka-style `<pron sym="...">` value to engine-native
- * ARPAbet. Balabolka conventions vs our engine:
- *
- *   - Tokens are lowercase ("p aa t ax").
- *   - Stress is a SEPARATE token (1 = primary, 2 = secondary) following
- *     the vowel: "p aa 1 t ax" = P AA1 T AX0.
- *   - Uses `h` for /h/ where the engine uses `hh`.
- *
- * We produce uppercase ARPAbet with stress digits suffixed onto vowels
- * (the format `split_phonemes` expects). Unstressed vowels default to
- * stress 0. Consonants get no digit. Unknown tokens pass through as-is
- * uppercased — fe_internal's split_phonemes will skip / LTS them.
- *
- * `out_cap` includes the trailing NUL. */
+ * ARPAbet. */
 static void balabolka_to_arpabet(const char *sym, char *out, size_t out_cap)
 {
     if (out_cap == 0) return;
     out[0] = '\0';
     if (!sym) return;
 
-    /* Vowel set used to decide whether a stress digit applies. */
     static const char *VOWELS[] = {
         "aa","ae","ah","ao","aw","ax","ay",
         "eh","er","ey","ih","iy","ow","oy","uh","uw", NULL
@@ -610,14 +490,13 @@ static void balabolka_to_arpabet(const char *sym, char *out, size_t out_cap)
 
     size_t off = 0;
     const char *p = sym;
-    char prev_token[8] = {0};   /* lowercase, no stress */
+    char prev_token[8] = {0};
     int  prev_is_vowel  = 0;
-    int  prev_emitted   = 0;    /* how many chars of prev are already in out */
+    int  prev_emitted   = 0;
     while (*p) {
         while (*p && isspace((unsigned char)*p)) ++p;
         if (!*p) break;
 
-        /* Pull the next whitespace-delimited token, lowercase. */
         char tok[8] = {0};
         size_t k = 0;
         while (*p && !isspace((unsigned char)*p) && k + 1 < sizeof tok) {
@@ -625,25 +504,20 @@ static void balabolka_to_arpabet(const char *sym, char *out, size_t out_cap)
             if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
             tok[k++] = c;
         }
-        /* Discard the rest of an oversized token. */
         while (*p && !isspace((unsigned char)*p)) ++p;
 
-        /* Standalone digit → stress for the previous vowel. */
         if (k == 1 && tok[0] >= '0' && tok[0] <= '9') {
             if (prev_is_vowel && prev_emitted > 0
                 && off + 1 < out_cap) {
                 out[off++] = tok[0];
                 out[off]   = '\0';
             }
-            /* Even if the previous wasn't a vowel, swallow the digit. */
             prev_is_vowel = 0;
             prev_emitted  = 0;
             continue;
         }
 
-        /* Token is a phoneme. If it's a vowel WITHOUT an explicit stress
-         * digit, the previous vowel was already finalized — backfill
-         * a 0 onto it if we haven't written one yet. */
+        /* Token is a phoneme. */
         if (prev_is_vowel && prev_emitted > 0 && off + 1 < out_cap) {
             out[off++] = '0';
             out[off]   = '\0';
@@ -651,11 +525,9 @@ static void balabolka_to_arpabet(const char *sym, char *out, size_t out_cap)
         prev_is_vowel = 0;
         prev_emitted  = 0;
 
-        /* h → hh. */
         const char *arpa = tok;
         if (strcmp(tok, "h") == 0) arpa = "hh";
 
-        /* Append separator + uppercased token. */
         if (off > 0 && off + 1 < out_cap) { out[off++] = ' '; out[off] = '\0'; }
         size_t a_start = off;
         for (size_t j = 0; arpa[j] && off + 1 < out_cap; ++j) {
@@ -666,7 +538,6 @@ static void balabolka_to_arpabet(const char *sym, char *out, size_t out_cap)
         out[off] = '\0';
         prev_emitted = (int)(off - a_start);
 
-        /* Track whether the just-emitted token is a vowel. */
         for (int v = 0; VOWELS[v]; ++v) {
             if (strcmp(tok, VOWELS[v]) == 0) { prev_is_vowel = 1; break; }
         }
@@ -676,16 +547,13 @@ static void balabolka_to_arpabet(const char *sym, char *out, size_t out_cap)
         snprintf(prev_token, sizeof prev_token, "%s", tok);
     }
 
-    /* Trailing unstressed vowel — finalize with 0. */
     if (prev_is_vowel && prev_emitted > 0 && off + 1 < out_cap) {
         out[off++] = '0';
         out[off]   = '\0';
     }
 }
 
-/* Decode a single XML entity at `*p` (which must point at '&'). On hit
- * returns the decoded ASCII char and advances `*p` past the entity.
- * On miss returns 0 and leaves `*p` unchanged. */
+/* Decode a single XML entity at `*p` (which must point at '&'). */
 static int xml_decode_entity(const char **p_in_out)
 {
     const char *p = *p_in_out;
@@ -711,7 +579,6 @@ static int xml_decode_entity(const char **p_in_out)
     return out;
 }
 
-/* ---- public API --------------------------------------------------- */
 
 int spfy_text_normalize(const char *input,
                         spfy_token_t *out, size_t cap, size_t *out_n)
@@ -719,11 +586,7 @@ int spfy_text_normalize(const char *input,
     if (!input || !out || cap == 0 || !out_n) return -1;
     sink_t s = { out, cap, 0, 0 };
 
-    /* SSML state. Updated when we enter/exit known tags; consulted when
-     * the main loop emits a WORD token. Prosody state is a small stack
-     * (depth 4) so nested <prosody>/<rate>/<pitch> regions restore the
-     * outer value on close. Overflow saturates at the cap — pragmatic
-     * for hand-authored SSML, which rarely nests 4+ deep. */
+    /* SSML state. */
     char ssml_phonemes[SPFY_TOKEN_PHONEMES_MAX] = {0};
     int  ssml_spell_chars   = 0;
     int  ssml_spell_digits  = 0;
@@ -733,8 +596,8 @@ int spfy_text_normalize(const char *input,
     int8_t prosody_rate_stack [SSML_PROSODY_STACK_MAX] = {0};
     int    prosody_depth = 0;
     /* current_* are the running totals (sum down the stack) — applied
-     * additively so nested tags compose: outer "fast" + inner "+5st"
-     * yields both. */
+     * additively so nested tags compose: outer "fast" + inner "+5st" yields
+     * both. */
     int8_t cur_pitch_st = 0;
     int8_t cur_rate_pct = 0;
 
@@ -742,23 +605,20 @@ int spfy_text_normalize(const char *input,
     while (*p) {
         int c = (unsigned char)*p;
 
-        /* ---- XML entity decode (&amp; &lt; …) --------------------- */
         if (c == '&') {
             const char *save = p;
             int dec = xml_decode_entity(&p);
-            if (dec) { c = dec; /* fall through with decoded char */ }
-            else     { p = save; /* malformed — leave & in place */ }
+            if (dec) { c = dec;  }
+            else     { p = save;  }
         }
 
-        /* ---- SSML tag handling ------------------------------------- */
         if (c == '<') {
             const char *tag_end = strchr(p, '>');
-            if (!tag_end) { ++p; continue; }    /* malformed: drop the '<' */
+            if (!tag_end) { ++p; continue; }
             const char *tag_body = p + 1;
             int is_close = (tag_body < tag_end && *tag_body == '/');
             if (is_close) ++tag_body;
 
-            /* Extract tag name. */
             const char *name = tag_body;
             const char *name_end = name;
             while (name_end < tag_end
@@ -766,17 +626,14 @@ int spfy_text_normalize(const char *input,
                 ++name_end;
             size_t name_len = (size_t)(name_end - name);
 
-            /* Dispatch. Self-closing tags are detected by `/>`. */
             int self_close = (tag_end > tag_body && tag_end[-1] == '/');
 
             if (name_len == 5 && starts_with_ci(name, "speak")) {
-                /* root wrapper — nothing to do */
             } else if ((name_len == 1 && (name[0] == 'p' || name[0] == 's'))) {
                 /* <p>/<s> wrappers — engine treats as paragraph/sentence;
                  * we map close tags to sentence breaks for prosody. */
                 if (is_close) push_break(&s, SPFY_TOKEN_SENTENCE_BREAK, '.');
             } else if (name_len == 5 && starts_with_ci(name, "break")) {
-                /* Custom-duration pause. `time="Nms"` wins over `strength`. */
                 char val[32];
                 uint16_t ms = 0;
                 if (ssml_get_attr(name_end, tag_end, "time", val, sizeof val))
@@ -784,22 +641,12 @@ int spfy_text_normalize(const char *input,
                 else if (ssml_get_attr(name_end, tag_end, "strength", val, sizeof val))
                     ms = break_strength_to_ms(val);
                 else
-                    ms = 250;   /* spec default — medium */
+                    ms = 250;
                 if (ms > 0) push_custom_pause(&s, ms);
                 (void)self_close;
             } else if (name_len == 4 && starts_with_ci(name, "pron")) {
-                /* Balabolka pronunciation. Two forms:
-                 *   <pron sym="..."/>                   — self-closing
-                 *   <pron sym="...">annotation</pron>   — with text content
-                 *
-                 * Self-closing form uses "_pron_" as the WORD text (an
-                 * underscore-padded placeholder won't accidentally hit
-                 * fe_internal's auto-break / abbreviation / POS heuristics).
-                 * The annotated form uses the inner text — useful when
-                 * the user wants the tagged-text dump (and any future
-                 * downstream consumer) to see the intended spelling. */
+                /* Balabolka pronunciation. */
                 if (is_close) {
-                    /* nothing — already emitted at open */
                 } else {
                     char sym[160];
                     if (ssml_get_attr(name_end, tag_end, "sym", sym, sizeof sym)) {
@@ -811,7 +658,6 @@ int spfy_text_normalize(const char *input,
                             if (!self_close) {
                                 const char *close = strstr(tag_end + 1, "</pron>");
                                 if (close) {
-                                    /* Capture trimmed lowercase annotation. */
                                     const char *cs = tag_end + 1, *ce = close;
                                     while (cs < ce && isspace((unsigned char)*cs)) ++cs;
                                     while (ce > cs && isspace((unsigned char)ce[-1])) --ce;
@@ -825,7 +671,6 @@ int spfy_text_normalize(const char *input,
                                         }
                                         word_text[L] = '\0';
                                     }
-                                    /* Resume after </pron>. */
                                     const char *gt = strchr(close, '>');
                                     if (gt) skip_to = gt + 1;
                                 }
@@ -850,17 +695,13 @@ int spfy_text_normalize(const char *input,
                 }
             } else if (name_len == 3 && starts_with_ci(name, "sub")) {
                 if (is_close) {
-                    /* nothing — alias was already emitted at open */
                 } else {
-                    /* Speak the alias instead of the inner content.
-                     * We find </sub>, emit tokens for the alias text,
-                     * then jump past the inner content. */
+                    /* Speak the alias instead of the inner content. */
                     char alias[128];
                     if (ssml_get_attr(name_end, tag_end, "alias", alias, sizeof alias)) {
                         /* Tokenize alias inline — recurse via a local
                          * mini-loop so we don't blow the call stack on
-                         * nested subs. The alias is treated as plain
-                         * text (no further SSML parsing). */
+                         * nested subs. */
                         const char *ap = alias;
                         while (*ap) {
                             unsigned char ac = (unsigned char)*ap;
@@ -878,7 +719,6 @@ int spfy_text_normalize(const char *input,
                             }
                         }
                     }
-                    /* Skip past inner content to </sub>. */
                     const char *close = strstr(tag_end + 1, "</sub>");
                     if (close) {
                         const char *gt = strchr(close, '>');
@@ -901,8 +741,8 @@ int spfy_text_normalize(const char *input,
                     }
                 }
             } else if (name_len == 7 && starts_with_ci(name, "prosody")) {
-                /* SSML <prosody rate="..." pitch="..."> — push the
-                 * deltas onto the prosody stack on open, pop on close. */
+                /* SSML <prosody rate="..." pitch="..."> — push the deltas
+                 * onto the prosody stack on open, pop on close. */
                 if (is_close) {
                     if (prosody_depth > 0) {
                         --prosody_depth;
@@ -923,7 +763,6 @@ int spfy_text_normalize(const char *input,
                     cur_rate_pct = (int8_t)clamp_int8(cur_rate_pct + dr, -90, 127);
                 }
             } else if (name_len == 4 && starts_with_ci(name, "rate")) {
-                /* Balabolka <rate absspeed="N"> / <rate speed="N"> */
                 if (is_close) {
                     if (prosody_depth > 0) {
                         --prosody_depth;
@@ -945,7 +784,6 @@ int spfy_text_normalize(const char *input,
                     cur_rate_pct = (int8_t)clamp_int8(cur_rate_pct + dr, -90, 127);
                 }
             } else if (name_len == 5 && starts_with_ci(name, "pitch")) {
-                /* Balabolka <pitch absmiddle="N"> / <pitch middle="N"> */
                 if (is_close) {
                     if (prosody_depth > 0) {
                         --prosody_depth;
@@ -965,15 +803,12 @@ int spfy_text_normalize(const char *input,
                     cur_pitch_st = (int8_t)clamp_int8(cur_pitch_st + dp, -12, 12);
                 }
             }
-            /* Unknown tag — silently strip. Inner text flows through. */
             p = tag_end + 1;
             continue;
         }
 
-        /* Whitespace: skip. */
         if (isspace(c)) { ++p; continue; }
 
-        /* Word run: alpha + apostrophe. */
         if (is_word_char(c)) {
             char buf[SPFY_TOKEN_TEXT_MAX];
             size_t k = 0;
@@ -983,9 +818,9 @@ int spfy_text_normalize(const char *input,
             }
             buf[k] = '\0';
             to_lower_buf(buf);
-            /* SSML <say-as interpret-as="characters"> — emit one WORD
-             * per letter so the existing letter-spell-out path in
-             * fe_internal handles each as a noun letter-name. */
+            /* SSML <say-as interpret-as="characters"> — emit one WORD per
+             * letter so the existing letter-spell-out path in fe_internal
+             * handles each as a noun letter-name. */
             if (ssml_spell_chars) {
                 char one[2] = {0, 0};
                 for (size_t j = 0; j < k; ++j) {
@@ -1006,14 +841,14 @@ int spfy_text_normalize(const char *input,
             continue;
         }
 
-        /* Number run: digits + optional .frac, with optional ordinal
-         * suffix (1st / 2nd / 3rd / 4th / 21st / 26th…). */
+        /* Number run: digits + optional .frac, with optional ordinal suffix
+         * (1st / 2nd / 3rd / 4th / 21st / 26th…). */
         if (isdigit(c)) {
             const char *digits = p;
             while (*p && isdigit((unsigned char)*p)) ++p;
             size_t n_int = (size_t)(p - digits);
-            /* SSML <say-as interpret-as="digits">123</say-as>:
-             * emit "one two three" instead of "one hundred twenty three". */
+            /* SSML <say-as interpret-as="digits">123</say-as>: emit "one
+             * two three" instead of "one hundred twenty three". */
             if (ssml_spell_digits) {
                 static const char *digit_names[] = {
                     "zero","one","two","three","four",
@@ -1038,20 +873,19 @@ int spfy_text_normalize(const char *input,
                 while (*p && isdigit((unsigned char)*p)) ++p;
                 n_frac = (size_t)((p) - frac);
             }
-            /* Ordinal suffix — only when there's no fractional part. */
             int is_ordinal = 0;
             if (n_frac == 0 && p[0] && p[1]) {
                 int s1 = (p[0] >= 'A' && p[0] <= 'Z') ? p[0] + ('a' - 'A') : p[0];
                 int s2 = (p[1] >= 'A' && p[1] <= 'Z') ? p[1] + ('a' - 'A') : p[1];
-                /* Require word boundary after suffix so "5that" doesn't
-                 * eat "th" as ordinal. */
+                /* Require word boundary after suffix so "5that" doesn't eat
+                 * "th" as ordinal. */
                 int after = (unsigned char)p[2];
                 int at_boundary = !after || !is_word_char(after);
                 if (at_boundary
-                    && ((s1 == 's' && s2 == 't')      /* Nst  */
-                     || (s1 == 'n' && s2 == 'd')      /* Nnd  */
-                     || (s1 == 'r' && s2 == 'd')      /* Nrd  */
-                     || (s1 == 't' && s2 == 'h'))) {  /* Nth  */
+                    && ((s1 == 's' && s2 == 't')
+                     || (s1 == 'n' && s2 == 'd')
+                     || (s1 == 'r' && s2 == 'd')
+                     || (s1 == 't' && s2 == 'h'))) {
                     is_ordinal = 1;
                     p += 2;
                 }
@@ -1066,11 +900,9 @@ int spfy_text_normalize(const char *input,
             continue;
         }
 
-        /* Punctuation. */
         if (is_sentence_end(c)) { push_break(&s, SPFY_TOKEN_SENTENCE_BREAK, (char)c); ++p; continue; }
         if (is_phrase_break(c)) { push_break(&s, SPFY_TOKEN_PHRASE_BREAK,   (char)c); ++p; continue; }
 
-        /* Anything else: drop. */
         ++p;
     }
 

@@ -1,23 +1,4 @@
-/* spfy_engine_graph_replay -- M3.4r Phase A validation harness.
- *
- * Reads a viterbi_dp_hook capture (per-utterance dump of the engine's
- * BuildGraph slot DAG + per-cand pre-DP costs + chosen path) and runs
- * our DAG Viterbi (spfy_viterbi_run_dag) over the engine's slot graph
- * using its `pre_dp` values as target costs and our same-rec / hash /
- * miss=1000 join formula. Compares the chosen-UID path against the
- * engine's reconstructed path.
- *
- * 100% match across the corpus validates that DP + join + cost stack
- * is bit-exact engine-faithful; the only remaining work to synthesize
- * from text alone is replicating BuildGraph + PostScoringAdj's
- * internal-slot scoring in C (Phase B).
- *
- * Usage:
- *   spfy_engine_graph_replay <voice.vin> <viterbi_dp.jsonl>
- *
- *   Single-file mode -- run on one captured trace at a time. Drive
- *   over the corpus from PowerShell.
- */
+/* spfy_engine_graph_replay -- M3.4r Phase A validation harness. */
 
 #include <spfy/spfy.h>
 
@@ -33,10 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* -------------------------------------------------------------------- */
-/* JSONL helpers (loose line-based extraction; matches the format our    */
-/* viterbi_dp_hook.js emits exactly)                                     */
-/* -------------------------------------------------------------------- */
 
 static const char *find_lit(const char *p, const char *end, const char *lit)
 {
@@ -61,8 +38,7 @@ static int parse_u32_at(const char *p, const char *end, uint32_t *out,
     (void)end;
     char *e = NULL;
     /* strtoul handles full u32 range (up to 4294967295 on 32-bit long
-     * platforms). strtol would clamp at 2^31-1 = INT32_MAX which
-     * silently corrupted curve_offset_k = 4294967246 (= -50 as int32). */
+     * platforms). */
     unsigned long v = strtoul(p, &e, 10);
     if (e == p) return -1;
     *out = (uint32_t)v;
@@ -82,7 +58,6 @@ static int parse_f32_at(const char *p, const char *end, float *out,
     return 0;
 }
 
-/* Read a "key":value pair off `line` if present. Returns 0 on success. */
 static int read_key_u32(const char *line, const char *end,
                         const char *key, uint32_t *out)
 {
@@ -105,39 +80,35 @@ static int read_key_f32(const char *line, const char *end,
     return parse_f32_at(p, end, out, NULL);
 }
 
-/* -------------------------------------------------------------------- */
-/* Engine graph data structures                                          */
-/* -------------------------------------------------------------------- */
 
 typedef struct {
     uint32_t  slot_idx;
-    uint32_t  slice_ptr;       /* heap address of the engine's slice obj */
+    uint32_t  slice_ptr;
     uint32_t  n_cands;
-    uint32_t *cands;           /* uids, len n_cands (= cand+0xc) */
-    uint32_t *join_keys;       /* len n_cands (= cand+0x10) */
-    uint32_t *c68;             /* len n_cands; engine smooth-miss state */
-    uint32_t *c78;             /* len n_cands */
-    uint32_t *c6c;             /* len n_cands */
-    float    *pre_dp;          /* engine pre-DP cost per cand */
-    uint32_t *cand_ptrs;       /* heap addrs, for predec lookups in leave */
+    uint32_t *cands;
+    uint32_t *join_keys;
+    uint32_t *c68;
+    uint32_t *c78;
+    uint32_t *c6c;
+    float    *pre_dp;
+    uint32_t *cand_ptrs;
     uint32_t  n_preds;
-    uint32_t *pred_slot_idx;   /* mapped from raw pred slice ptrs */
+    uint32_t *pred_slot_idx;
     int       has_error;
 } eg_slot_t;
 
 typedef struct {
     eg_slot_t *slots;
     uint32_t   n_slots;
-    /* "leave" event derived chosen path (engine-truth) */
     int       best_slot;
     int       best_idx;
-    uint32_t *chosen_path_slot;   /* len chosen_path_n */
+    uint32_t *chosen_path_slot;
     uint32_t *chosen_path_uid;
     uint32_t  chosen_path_n;
-    /* per-cand "leave" predec ptr lookup (cand_ptr -> (slot, idx)) is
-     * built as a flat flat scan when reconstructing the chain. */
-    /* Raw bytes for the leave event so we can re-scan the cand objs to
-     * pull predec ptrs. */
+    /* per-cand "leave" predec ptr lookup (cand_ptr -> (slot, idx)) is built
+     * as a flat flat scan when reconstructing the chain. */
+    /* Raw bytes for the leave event so we can re-scan the cand objs to pull
+     * predec ptrs. */
     char     *leave_buf;
     size_t    leave_n;
 } eg_utt_t;
@@ -164,8 +135,7 @@ static void eg_utt_free(eg_utt_t *u)
     free(u->leave_buf); u->leave_buf = NULL;
 }
 
-/* Skip past matching brackets/braces. Returns pointer just past the
- * close char, or end on parse error. */
+/* Skip past matching brackets/braces. */
 static const char *skip_to_match(const char *p, const char *end,
                                  char open, char close)
 {
@@ -180,44 +150,37 @@ static const char *skip_to_match(const char *p, const char *end,
     return p;
 }
 
-/* Parse a single slot object string {...}. p points at '{'. */
 static int parse_slot_obj(const char *p, const char *end,
                           eg_slot_t *out)
 {
     if (p >= end || *p != '{') return -1;
     const char *obj_end = skip_to_match(p, end, '{', '}');
 
-    /* slot index */
     if (read_key_u32(p, obj_end, "slot", &out->slot_idx) != 0)
         return -1;
 
-    /* slice_ptr */
     {
         uint32_t v = 0;
         if (read_key_u32(p, obj_end, "slice_ptr", &v) == 0)
             out->slice_ptr = v;
     }
 
-    /* error? */
     if (find_lit(p, obj_end, "\"error\":") != NULL) {
         out->has_error = 1;
     }
 
-    /* n_cands */
     {
         uint32_t v = 0;
         if (read_key_u32(p, obj_end, "n_cands", &v) == 0) {
             out->n_cands = v;
         }
     }
-    /* n_preds */
     {
         uint32_t v = 0;
         if (read_key_u32(p, obj_end, "n_preds", &v) == 0)
             out->n_preds = v;
     }
 
-    /* preds: [a,b,c,...] -- raw slice ptrs (heap addresses) */
     if (out->n_preds > 0) {
         out->pred_slot_idx = calloc(out->n_preds, sizeof *out->pred_slot_idx);
         if (!out->pred_slot_idx) return -1;
@@ -229,14 +192,13 @@ static int parse_slot_obj(const char *p, const char *end,
                 if (pp >= obj_end || *pp == ']') break;
                 uint32_t v = 0;
                 if (parse_u32_at(pp, obj_end, &v, &pp) != 0) break;
-                /* Store raw pred slice ptr; we'll map to slot indices
-                 * after all slots have been parsed. */
+                /* Store raw pred slice ptr; we'll map to slot indices after
+                 * all slots have been parsed. */
                 out->pred_slot_idx[k] = v;
             }
         }
     }
 
-    /* cands: [{...}, ...] */
     if (!out->has_error && out->n_cands > 0) {
         out->cands     = calloc(out->n_cands, sizeof *out->cands);
         out->join_keys = calloc(out->n_cands, sizeof *out->join_keys);
@@ -264,12 +226,11 @@ static int parse_slot_obj(const char *p, const char *end,
                 if (read_key_u32(cp, cend, "uid", &uid) != 0) break;
                 if (read_key_u32(cp, cend, "cand_ptr", &cptr) == 0)
                     out->cand_ptrs[k] = cptr;
-                /* join_key (cand+0x10) -- if absent (older trace),
-                 * fall back to uid (halfphone-leaf semantics). */
+                /* join_key (cand+0x10) -- if absent (older trace), fall
+                 * back to uid (halfphone-leaf semantics). */
                 if (read_key_u32(cp, cend, "join_key", &jkey) != 0)
                     jkey = uid;
-                /* Smooth-miss inputs (M3.4r Phase A.5). Default 0
-                 * means halfphone behavior (no smooth contribution). */
+                /* Smooth-miss inputs (M3.4r Phase A.5). */
                 (void)read_key_u32(cp, cend, "c68", &c68);
                 (void)read_key_u32(cp, cend, "c78", &c78);
                 (void)read_key_u32(cp, cend, "c6c", &c6c);
@@ -283,14 +244,12 @@ static int parse_slot_obj(const char *p, const char *end,
                 ++k;
                 cp = cend;
             }
-            /* If we didn't fill all cands (e.g. parse hiccup), shrink. */
             if (k < out->n_cands) out->n_cands = k;
         }
     }
     return 0;
 }
 
-/* Parse a "viterbi_enter" line into slots[]. Returns 0 on success. */
 static int parse_enter_line(const char *line, size_t n,
                             eg_utt_t *u)
 {
@@ -313,19 +272,16 @@ static int parse_enter_line(const char *line, size_t n,
         if (*p != '{') break;
         const char *next_p = skip_to_match(p, end, '{', '}');
         if (parse_slot_obj(p, next_p, &u->slots[k]) != 0) {
-            /* leave as-is, keep going */
         }
         ++k;
         p = next_p;
     }
-    /* Sanity: slot indices should be 0..n-1 in array order. */
     for (uint32_t i = 0; i < u->n_slots; ++i) {
         if (u->slots[i].slot_idx != i) {
             fprintf(stderr, "warn: slot index gap at array pos %u "
                     "(slot_idx=%u)\n", i, u->slots[i].slot_idx);
         }
     }
-    /* Map raw pred slice ptrs to slot indices via slice_ptr lookup. */
     for (uint32_t i = 0; i < u->n_slots; ++i) {
         eg_slot_t *s = &u->slots[i];
         for (uint32_t j = 0; j < s->n_preds; ++j) {
@@ -342,8 +298,8 @@ static int parse_enter_line(const char *line, size_t n,
     return 0;
 }
 
-/* Parse a "viterbi_leave" line: stash raw bytes, find best_slot/idx,
- * and reconstruct chosen path via predec walk. */
+/* Parse a "viterbi_leave" line: stash raw bytes, find best_slot/idx, and
+ * reconstruct chosen path via predec walk. */
 static int parse_leave_line(const char *line, size_t n, eg_utt_t *u)
 {
     const char *end = line + n;
@@ -354,7 +310,6 @@ static int parse_leave_line(const char *line, size_t n, eg_utt_t *u)
     if (read_key_u32(line, end, "best_slot", &v) == 0) u->best_slot = (int)v;
     if (read_key_u32(line, end, "best_idx",  &v) == 0) u->best_idx  = (int)v;
 
-    /* Stash the leave buffer so we can re-scan it for predec walking. */
     u->leave_buf = (char *)malloc(n + 1);
     if (!u->leave_buf) return -1;
     memcpy(u->leave_buf, line, n);
@@ -363,15 +318,13 @@ static int parse_leave_line(const char *line, size_t n, eg_utt_t *u)
     return 0;
 }
 
-/* Walk one cand object in the leave buffer to find its (uid, predec).
- * Returns 0 on success.  `cand_ptr_target` selects which cand. */
+/* Walk one cand object in the leave buffer to find its (uid, predec). */
 static int leave_find_cand(const char *buf, size_t n, uint32_t cand_ptr_target,
                            uint32_t *out_slot, uint32_t *out_idx,
                            uint32_t *out_uid, uint32_t *out_predec)
 {
-    /* Scan all cand objects ({"i":...,"cand_ptr":CPP,"uid":U,...,"predec":P,...}).
-     * Track the most-recent slot index we've seen: line is structured
-     * as slots[].cands[]. */
+    /* Scan all cand objects
+     * ({"i":...,"cand_ptr":CPP,"uid":U,...,"predec":P,...}). */
     const char *p = buf;
     const char *end = buf + n;
     int      cur_slot = -1;
@@ -425,7 +378,6 @@ static int reconstruct_engine_path(eg_utt_t *u)
     eg_slot_t *bs = &u->slots[u->best_slot];
     if ((uint32_t)u->best_idx >= bs->n_cands) return -1;
 
-    /* Capacity: at most n_slots hops. */
     u->chosen_path_slot = calloc(u->n_slots, sizeof *u->chosen_path_slot);
     u->chosen_path_uid  = calloc(u->n_slots, sizeof *u->chosen_path_uid);
     if (!u->chosen_path_slot || !u->chosen_path_uid) return -1;
@@ -446,7 +398,6 @@ static int reconstruct_engine_path(eg_utt_t *u)
         if (!predec) break;
         cand_ptr = predec;
     }
-    /* Reverse */
     for (uint32_t i = 0; i < hops / 2; ++i) {
         uint32_t a = u->chosen_path_slot[i];
         uint32_t b = u->chosen_path_uid[i];
@@ -459,18 +410,15 @@ static int reconstruct_engine_path(eg_utt_t *u)
     return 0;
 }
 
-/* -------------------------------------------------------------------- */
-/* Gate curve loader (from viterbi_consts trace)                         */
-/* -------------------------------------------------------------------- */
 
 typedef struct {
     int       has;
-    uint32_t  curve_n;          /* engine: 100 */
-    int32_t   offset_k;         /* engine: -50 */
-    float    *curve;            /* heap, len curve_n */
-    float     gate_weight;      /* engine: 0.6 */
-    float     miss_offset;      /* engine: 1000 */
-    int       weight_94;        /* engine for Tom: 1 */
+    uint32_t  curve_n;
+    int32_t   offset_k;
+    float    *curve;
+    float     gate_weight;
+    float     miss_offset;
+    int       weight_94;
 } gate_curve_t;
 
 static int load_gate_curve(const char *path, gate_curve_t *out)
@@ -478,7 +426,7 @@ static int load_gate_curve(const char *path, gate_curve_t *out)
     memset(out, 0, sizeof *out);
     FILE *fp = fopen(path, "rb");
     if (!fp) return -1;
-    char *buf = malloc(1 << 20);    /* 1 MiB scratch -- the line is big */
+    char *buf = malloc(1 << 20);
     if (!buf) { fclose(fp); return -1; }
     int rc = -1;
     while (fgets(buf, 1 << 20, fp)) {
@@ -492,7 +440,7 @@ static int load_gate_curve(const char *path, gate_curve_t *out)
             out->offset_k = (int32_t)v;
         if (read_key_f32(buf, end, "gate_weight",    &fv) == 0) out->gate_weight = fv;
         if (read_key_f32(buf, end, "miss_offset",    &fv) == 0) out->miss_offset = fv;
-        out->weight_94 = 1;       /* Tom: weight+0x94 = 1 (per probe) */
+        out->weight_94 = 1;
 
         const char *cp = find_lit(buf, end, "\"curve_data\":[");
         if (cp && out->curve_n > 0) {
@@ -524,9 +472,6 @@ static void gate_curve_free(gate_curve_t *g)
     memset(g, 0, sizeof *g);
 }
 
-/* -------------------------------------------------------------------- */
-/* Per-utterance: run our DAG DP, compare to engine                      */
-/* -------------------------------------------------------------------- */
 
 typedef struct {
     int      utt_run;
@@ -543,15 +488,11 @@ static void replay_utt(const char *entry_id, int utt_idx,
                        eg_stats_t *st,
                        int verbose)
 {
-    /* Engine DAG DP with smooth-miss state tracking. We run this
-     * inline rather than via spfy_viterbi_run_dag because the engine's
-     * miss formula depends on per-cand DP-state fields (cand+0x7c,
-     * cand+0x80) that have to be updated as we pick best preds. */
+    /* Engine DAG DP with smooth-miss state tracking. */
     uint32_t n = u->n_slots;
     if (n == 0) return;
     /* Per-cand DP state: long double fwd, predec slot/idx, valid,
-     * c7c_state, c80_state. Use flat per-slot allocations indexed by
-     * slot-and-cand. */
+     * c7c_state, c80_state. */
     long double **fwd       = calloc(n, sizeof *fwd);
     uint32_t    **predslot  = calloc(n, sizeof *predslot);
     uint32_t    **predcidx  = calloc(n, sizeof *predcidx);
@@ -573,13 +514,11 @@ static void replay_utt(const char *entry_id, int utt_idx,
             !c7c_state[s] || !c80_state[s]) goto cleanup_arrays;
     }
 
-    /* Forward DP. */
     for (uint32_t s = 0; s < n; ++s) {
         eg_slot_t *sc = &u->slots[s];
         uint32_t nc = sc->n_cands;
         if (nc == 0) continue;
 
-        /* Source slot? (no live predecessors) */
         int has_live_pred = 0;
         for (uint32_t pi = 0; pi < sc->n_preds; ++pi) {
             uint32_t p = sc->pred_slot_idx[pi];
@@ -592,9 +531,8 @@ static void replay_utt(const char *entry_id, int utt_idx,
                 predslot[s][c] = s;
                 predcidx[s][c] = 0;
                 valid[s][c] = 1;
-                /* Init c7c/c80: engine's slot-0 init sets both 0. */
                 if (sc->c68[c] < 0x15u) {
-                    c7c_state[s][c] = 0;        /* no live pred */
+                    c7c_state[s][c] = 0;
                     c80_state[s][c] = (gate && gate->weight_94)
                                       ? 100u : 1u;
                 } else {
@@ -625,8 +563,8 @@ static void replay_utt(const char *entry_id, int utt_idx,
                     if (!valid[p][cp]) continue;
                     uint32_t pkey = sp->join_keys[cp];
 
-                    /* Engine same-rec adjacency: J = 0 if curr_uid =
-                     * pkey + 1 AND curr.flag_b != 0. */
+                    /* Engine same-rec adjacency: J = 0 if curr_uid = pkey +
+                     * 1 AND curr.flag_b != 0. */
                     int same_rec = 0;
                     if (cuid == pkey + 1u && cuid > 0u) {
                         spfy_unit_record_t r;
@@ -679,7 +617,6 @@ static void replay_utt(const char *entry_id, int utt_idx,
             predslot[s][c] = bestp_s;
             predcidx[s][c] = bestp_c;
             valid[s][c]    = 1;
-            /* Update c7c/c80 state for this cand based on chosen pred. */
             if (sc->c68[c] < 0x15u) {
                 c7c_state[s][c] = c7c_state[bestp_s][bestp_c];
                 c80_state[s][c] = (gate && gate->weight_94)
@@ -693,7 +630,6 @@ static void replay_utt(const char *entry_id, int utt_idx,
         }
     }
 
-    /* Pick best end at last non-empty slot. */
     int32_t last = -1;
     for (int32_t s = (int32_t)n - 1; s >= 0; --s) {
         if (u->slots[s].n_cands == 0) continue;
@@ -717,7 +653,6 @@ static void replay_utt(const char *entry_id, int utt_idx,
     }
     if (!end_have) goto cleanup_arrays;
 
-    /* Backtrack. */
     uint32_t *out_path_slot = calloc(n, sizeof *out_path_slot);
     uint32_t *out_path_uid  = calloc(n, sizeof *out_path_uid);
     if (!out_path_slot || !out_path_uid) {
@@ -750,9 +685,7 @@ static void replay_utt(const char *entry_id, int utt_idx,
 
     st->utt_run++;
 
-    /* Compare to engine chosen path. */
     int slot_total = 0, slot_match = 0, full_match = 1;
-    /* Build slot->uid map for engine. */
     uint32_t *eng_by_slot = calloc(u->n_slots, sizeof *eng_by_slot);
     uint8_t  *eng_seen    = calloc(u->n_slots, sizeof *eng_seen);
     for (uint32_t i = 0; i < u->chosen_path_n; ++i) {
@@ -762,7 +695,6 @@ static void replay_utt(const char *entry_id, int utt_idx,
             eng_seen[s] = 1;
         }
     }
-    /* Build slot->uid map for ours. */
     uint32_t *our_by_slot = calloc(u->n_slots, sizeof *our_by_slot);
     uint8_t  *our_seen    = calloc(u->n_slots, sizeof *our_seen);
     for (uint32_t i = 0; i < out_len; ++i) {
@@ -818,9 +750,6 @@ cleanup_arrays:
     if (c80_state) { for (uint32_t s=0; s<n; ++s) free(c80_state[s]); free(c80_state); }
 }
 
-/* -------------------------------------------------------------------- */
-/* Main                                                                  */
-/* -------------------------------------------------------------------- */
 
 static int process_file(const char *vit_path,
                         const spfy_hash_t *hash,
@@ -834,7 +763,6 @@ static int process_file(const char *vit_path,
         fprintf(stderr, "could not open %s\n", vit_path);
         return -1;
     }
-    /* Extract entry_id = basename without extension. */
     const char *base = vit_path;
     for (const char *q = vit_path; *q; ++q)
         if (*q == '/' || *q == '\\') base = q + 1;
@@ -843,7 +771,7 @@ static int process_file(const char *vit_path,
     char *dot = strrchr(entry_id, '.');
     if (dot) *dot = 0;
 
-    char buf[1 << 18];   /* 256k per line should be enough */
+    char buf[1 << 18];
     int utt_idx = 0;
     eg_utt_t pending = {0};
     int have_enter = 0;
@@ -910,8 +838,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* SPFY_EG_HASH_SCAN="prev_lo:prev_hi:curr" -- print hash result
-     * for (prev, curr) for all prev in [prev_lo..prev_hi]. */
+    /* SPFY_EG_HASH_SCAN="prev_lo:prev_hi:curr" -- print hash result for
+     * (prev, curr) for all prev in [prev_lo..prev_hi]. */
     const char *scan = getenv("SPFY_EG_HASH_SCAN");
     if (scan) {
         uint32_t lo = 0, hi = 0, cc = 0;
@@ -936,12 +864,10 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Try to load gate curve from sibling viterbi_consts trace.
-     * Falls back to no-smooth (plain miss=1000) if not available. */
+    /* Try to load gate curve from sibling viterbi_consts trace. */
     gate_curve_t gate = {0};
     {
         char gate_path[1024];
-        /* Find any vit-dp file we'll process and derive sibling. */
         for (int i = 2; i < argc; ++i) {
             if (argv[i][0] == '-' && argv[i][1] == '-') continue;
             const char *p = argv[i];
@@ -984,7 +910,6 @@ int main(int argc, char **argv)
            st.slot_match, st.slot_total,
            100.0 * st.slot_match / (st.slot_total > 0 ? st.slot_total : 1));
 
-    /* unit_table aliases into VIN; no separate free. */
     (void)units;
     gate_curve_free(&gate);
     spfy_hash_free(&hash);

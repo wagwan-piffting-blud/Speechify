@@ -61,14 +61,22 @@ def read_config() -> tuple[str | None, str | None]:
 
 
 def write_config(name: str, lang: str) -> None:
-    text = CONFIG.read_text(encoding="utf-8", errors="replace")
+    # newline="" on BOTH sides. Without it the read translates CRLF to \n and
+    # the write translates \n back to os.linesep, so every voice switch
+    # rewrote all 333 line endings of a file it was only meant to change two
+    # words in -- an 8323 -> 8656 byte diff that shows up as a dirty config
+    # with no visible content change.
+    with open(CONFIG, "r", encoding="utf-8", errors="replace",
+              newline="") as f:
+        text = f.read()
     text, n1 = _NAME_RE.subn(rf'\g<1>{name}\g<3>', text)
     text, n2 = _LANG_RE.subn(rf'\g<1>{lang}\g<3>', text)
     if n1 == 0:
         raise SystemExit("error: tts.voice.name not found in config")
     if n2 == 0:
         raise SystemExit("error: tts.voice.language not found in config")
-    CONFIG.write_text(text, encoding="utf-8")
+    with open(CONFIG, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
 
 
 def port_open(timeout: float = 0.25) -> bool:

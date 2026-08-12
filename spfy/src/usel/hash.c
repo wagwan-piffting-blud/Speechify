@@ -1,4 +1,3 @@
-/* Join-cost hash loader + lookup. */
 
 #include "hash.h"
 
@@ -47,12 +46,10 @@ int spfy_hash_load(const spfy_vin_t *vin, spfy_hash_t *out)
     if (out->n_rows == 0 || out->n_cells == 0) return SPFY_E_FORMAT;
     if (!rows_ptr || !cell_ptr)                return SPFY_E_FORMAT;
 
-    /* Validate sizes. */
     if (rows_n != (size_t)out->n_rows * 4u) {
         spfy_log_err("hash: rows size %zu != %u * 4", rows_n, out->n_rows);
         return SPFY_E_FORMAT;
     }
-    /* cell sub-chunk holds u32[n_cells] cells_A then f32[n_cells] cells_B. */
     if (cell_n != (size_t)out->n_cells * 8u) {
         spfy_log_err("hash: cell size %zu != %u * 8", cell_n, out->n_cells);
         return SPFY_E_FORMAT;
@@ -79,13 +76,7 @@ int spfy_hash_lookup(const spfy_hash_t *h,
     *out_cost = 0.0f;
     if (uid_right >= h->n_rows) return SPFY_E_OOB;
 
-    /* NB: rows[r] == 0 is NOT necessarily a miss. uid_right=169578 (last
-     * valid uid in Tom) has rows[169578]=0 with legitimate entries at
-     * cells_A[0..n]. The empty-bucket signal is the cells_A verification
-     * key (0xFFFFFFFF) or simply the cell not matching uid_right -- not
-     * the rows[] value. The README's "0 means no entry" was a partial
-     * truth; only valid for rows[169579..] padding which the engine never
-     * queries. */
+    /* NB: rows[r] == 0 is NOT necessarily a miss. */
     uint32_t row_offset = spfy_hash_row(h, uid_right);
     uint64_t idx = (uint64_t)row_offset + uid_left;
     if (idx >= h->n_cells) return SPFY_E_OOB;

@@ -50,25 +50,16 @@ int spfy_voice_maps_build_from_vin(const spfy_vin_t *vin,
         return SPFY_E_NOMEM;
     }
 
-    /* L[] maps the unit record's phone_ctx[] entries into ccos label
-     * space. Those bytes come from the same vocabulary as phone_center,
-     * i.e. they are ALREADY labl indices -- so L is the identity for every
-     * voice, not just Tom. (The engine's own +0x604 is indexed by
-     * half-phone id instead; our callers only ever use the phone-level
-     * form.) */
+    /* L[] maps the unit record's phone_ctx[] entries into ccos label space. */
     for (uint32_t i = 0; i < out->n_labels; ++i) out->L[i] = (uint8_t)i;
 
     /* hp_class[] is indexed by a half-phone class (phone * 2 + side) in
      * FEAT order -- that is what slice ctx[] and the derived hpclass table
-     * carry -- and yields the ccos forest index, which is in LABL order.
-     * So the permutation applied here is feat -> labl, the inverse of the
-     * one phone_order exposes for hp_class derivation. Side 0 = LEFT
-     * (label_idx), side 1 = RIGHT (label_idx + n_labels), matching the
-     * engine's +0x608 layout. */
+     * carry -- and yields the ccos forest index, which is in LABL order. */
     for (uint32_t ph = 0; ph < out->n_labels; ++ph) {
         uint8_t lab = (ph < po.n_phones) ? po.feat_to_labl[ph]
                                          : SPFY_PHONE_NONE;
-        if (lab == SPFY_PHONE_NONE) lab = (uint8_t)ph;   /* unnamed label */
+        if (lab == SPFY_PHONE_NONE) lab = (uint8_t)ph;
         out->hp_class[ph * 2 + 0] = lab;
         out->hp_class[ph * 2 + 1] = (uint8_t)(lab + out->n_labels);
     }
@@ -80,10 +71,7 @@ int spfy_voice_maps_build_from_vin(const spfy_vin_t *vin,
 int spfy_voice_maps_build(const spfy_ccos_t *ccos, spfy_voice_maps_t *out)
 {
     /* Legacy entry point: no VIN, so the phone/label permutation cannot be
-     * recovered and identity is assumed. Correct only for voices whose
-     * ccos label order already matches feat["name"] order (Jill, Felix,
-     * Javier). Callers with a VIN in hand should use
-     * spfy_voice_maps_build_from_vin instead. */
+     * recovered and identity is assumed. */
     if (!ccos || !out) return SPFY_E_INVAL;
     if (ccos->n_labels == 0 || ccos->n_hp_classes == 0) return SPFY_E_FORMAT;
     memset(out, 0, sizeof *out);
@@ -100,8 +88,8 @@ int spfy_voice_maps_build(const spfy_ccos_t *ccos, spfy_voice_maps_t *out)
 
     for (uint32_t i = 0; i < out->n_labels; ++i) out->L[i] = (uint8_t)i;
     for (uint32_t pc = 0; pc < out->n_labels; ++pc) {
-        out->hp_class[pc * 2 + 0] = (uint8_t)pc;                    /* LEFT  */
-        out->hp_class[pc * 2 + 1] = (uint8_t)(pc + out->n_labels);  /* RIGHT */
+        out->hp_class[pc * 2 + 0] = (uint8_t)pc;
+        out->hp_class[pc * 2 + 1] = (uint8_t)(pc + out->n_labels);
     }
     return SPFY_OK;
 }

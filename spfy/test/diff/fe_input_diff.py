@@ -171,7 +171,7 @@ def engine_tuple_for_slot(slot_idx: int, traces: dict) -> FETuple:
     leaf_id = (round(durt.get("leaf_mean", 0.0), 4),
                round(durt.get("leaf_var", 0.0), 4)) if durt else None
     # Voicing heuristic: engine emits f0tr cart_walk only for voiced phones
-    # per MEMORY.md / audit_focused.py finding. So presence of f0tr leaf at
+    # per the audit_focused.py finding. So presence of f0tr leaf at
     # this slot means voicing=1; absence on a non-silence slot means 0.
     if ctx5 and ctx5[2] in SILENCE_HP_CLASSES:
         voicing = None  # silence pad — voicing not meaningful

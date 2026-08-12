@@ -1,6 +1,3 @@
-// win32_vst.c - Win32 import shims + guest heap + import dispatch, for hosting
-// statically-linked MSVC VST plugins headless. Derived from the AcuVoice win32.c;
-// VFS/INI removed, the modern MSVC/UCRT startup surface added.
 #include "emu.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +6,6 @@
 #include <time.h>
 #include <ctype.h>
 
-// ---------------- import table ----------------
 typedef struct { char name[64]; shim_fn fn; int argbytes; } imp_t;
 static imp_t g_imp[MAX_IMPORTS];
 static int   g_nimp = 0;
@@ -20,7 +16,7 @@ void ret_set(uint32_t v){ CPU.r[EAX] = v; }
 
 int win32_is_import_va(uint32_t va){ return va >= IMP_BASE && va < IMP_BASE + (uint32_t)MAX_IMPORTS*IMP_STRIDE; }
 
-int g_cur_imp = -1;   // index of the import currently being dispatched (for s_unimpl logging)
+int g_cur_imp = -1;
 void win32_dispatch(uint32_t va){
     int idx = (va - IMP_BASE) / IMP_STRIDE;
     if (idx < 0 || idx >= g_nimp || !g_imp[idx].fn){ fprintf(stderr,"** bad import dispatch idx=%d va=%08x\n",idx,va); CPU.halted=1; CPU.faulted=1; return; }
@@ -28,22 +24,15 @@ void win32_dispatch(uint32_t va){
     g_cur_imp = idx;
     static int implog=-1; if(implog<0) implog = getenv("EMU_IMPLOG")?1:0;
     /* spfy addition: SPFY_ESPLOG=1 prints ESP delta around each shim
-     * dispatch, useful for tracking down stack-balance bugs introduced
-     * by wrong argbytes or shim-internal stack manipulation. */
+     * dispatch, useful for tracking down stack-balance bugs introduced by
+     * wrong argbytes or shim-internal stack manipulation. */
     static int esplog=-1; if(esplog<0) esplog = getenv("SPFY_ESPLOG")?1:0;
     uint32_t esp_in = CPU.r[ESP];
     if(implog) fprintf(stderr,"[imp] %-26s ret=%08x esp=%08x clean=%d\n", g_imp[idx].name, rd32(CPU.r[ESP]), CPU.r[ESP], g_imp[idx].argbytes);
     int wasFaulted = CPU.faulted;
-    /* spfy fix for nested-dispatch reentrance:
-     * the donor uses the file-global g_shim_cleanup to ferry argbytes
-     * into the exit-side ESP cleanup. _initterm's s_initterm shim drives
-     * cpu_run via call_nested, which dispatches MORE imports during the
-     * ctor (e.g. QueryPerformanceCounter, clean=4). Those nested
-     * dispatches OVERWRITE g_shim_cleanup, so by the time the outer
-     * _initterm dispatch exits, the saved value is stale -> wrong ESP
-     * advance -> caller stack misalignment.
-     * Snapshot the cleanup locally before calling the shim and restore
-     * after, so nested dispatches don't corrupt the outer value. */
+    /* spfy fix for nested-dispatch reentrance: the donor uses the
+     * file-global g_shim_cleanup to ferry argbytes into the exit-side ESP
+     * cleanup. */
     int saved_cleanup = g_shim_cleanup;
     int saved_cur_imp = g_cur_imp;
     g_imp[idx].fn();
@@ -57,7 +46,6 @@ void win32_dispatch(uint32_t va){
 }
 const char* win32_imp_name(int idx){ return (idx>=0 && idx<g_nimp) ? g_imp[idx].name : "?"; }
 
-// register a host callback (e.g. the VST audioMaster) as a guest-callable pseudo-import.
 uint32_t host_register_callback(shim_fn fn, int argbytes, const char* name){
     int idx = g_nimp++;
     if (idx >= MAX_IMPORTS){ fprintf(stderr,"too many imports\n"); exit(1); }
@@ -66,24 +54,19 @@ uint32_t host_register_callback(shim_fn fn, int argbytes, const char* name){
     return IMP_BASE + idx*IMP_STRIDE;
 }
 
-// ---------------- guest heap (implicit free list) ----------------
 static uint32_t HEAP_END;
-// VirtualAlloc arena: 64KB-granular bump allocator. Win32 returns 64KB-aligned base
-// addresses for MEM_RESERVE; Delphi's memory manager masks the low 16 bits of the
-// returned pointer to find its pool header, so non-aligned pointers from the general
-// heap make it write metadata over the heap's own block headers. Keep it separate.
 static uint32_t g_valloc_next;
 static void valloc_init(void){ mem_map(VALLOC_BASE, VALLOC_SIZE, "valloc"); g_valloc_next = VALLOC_BASE; }
 static uint32_t valloc_reserve(uint32_t n){
-    n = (n + 0xFFFFu) & ~0xFFFFu; if(n==0) n=0x10000;          // round up to 64KB
+    n = (n + 0xFFFFu) & ~0xFFFFu; if(n==0) n=0x10000;
     if(g_valloc_next + n > VALLOC_BASE + VALLOC_SIZE){ fprintf(stderr,"** valloc OOM requesting %u\n", n); return 0; }
-    uint32_t p = g_valloc_next; g_valloc_next += n; return p;   // already 64KB aligned
+    uint32_t p = g_valloc_next; g_valloc_next += n; return p;
 }
 static void heap_init(void){
     mem_map(HEAP_BASE, HEAP_SIZE, "heap");
     HEAP_END = HEAP_BASE + HEAP_SIZE;
     wr32(HEAP_BASE, HEAP_SIZE - 8);
-    wr32(HEAP_BASE + 4, 1); // free
+    wr32(HEAP_BASE + 4, 1);
     valloc_init();
 }
 uint32_t guest_alloc(uint32_t n, int zero){
@@ -115,7 +98,6 @@ static uint32_t heap_realloc(uint32_t p, uint32_t n){
     return np;
 }
 
-// ---------------- helpers ----------------
 static void guest_strcpy_out(uint32_t dst, const char* s, int max){ int i=0; for(; s[i] && i<max-1; i++) wr8(dst+i, s[i]); wr8(dst+i,0); }
 static void guest_strn(uint32_t src, char* out, int max){ int i=0; for(; i<max-1; i++){ char c=(char)rd8(src+i); out[i]=c; if(!c)break; } out[i<max?i:max-1]=0; }
 
@@ -124,7 +106,6 @@ static uint32_t g_tls[256]; static int g_tlsnext=1;
 static uint32_t g_cmdline_a=0, g_cmdline_w=0, g_env_a=0, g_env_w=0;
 static uint32_t g_tick=1;
 
-// ---------------- critical sections / tls ----------------
 static void s_nop0(void){}
 static void s_ret0(void){ ret_set(0); }
 static void s_ret1(void){ ret_set(1); }
@@ -139,7 +120,6 @@ static void s_TlsAlloc(void){ ret_set(g_tlsnext++); }
 static void s_TlsFree(void){ ret_set(1); }
 static void s_TlsSetValue(void){ uint32_t i=arg32(0); if(i<256)g_tls[i]=arg32(1); ret_set(1); }
 static void s_TlsGetValue(void){ uint32_t i=arg32(0); ret_set(i<256?g_tls[i]:0); }
-// Fls* (fiber-local) map onto the same table.
 static void s_FlsAlloc(void){ ret_set(g_tlsnext++); }
 static void s_FlsFree(void){ ret_set(1); }
 static void s_FlsSetValue(void){ uint32_t i=arg32(0); if(i<256)g_tls[i]=arg32(1); ret_set(1); }
@@ -152,7 +132,6 @@ static void s_InterlockedCompareExchange(void){ uint32_t p=arg32(0),ex=arg32(1),
 static void s_InitializeSListHead(void){ uint32_t p=arg32(0); if(p){wr32(p,0);wr32(p+4,0);} }
 static void s_InterlockedFlushSList(void){ ret_set(0); }
 
-// ---------------- heap / memory ----------------
 static void s_HeapAlloc(void){ uint32_t flags=arg32(1),n=arg32(2); ret_set(guest_alloc(n,(flags&8)!=0)); }
 static void s_HeapFree(void){ guest_free(arg32(2)); ret_set(1); }
 static void s_HeapReAlloc(void){ uint32_t p=arg32(2),n=arg32(3); ret_set(heap_realloc(p,n)); }
@@ -167,20 +146,18 @@ static void s_GlobalAlloc(void){ uint32_t flags=arg32(0),n=arg32(1); ret_set(gue
 static void s_GlobalFree(void){ guest_free(arg32(0)); ret_set(0); }
 static void s_GlobalLock(void){ ret_set(arg32(0)); }
 static void s_GlobalUnlock(void){ ret_set(1); }
-// VirtualAlloc(addr, size, type, protect). Delphi's memory manager RESERVEs a big region
-// then COMMITs sub-pages within it, relying on the commit returning the requested address.
-// Our whole heap is pre-mapped, so a commit at a non-zero addr is a no-op that just echoes
-// addr back. Only a fresh (addr==0) reservation/commit consumes heap. Ignoring addr here
-// caused double-allocation -> 128MB heap OOM during init.
+/* then COMMITs sub-pages within it, relying on the commit returning the
+ * requested address. */
+/* Our whole heap is pre-mapped, so a commit at a non-zero addr is a no-op
+ * that just echoes */
 static void s_VirtualAlloc(void){ uint32_t addr=arg32(0),n=arg32(1),typ=arg32(2);
     if(EMU_VERBOSE) fprintf(stderr,"[VirtualAlloc] addr=%08x size=%u type=%08x\n",addr,n,typ);
-    if(addr){ ret_set(addr); return; }                 // commit within an already-mapped reserve
-    ret_set(valloc_reserve(n)); }                       // fresh 64KB-aligned reservation
+    if(addr){ ret_set(addr); return; }
+    ret_set(valloc_reserve(n)); }
 static void s_VirtualFree(void){ ret_set(1); }
 static void s_VirtualProtect(void){ uint32_t old=arg32(3); if(old) wr32(old,0x40); ret_set(1); }
 static void s_VirtualQuery(void){ ret_set(0); }
 
-// ---------------- strings / charset ----------------
 static void s_lstrcpyA(void){ uint32_t d=arg32(0),s=arg32(1); int i=0; for(;;){ uint8_t c=rd8(s+i); wr8(d+i,c); if(!c)break; i++; } ret_set(d); }
 static void s_lstrlenA(void){ uint32_t s=arg32(0); int i=0; while(rd8(s+i))i++; ret_set(i); }
 static void s_MultiByteToWideChar(void){ uint32_t src=arg32(2); int srclen=(int)arg32(3); uint32_t dst=arg32(4); int dstlen=(int)arg32(5);
@@ -190,11 +167,10 @@ static void s_WideCharToMultiByte(void){ uint32_t src=arg32(2); int srclen=(int)
 static void s_GetStringTypeW(void){ ret_set(1); }
 static void s_GetStringTypeA(void){ ret_set(1); }
 static void s_LCMapStringW(void){ ret_set(0); }
-// LCMapStringA: handle the case-map flags the CRT uses (LCMAP_LOWERCASE/UPPERCASE).
 static void s_LCMapStringA(void){ uint32_t flags=arg32(1),src=arg32(2); int n=(int)arg32(3); uint32_t dst=arg32(4); int dn=(int)arg32(5);
     int i=0; for(; (n<0||i<n); i++){ uint8_t c=rd8(src+i); if(flags&0x100){ if(c>='a'&&c<='z')c-=32; } if(flags&0x200){ if(c>='A'&&c<='Z')c+=32; } if(dst&&i<dn)wr8(dst+i,c); if(n<0&&!c)break; } ret_set(n<0?i+1:i); }
 static void s_LCMapStringEx(void){ ret_set(0); }
-static void s_CompareStringW(void){ ret_set(2); } // CSTR_EQUAL
+static void s_CompareStringW(void){ ret_set(2); }
 static void s_GetACP(void){ ret_set(1252); }
 static void s_GetOEMCP(void){ ret_set(437); }
 static void s_GetCPInfo(void){ uint32_t out=arg32(1); if(out){ wr32(out,1); wr8(out+4,0); wr8(out+5,0);} ret_set(1); }
@@ -205,8 +181,7 @@ static void s_GetUserDefaultLCID(void){ ret_set(0x0409); }
 static void s_GetThreadLocale(void){ ret_set(0x0409); }
 static void s_SetThreadLocale(void){ ret_set(0x0409); }
 
-// ---------------- process / module / system ----------------
-static void s_GetVersion(void){ ret_set(0x0A280105u); } // build 10240, ver 5.1 low word (NT)
+static void s_GetVersion(void){ ret_set(0x0A280105u); }
 static void s_GetVersionExA(void){ uint32_t p=arg32(0); if(p){ wr32(p+4,6); wr32(p+8,2); wr32(p+12,9200); wr32(p+16,2);} ret_set(1); }
 static void s_GetVersionExW(void){ uint32_t p=arg32(0); if(p){ wr32(p+4,6); wr32(p+8,2); wr32(p+12,9200); wr32(p+16,2);} ret_set(1); }
 static void s_GetCommandLineA(void){ ret_set(g_cmdline_a); }
@@ -234,31 +209,25 @@ static void s_GetCurrentThread(void){ ret_set(0xFFFFFFFEu); }
 static void s_GetLastError(void){ ret_set(g_lasterr); }
 static void s_SetLastError(void){ g_lasterr=arg32(0); }
 static void s_SetUnhandledExceptionFilter(void){ ret_set(0); }
-static void s_UnhandledExceptionFilter(void){ ret_set(1); } // EXCEPTION_EXECUTE_HANDLER
+static void s_UnhandledExceptionFilter(void){ ret_set(1); }
 static void s_SetErrorMode(void){ ret_set(0); }
-static void s_RtlUnwind(void){ /* no-op: SEH unwind not modeled */ }
+static void s_RtlUnwind(void){  }
 static void s_RaiseException(void){ emu_log("[RaiseException] code=%08x\n",arg32(0)); CPU.halted=1; CPU.faulted=1; }
 static void s_IsDebuggerPresent(void){ ret_set(0); }
-// Report SSE(6) and SSE2(10) present (we emulate them); /arch:SSE2 binaries fast-fail otherwise.
+/* Report SSE(6) and SSE2(10) present (we emulate them); /arch:SSE2 binaries
+ * fast-fail otherwise. */
 static void s_IsProcessorFeaturePresent(void){ uint32_t f=arg32(0); ret_set((f==6||f==10)?1:0); }
 static void s_QueryPerformanceCounter(void){ uint32_t p=arg32(0); if(p){ wr32(p,g_tick); wr32(p+4,0); } g_tick+=100; ret_set(1); }
 static void s_QueryPerformanceFrequency(void){ uint32_t p=arg32(0); if(p){ wr32(p,1000000); wr32(p+4,0);} ret_set(1); }
-// Fill a real FILETIME (100-ns ticks since 1601-01-01). A zero FILETIME maps to
-// 1601 -> a NEGATIVE time_t, which _localtime64_s rejects with EINVAL (and the CRT
-// then _invoke_watson-terminates with STATUS_STACK_BUFFER_OVERRUN). Plugins that
-// timestamp during static-init (e.g. Bitunz) depend on a valid post-1970 value.
-// Fixed wall-clock epoch (2024-01-01 00:00:00 UTC). Deterministic on purpose: the splicer
-// must render identically every run, and a per-load-varying clock made dblue_Crusher's Delphi
-// init take a different path on the 2nd load in a chain (null-deref). Valid post-1970 value
-// keeps _localtime64_s / Delphi date validation happy (see Bitunz fix).
+/* Fixed wall-clock epoch (2024-01-01 00:00:00 UTC). */
+/* must render identically every run, and a per-load-varying clock made
+ * dblue_Crusher's Delphi */
+/* init take a different path on the 2nd load in a chain (null-deref). */
 #define EMU_FIXED_UNIX 1704067200ULL
 static uint64_t emu_filetime_now(void){
     return (EMU_FIXED_UNIX + 11644473600ULL) * 10000000ULL;
 }
 static void s_GetSystemTimeAsFileTime(void){ uint32_t p=arg32(0); if(p){ uint64_t ft=emu_filetime_now(); wr32(p,(uint32_t)ft); wr32(p+4,(uint32_t)(ft>>32)); } }
-// CompareStringA(Locale,flags,s1,n1,s2,n2) -> 1/2/3 (less/equal/greater). Delphi's
-// AnsiCompareText/Str uses the result, so return a real comparison (case-insensitive if
-// NORM_IGNORECASE=1). n<0 means NUL-terminated. argbytes=24.
 static void s_CompareStringA(void){
     uint32_t flags=arg32(1), s1=arg32(2); int n1=(int)arg32(3);
     uint32_t s2=arg32(4); int n2=(int)arg32(5);
@@ -270,8 +239,6 @@ static void s_CompareStringA(void){
     else c=strcmp(a,b);
     ret_set(c<0?1:(c>0?3:2));
 }
-// Fill a SYSTEMTIME (8x WORD) from the host clock. A zeroed SYSTEMTIME (wYear=0) trips
-// Delphi/VCL date validation the same way a zero FILETIME does. argbytes=4.
 static void s_GetLocalTime(void){
     uint32_t p=arg32(0); if(!p) return;
     time_t t=(time_t)EMU_FIXED_UNIX;
@@ -281,9 +248,11 @@ static void s_GetLocalTime(void){
     wr16(p+8,(uint16_t)lt->tm_hour);        wr16(p+10,(uint16_t)lt->tm_min);
     wr16(p+12,(uint16_t)lt->tm_sec);        wr16(p+14,0);
 }
-// MulDiv(nNumber, nNumerator, nDenominator) -> round((a*b)/c), half away from zero; -1 on /0 or overflow.
-// Critical: stdcall (12 argbytes). Unshimmed it defaulted to argbytes=0, leaving 12 bytes of args on the
-// stack -> the caller's saved regs/return address desync -> ret into a Delphi data table (dblue_Crusher).
+/* MulDiv(nNumber, nNumerator, nDenominator) -> round((a*b)/c), half away
+ * from zero; -1 on /0 or overflow. */
+/* Critical: stdcall (12 argbytes). */
+/* stack -> the caller's saved regs/return address desync -> ret into a
+ * Delphi data table (dblue_Crusher). */
 static void s_MulDiv(void){
     int32_t a=(int32_t)arg32(0), b=(int32_t)arg32(1), c=(int32_t)arg32(2);
     if(c==0){ ret_set(0xFFFFFFFFu); return; }
@@ -298,19 +267,17 @@ static void s_GetTickCount64(void){ ret_set(g_tick++); }
 static void s_Sleep(void){}
 static void s_ExitProcess(void){ emu_log("[ExitProcess] %u\n",arg32(0)); CPU.halted=1; }
 static void s_TerminateProcess(void){ CPU.halted=1; }
-static void s_EncodePointer(void){ ret_set(arg32(0)); } // identity
+static void s_EncodePointer(void){ ret_set(arg32(0)); }
 static void s_DecodePointer(void){ ret_set(arg32(0)); }
-static void s_GetSystemInfo(void){ uint32_t p=arg32(0); if(p){ for(int i=0;i<48;i+=4) wr32(p+i,0); wr32(p+0,0); wr32(p+4,0x1000); wr32(p+0x14,1);/*numproc*/ wr32(p+0x24,1);} }
+static void s_GetSystemInfo(void){ uint32_t p=arg32(0); if(p){ for(int i=0;i<48;i+=4) wr32(p+i,0); wr32(p+0,0); wr32(p+4,0x1000); wr32(p+0x14,1); wr32(p+0x24,1);} }
 static void s_GetSystemTimeAsFileTimeW(void){ }
 
-// ---------------- bad-ptr checks (treat all guest memory as valid) ----------------
 static void s_IsBadReadPtr(void){ ret_set(0); }
 static void s_IsBadWritePtr(void){ ret_set(0); }
 static void s_IsBadCodePtr(void){ ret_set(0); }
 static void s_IsBadStringPtrA(void){ ret_set(0); }
 static void s_IsBadStringPtrW(void){ ret_set(0); }
 
-// ---------------- file I/O (no real FS; succeed-noop or fail) ----------------
 static void s_WriteFile(void){ uint32_t n=arg32(2),pg=arg32(3); if(pg)wr32(pg,n); ret_set(1); }
 static void s_ReadFile(void){ uint32_t pg=arg32(3); if(pg)wr32(pg,0); ret_set(0); }
 static void s_CreateFileA(void){ g_lasterr=2; ret_set(0xFFFFFFFFu); }
@@ -332,7 +299,6 @@ static void s_WriteConsoleW(void){ ret_set(1); }
 static void s_WriteConsoleA(void){ ret_set(1); }
 static void s_GetOSFHandle(void){ ret_set(0xFFFFFFFFu); }
 
-// ---------------- env ----------------
 static void s_GetEnvironmentStrings(void){ ret_set(g_env_a); }
 static void s_GetEnvironmentStringsW(void){ ret_set(g_env_w); }
 static void s_FreeEnvironmentStringsA(void){ ret_set(1); }
@@ -341,7 +307,6 @@ static void s_GetEnvironmentVariableA(void){ ret_set(0); }
 static void s_GetEnvironmentVariableW(void){ ret_set(0); }
 static void s_SetEnvironmentVariableA(void){ ret_set(1); }
 
-// ---------------- sync objects ----------------
 static void s_WaitForSingleObject(void){ ret_set(0); }
 static void s_CreateSemaphoreA(void){ ret_set(0xC0000001u); }
 static void s_CreateSemaphoreW(void){ ret_set(0xC0000001u); }
@@ -352,19 +317,10 @@ static void s_ResetEvent(void){ ret_set(1); }
 static void s_CreateMutexA(void){ ret_set(0xC0000003u); }
 static void s_ReleaseMutex(void){ ret_set(1); }
 
-// ---------------- message box (GUI plugins) ----------------
 static void s_MessageBoxA(void){ char t[256],c[256]; guest_strn(arg32(1),c,sizeof c); guest_strn(arg32(2),t,sizeof t); emu_log("[MessageBox] %s | %s\n",t,c); ret_set(1); }
 static void s_OutputDebugStringA(void){ char s[256]; guest_strn(arg32(0),s,sizeof s); emu_log("[dbg] %s",s); }
 
-// ============================================================================
-//   Universal CRT (api-ms-win-crt-*) + vcruntime host layer. Plugins built with
-//   modern MSVC dynamically import the CRT; its startup runs the global ctors
-//   (_initterm) that construct the plugin object. All cdecl (argbytes 0).
-// ============================================================================
-// Re-entrant guest call that PRESERVES the in-progress call's stack (unlike call_guest,
-// which resets ESP). Used to run global constructors from inside _initterm.
 static void call_nested(uint32_t fn){
-    /* spfy debug: log ESP at ctor entry/exit when SPFY_ESPLOG=1. */
     static int esplog=-1; if(esplog<0) esplog = getenv("SPFY_ESPLOG")?1:0;
     uint32_t esp_in = CPU.r[ESP];
     cpu_t save = CPU;
@@ -372,24 +328,23 @@ static void call_nested(uint32_t fn){
     CPU.eip = fn; CPU.halted = 0; CPU.faulted = 0;
     cpu_run(2000000000ULL);
     int faulted = CPU.faulted;
-    uint32_t esp_post_ctor = CPU.r[ESP];   /* ESP from inside the ctor at the cpu_run exit */
+    uint32_t esp_post_ctor = CPU.r[ESP];
     uint32_t eip_post_ctor = CPU.eip;
-    CPU = save;                       // restore regs/eip/esp; guest memory effects persist
+    CPU = save;
     if (faulted) emu_log("[initterm] ctor %08x faulted\n", fn);
     if (esplog) fprintf(stderr, "[esp] call_nested fn=%08x in_esp=%08x post_ctor_esp=%08x post_ctor_eip=%08x restored_esp=%08x faulted=%d\n",
                         fn, esp_in, esp_post_ctor, eip_post_ctor, CPU.r[ESP], faulted);
 }
-static void s_initterm(void){   // void _initterm(PVFV* first, PVFV* last)
+static void s_initterm(void){
     uint32_t first=arg32(0), last=arg32(1);
     for(uint32_t p=first; p+4<=last; p+=4){ uint32_t fn=rd32(p); if(fn) call_nested(fn); }
 }
-static void s_initterm_e(void){ // int _initterm_e(...) - returns 0 on success
+static void s_initterm_e(void){
     uint32_t first=arg32(0), last=arg32(1);
     for(uint32_t p=first; p+4<=last; p+=4){ uint32_t fn=rd32(p); if(fn) call_nested(fn); }
     ret_set(0);
 }
 
-// CRT heap (cdecl) -> guest heap
 static void s_malloc(void){ ret_set(guest_alloc(arg32(0),0)); }
 static void s_calloc(void){ ret_set(guest_alloc(arg32(0)*arg32(1),1)); }
 static void s_realloc(void){ ret_set(heap_realloc(arg32(0),arg32(1))); }
@@ -398,9 +353,8 @@ static void s_msize(void){ uint32_t p=arg32(0); ret_set(p?rd32(p-8):0); }
 static void s_callnewh(void){ ret_set(0); }
 static void s_set_new_mode(void){ ret_set(0); }
 
-// CRT mem/string (cdecl)
 static void s_memcpy(void){ uint32_t d=arg32(0),s=arg32(1),n=arg32(2); uint8_t*hd=mem_host(d),*hs=mem_host(s);
-    if(hd&&hs) memcpy(hd,hs,n); ret_set(d); }   // skip if either side unmapped (don't hard-fault the run)
+    if(hd&&hs) memcpy(hd,hs,n); ret_set(d); }
 static void s_memmove(void){ uint32_t d=arg32(0),s=arg32(1),n=arg32(2); uint8_t*hd=mem_host(d),*hs=mem_host(s);
     if(hd&&hs) memmove(hd,hs,n); ret_set(d); }
 static void s_memset(void){ uint32_t d=arg32(0),c=arg32(1),n=arg32(2); uint8_t*hd=mem_host(d);
@@ -413,22 +367,22 @@ static void s_strncpy(void){ uint32_t d=arg32(0),s=arg32(1); int n=(int)arg32(2)
 static void s_strstr(void){ uint32_t h=arg32(0),n=arg32(1); if(!rd8(n)){ret_set(h);return;} for(uint32_t i=0;rd8(h+i);i++){ uint32_t j=0; while(rd8(n+j)&&rd8(h+i+j)==rd8(n+j))j++; if(!rd8(n+j)){ret_set(h+i);return;} } ret_set(0); }
 static void s_memchr(void){ uint32_t s=arg32(0),c=arg32(1)&0xff; int n=(int)arg32(2); for(int i=0;i<n;i++) if(rd8(s+i)==c){ret_set(s+i);return;} ret_set(0); }
 
-// CRT startup / onexit / environment (cdecl stubs)
 static void s_ret0c(void){ ret_set(0); }
 static void s_nop0c(void){}
 static uint32_t g_errno_va=0, g_iob_va=0, g_env_strs=0;
-static void s_errno(void){ ret_set(g_errno_va); }            // int* _errno()
-static void s_acrt_iob_func(void){ ret_set(g_iob_va + arg32(0)*0x20); }   // FILE* __acrt_iob_func(i)
-static void s_get_narrow_env(void){ ret_set(g_env_strs); }   // char** _get_initial_narrow_environment()
-static void s_invalid_parameter(void){ emu_log("[crt] invalid_parameter (ignored)\n"); } // do NOT abort
+static void s_errno(void){ ret_set(g_errno_va); }
+static void s_acrt_iob_func(void){ ret_set(g_iob_va + arg32(0)*0x20); }
+static void s_get_narrow_env(void){ ret_set(g_env_strs); }
+static void s_invalid_parameter(void){ emu_log("[crt] invalid_parameter (ignored)\n"); }
 static void s_purecall(void){ emu_log("[crt] purecall\n"); }
 static void s_terminate(void){ emu_log("[crt] terminate()\n"); CPU.halted=1; }
 static void s_CxxThrowException(void){ emu_log("[crt] C++ exception thrown\n"); CPU.halted=1; CPU.faulted=1; }
-static void s_CxxFrameHandler(void){ ret_set(1); }           // ExceptionContinueSearch
+static void s_CxxFrameHandler(void){ ret_set(1); }
 static void s_stdio_vsprintf(void){ ret_set(0); }
 static void s_stdio_vfprintf(void){ ret_set(0); }
 
-// MSVC _libm_sse2_*_precise: arg(s) in XMM0 (and XMM1), result in XMM0 (double). No stack args.
+/* MSVC _libm_sse2_*_precise: arg(s) in XMM0 (and XMM1), result in XMM0
+ * (double). */
 static void s_libm_log(void){ CPU.xmm[0].d[0]=log(CPU.xmm[0].d[0]); }
 static void s_libm_log10(void){ CPU.xmm[0].d[0]=log10(CPU.xmm[0].d[0]); }
 static void s_libm_exp(void){ CPU.xmm[0].d[0]=exp(CPU.xmm[0].d[0]); }
@@ -440,44 +394,42 @@ static void s_libm_sqrt(void){ CPU.xmm[0].d[0]=sqrt(CPU.xmm[0].d[0]); }
 static void s_libm_sinh(void){ CPU.xmm[0].d[0]=sinh(CPU.xmm[0].d[0]); }
 static void s_libm_atan2(void){ CPU.xmm[0].d[0]=atan2(CPU.xmm[0].d[0],CPU.xmm[1].d[0]); }
 static void s_libm_hypot(void){ CPU.xmm[0].d[0]=sqrt(CPU.xmm[0].d[0]*CPU.xmm[0].d[0]+CPU.xmm[1].d[0]*CPU.xmm[1].d[0]); }
-// classic cdecl libm (arg on stack as double, result in ST0)
 static void s_c_floor(void){ uint64_t b=rd32(CPU.r[ESP]+4)|((uint64_t)rd32(CPU.r[ESP]+8)<<32); double x; memcpy(&x,&b,8); CPU.fpu_top=(CPU.fpu_top-1)&7; CPU.st[CPU.fpu_top]=floor(x); }
 static void s_c_ceil(void){ uint64_t b=rd32(CPU.r[ESP]+4)|((uint64_t)rd32(CPU.r[ESP]+8)<<32); double x; memcpy(&x,&b,8); CPU.fpu_top=(CPU.fpu_top-1)&7; CPU.st[CPU.fpu_top]=ceil(x); }
 
-// ---- minimal GUI / OLE / winmm so init that creates a (hidden) window survives ----
 static uint32_t g_hwndSeq=0x00CC0001;
-static void s_OleInitialize(void){ ret_set(0); }       // S_OK
+static void s_OleInitialize(void){ ret_set(0); }
 static void s_CoInitializeEx(void){ ret_set(0); }
-static void s_RegisterClass(void){ ret_set(0xC001); }  // fake ATOM
-static void s_CreateWindowEx(void){ ret_set(g_hwndSeq++); }  // fake HWND
+static void s_RegisterClass(void){ ret_set(0xC001); }
+static void s_CreateWindowEx(void){ ret_set(g_hwndSeq++); }
 static void s_DefWindowProc(void){ ret_set(0); }
 static void s_GetClientRect(void){ uint32_t r=arg32(1); if(r){wr32(r,0);wr32(r+4,0);wr32(r+8,100);wr32(r+12,100);} ret_set(1); }
 static void s_timeGetTime(void){ ret_set(g_tick++); }
-// Some plugins treat sync handles as pointers to their own structs -> hand out real guest buffers.
+/* Some plugins treat sync handles as pointers to their own structs -> hand
+ * out real guest buffers. */
 static void s_CreateEventW(void){ ret_set(guest_alloc(256,1)); }
 
-// ---- Delphi/Borland RTL init: user32/advapi32/oleaut32 (correct argbytes is what matters) ----
+/* ---- Delphi/Borland RTL init: user32/advapi32/oleaut32 (correct argbytes
+ * is what matters) ---- */
 static void s_GetKeyboardType(void){ ret_set(0); }
 static void s_CharNextA(void){ uint32_t p=arg32(0); ret_set(rd8(p)?p+1:p); }
 static void s_CharPrevA(void){ uint32_t s=arg32(0),p=arg32(1); ret_set(p>s?p-1:s); }
-static void s_RegOpenKey(void){ ret_set(2); }       // ERROR_FILE_NOT_FOUND
+static void s_RegOpenKey(void){ ret_set(2); }
 static void s_RegQueryValue(void){ ret_set(2); }
 static void s_RegCloseKey(void){ ret_set(0); }
-static void s_RegCreateKey(void){ ret_set(5); }     // ERROR_ACCESS_DENIED
+static void s_RegCreateKey(void){ ret_set(5); }
 static void s_lstrcpynA(void){ uint32_t d=arg32(0),s=arg32(1); int n=(int)arg32(2); int i=0; for(;i<n-1;i++){ uint8_t c=rd8(s+i); wr8(d+i,c); if(!c)break; } if(n>0)wr8(d+i,0); ret_set(d); }
-static void s_SysAllocStringLen(void){ uint32_t len=arg32(1); ret_set(guest_alloc(len*2+8,1)); } // BSTR-ish
+static void s_SysAllocStringLen(void){ uint32_t len=arg32(1); ret_set(guest_alloc(len*2+8,1)); }
 static void s_SysFreeString(void){ guest_free(arg32(0)); }
 
-// ---- GDI / screen DC (VCL/GUI frameworks query the display at init) ----
-static void s_GetDC(void){ ret_set(0xDC000001u); }                 // fake screen DC
+static void s_GetDC(void){ ret_set(0xDC000001u); }
 static void s_GetDeviceCaps(void){ uint32_t i=arg32(1); uint32_t v=0;
-    switch(i){ case 8:v=1920;break; case 10:v=1080;break; case 12:v=32;break; case 14:v=1;break;   // HORZRES/VERTRES/BITSPIXEL/PLANES
+    switch(i){ case 8:v=1920;break; case 10:v=1080;break; case 12:v=32;break; case 14:v=1;break;
         case 88:case 90:v=96;break; case 24:v=0xFFFFFFFFu;break; case 38:v=0x6F1D;break; default:v=0; } ret_set(v); }
 static void s_GetSystemMetrics(void){ uint32_t i=arg32(0); ret_set(i==0?1920:i==1?1080:0); }
 static uint32_t g_gdiSeq=0x60000001;
-static void s_gdi_handle(void){ ret_set(g_gdiSeq++); }              // generic GDI object handle
+static void s_gdi_handle(void){ ret_set(g_gdiSeq++); }
 
-// ---------------- spfy extra shims (defined in spfy_extra_shims.c) ----------------
 extern void s_DisableThreadLibraryCalls(void);
 extern void s_SearchPathA(void);
 extern void s_winmm_zero(void);
@@ -517,8 +469,7 @@ extern void s_pow_cdecl(void);
 extern void s_log_cdecl(void);
 extern void s_exp_cdecl(void);
 /* s_CxxFrameHandler is defined statically below — used for both
- * __CxxFrameHandler3/4 (donor entries) and __CxxFrameHandler (spfy
- * entry). No extern needed; just reference the static directly in REG[]. */
+ * __CxxFrameHandler3/4 (donor entries) and __CxxFrameHandler (spfy entry). */
 extern void s_except_handler3(void);
 extern void s_CppXcptFilter(void);
 extern void s_security_error_handler(void);
@@ -531,7 +482,6 @@ extern void s_longjmp(void);
 extern void s_exit_cdecl(void);
 extern void s_clock(void);
 
-// ---------------- argbytes lookup ----------------
 typedef struct { const char* name; shim_fn fn; int argb; } reg_t;
 static const reg_t REG[] = {
     {"EnterCriticalSection",s_EnterCriticalSection,4},{"LeaveCriticalSection",s_LeaveCriticalSection,4},
@@ -593,7 +543,6 @@ static const reg_t REG[] = {
     {"CreateEventA",s_CreateEventA,16},{"SetEvent",s_SetEvent,4},{"ResetEvent",s_ResetEvent,4},
     {"CreateMutexA",s_CreateMutexA,12},{"ReleaseMutex",s_ReleaseMutex,4},
     {"MessageBoxA",s_MessageBoxA,16},{"OutputDebugStringA",s_OutputDebugStringA,4},
-    // --- Universal CRT / vcruntime (cdecl, argbytes 0) ---
     {"_initterm",s_initterm,0},{"_initterm_e",s_initterm_e,0},
     {"malloc",s_malloc,0},{"calloc",s_calloc,0},{"realloc",s_realloc,0},{"free",s_free,0},
     {"_msize",s_msize,0},{"_callnewh",s_callnewh,0},{"_set_new_mode",s_set_new_mode,0},{"??2@YAPAXI@Z",s_malloc,0},{"??3@YAXPAX@Z",s_free,0},
@@ -611,12 +560,12 @@ static const reg_t REG[] = {
     {"_except_handler4_common",s_CxxFrameHandler,0},{"__std_terminate",s_terminate,0},
     {"__vcrt_InitializeCriticalSectionEx",s_InitializeCriticalSectionAndSpinCount,12},
     {"_beginthreadex",s_ret0c,0},{"_endthreadex",s_nop0c,0},{"_register_thread_local_exe_atexit_callback",s_ret0c,0},
-    // --- MSVC SSE2 libm (XMM ABI, no stack args) + classic libm ---
     {"_libm_sse2_log_precise",s_libm_log,0},{"_libm_sse2_log10_precise",s_libm_log10,0},{"_libm_sse2_exp_precise",s_libm_exp,0},
     {"_libm_sse2_pow_precise",s_libm_pow,0},{"_libm_sse2_sin_precise",s_libm_sin,0},{"_libm_sse2_cos_precise",s_libm_cos,0},
     {"_libm_sse2_tan_precise",s_libm_tan,0},{"_libm_sse2_sqrt_precise",s_libm_sqrt,0},{"_CIsinh",s_libm_sinh,0},{"_CIatan2",s_libm_atan2,0},
     {"_hypot",s_libm_hypot,0},{"_hypotf",s_libm_hypot,0},{"floor",s_c_floor,0},{"ceil",s_c_ceil,0},{"log10",s_ret0c,0},
-    // --- GUI / OLE / winmm (return plausible fake handles so hidden-window init survives) ---
+    /* --- GUI / OLE / winmm (return plausible fake handles so hidden-window
+     * init survives) --- */
     {"OleInitialize",s_OleInitialize,4},{"OleUninitialize",s_nop0c,0},{"CoInitialize",s_OleInitialize,4},{"CoInitializeEx",s_CoInitializeEx,8},{"CoUninitialize",s_nop0c,0},
     {"RegisterClassExW",s_RegisterClass,4},{"RegisterClassExA",s_RegisterClass,4},{"RegisterClassW",s_RegisterClass,4},{"RegisterClassA",s_RegisterClass,4},
     {"UnregisterClassW",s_ret1,8},{"UnregisterClassA",s_ret1,8},
@@ -628,7 +577,6 @@ static const reg_t REG[] = {
     {"SetTimer",s_ret1,16},{"KillTimer",s_ret1,8},{"SetPropW",s_ret1,12},{"GetPropW",s_ret0,8},
     {"CreateEventW",s_CreateEventW,16},{"CreateMutexW",s_CreateMutexA,12},
     {"timeBeginPeriod",s_ret0,4},{"timeEndPeriod",s_ret0,4},{"timeGetTime",s_timeGetTime,0},
-    // --- Delphi/Borland RTL init (user32/advapi32/oleaut32) ---
     {"GetKeyboardType",s_GetKeyboardType,4},{"LoadStringA",s_ret0,16},{"LoadStringW",s_ret0,16},
     {"CharNextA",s_CharNextA,4},{"CharNextW",s_CharNextA,4},{"CharPrevA",s_CharPrevA,8},
     {"CharToOemA",s_ret1,8},{"OemToCharA",s_ret1,8},{"CharUpperA",s_ret0,4},{"CharLowerA",s_ret0,4},{"CharUpperBuffA",s_ret0,8},
@@ -640,7 +588,6 @@ static const reg_t REG[] = {
     {"LoadLibraryExA",s_LoadLibraryA,12},{"lstrcpynA",s_lstrcpynA,12},{"lstrcmpiA",s_ret0,8},
     {"SysAllocStringLen",s_SysAllocStringLen,8},{"SysAllocString",s_SysAllocStringLen,4},{"SysFreeString",s_SysFreeString,4},
     {"SysReAllocStringLen",s_ret1,12},{"SysStringLen",s_ret0,4},{"VariantInit",s_nop0,4},{"VariantClear",s_ret0,4},
-    // --- GDI / screen DC (VCL queries the display at init) ---
     {"GetDC",s_GetDC,4},{"GetWindowDC",s_GetDC,4},{"GetDCEx",s_GetDC,12},{"ReleaseDC",s_ret1,8},
     {"GetDeviceCaps",s_GetDeviceCaps,8},{"GetSystemMetrics",s_GetSystemMetrics,4},
     {"CreatePalette",s_gdi_handle,4},{"CreateCompatibleDC",s_gdi_handle,4},{"CreateCompatibleBitmap",s_gdi_handle,12},
@@ -650,12 +597,13 @@ static const reg_t REG[] = {
     {"DeleteObject",s_ret1,4},{"DeleteDC",s_ret1,4},{"GetObjectA",s_ret0,12},{"GetObjectW",s_ret0,12},
     {"GetSystemPaletteEntries",s_ret0,16},{"GetPaletteEntries",s_ret0,16},{"SetTextColor",s_ret0,8},{"SetBkColor",s_ret0,8},{"SetBkMode",s_ret0,8},
     {"GetTextMetricsA",s_ret1,8},{"GetTextMetricsW",s_ret1,8},{"GetSysColor",s_ret0,4},{"GetSysColorBrush",s_gdi_handle,4},
-    // ---- Bulk stdcall argbytes for GUI/util imports (Delphi VCL touches these during init).
-    //      Correct argbytes is what matters: returning 0 is fine, but wrong cleanup desyncs the
-    //      caller's stack -> corrupted return address. argbytes auto-extracted from SysWOW64 ret-N
-    //      (148) + hand-filled ApiSet forwarders (60). GetLocalTime gets a real fill above. ----
+    /* ---- Bulk stdcall argbytes for GUI/util imports (Delphi VCL touches
+     * these during init). */
+    /* Correct argbytes is what matters: returning 0 is fine, but wrong
+     * cleanup desyncs the */
+    /* caller's stack -> corrupted return address. */
+    /* (148) + hand-filled ApiSet forwarders (60). */
     {"GetLocalTime",s_GetLocalTime,4},
-    // comctl32 ImageList_*
     {"ImageList_Add",s_ret0,12},{"ImageList_BeginDrag",s_ret0,16},{"ImageList_Create",s_ret0,20},
     {"ImageList_Destroy",s_ret0,4},{"ImageList_DragEnter",s_ret0,12},{"ImageList_DragLeave",s_ret0,4},
     {"ImageList_DragMove",s_ret0,8},{"ImageList_DragShowNolock",s_ret0,4},{"ImageList_Draw",s_ret0,24},
@@ -664,7 +612,6 @@ static const reg_t REG[] = {
     {"ImageList_GetImageCount",s_ret0,4},{"ImageList_Read",s_ret0,4},{"ImageList_Remove",s_ret0,8},
     {"ImageList_ReplaceIcon",s_ret0,12},{"ImageList_SetBkColor",s_ret0,8},
     {"ImageList_SetDragCursorImage",s_ret0,16},{"ImageList_SetIconSize",s_ret0,12},{"ImageList_Write",s_ret0,8},
-    // gdi32
     {"BitBlt",s_ret0,36},{"CreateBrushIndirect",s_gdi_handle,4},{"CreateDIBitmap",s_gdi_handle,24},
     {"CreatePenIndirect",s_gdi_handle,4},{"GetBitmapBits",s_ret0,12},{"GetClipBox",s_ret0,8},
     {"GetCurrentPositionEx",s_ret0,8},{"GetDIBits",s_ret0,28},{"GetPixel",s_ret0,12},
@@ -676,7 +623,6 @@ static const reg_t REG[] = {
     {"MaskBlt",s_ret0,48},{"GetWindowOrgEx",s_ret1,8},{"GetDIBColorTable",s_ret0,16},
     {"GetDCOrgEx",s_ret1,8},{"GetBrushOrgEx",s_ret1,8},{"ExcludeClipRect",s_ret0,20},
     {"CreateHalftonePalette",s_gdi_handle,4},
-    // kernel32
     {"CreateThread",s_ret0,24},{"EnumCalendarInfoA",s_ret0,16},{"FindResourceA",s_ret0,12},
     {"GlobalAddAtomA",s_ret0,4},{"GlobalDeleteAtom",s_ret0,4},{"GlobalFindAtomA",s_ret0,4},
     {"SizeofResource",s_ret0,8},{"SetEndOfFile",s_ret1,4},{"LockResource",s_ret0,4},
@@ -684,12 +630,9 @@ static const reg_t REG[] = {
     {"GetStringTypeExA",s_ret1,20},{"GetFullPathNameA",s_ret0,16},{"GetDiskFreeSpaceA",s_ret1,20},
     {"GetDateFormatA",s_ret0,24},{"FreeResource",s_ret0,4},{"FormatMessageA",s_ret0,28},
     {"CompareStringA",s_CompareStringA,24},
-    // version
     {"VerQueryValueA",s_ret0,16},{"GetFileVersionInfoSizeA",s_ret0,8},{"GetFileVersionInfoA",s_ret0,16},
-    // oleaut32
     {"SafeArrayGetLBound",s_ret0,12},{"SafeArrayGetUBound",s_ret0,12},{"SafeArrayPtrOfIndex",s_ret0,12},
     {"VariantChangeType",s_ret0,16},{"VariantCopy",s_ret0,8},{"SafeArrayCreate",s_ret0,12},
-    // user32
     {"AdjustWindowRectEx",s_ret1,16},{"CallNextHookEx",s_ret0,16},{"CallWindowProcA",s_ret0,20},
     {"CheckMenuItem",s_ret0,12},{"ClientToScreen",s_ret1,8},{"CreateIcon",s_gdi_handle,28},
     {"DefFrameProcA",s_ret0,20},{"DefMDIChildProcA",s_ret0,16},{"DestroyCursor",s_ret1,4},
@@ -739,7 +682,6 @@ static const reg_t REG[] = {
     {"timeGetDevCaps",            s_winmm_zero,                8},
     {"timeKillEvent",             s_winmm_zero,                4},
     {"timeSetEvent",              s_winmm_zero,                20},
-    /* MSVCR71 (cdecl, argbytes=0) */
     {"_strdup",                   s_strdup,                    0},
     {"_stricmp",                  s_stricmp,                   0},
     {"strchr",                    s_strchr,                    0},
@@ -766,7 +708,7 @@ static const reg_t REG[] = {
     {"_fileno",                   s_fileno,                    0},
     {"_stat",                     s_stat,                      0},
     {"_fstat",                    s_fstat,                     0},
-    {"_iob",                      s_iob_var,                   0},   /* TODO: variable, not function */
+    {"_iob",                      s_iob_var,                   0},
     {"sprintf",                   s_sprintf,                   0},
     {"vsprintf",                  s_vsprintf,                  0},
     {"sscanf",                    s_sscanf,                    0},
@@ -787,11 +729,9 @@ static const reg_t REG[] = {
     {"longjmp",                   s_longjmp,                   0},
     {"exit",                      s_exit_cdecl,                0},
     {"clock",                     s_clock,                     0},
-    /* ============== end spfy additions ============== */
     {0,0,0}
 };
 
-// Unregistered imports: return 0, do not halt (cdecl cleanup assumption).
 extern int g_cur_imp;
 static int g_unimpl_calls = 0;
 static void s_unimpl(void){
@@ -815,25 +755,21 @@ int win32_register_import(const char* dll, const char* name){
     return IMP_BASE + idx*IMP_STRIDE;
 }
 
-void win32_reset(void){   // call before pe_load so per-process state doesn't accumulate across a macro chain
+void win32_reset(void){
     g_nimp = 0; g_unimpl_calls = 0;
-    // TLS/FLS slots: if not reset, the 2nd plugin in a chain gets non-1 slot indices and
-    // g_tls[] holds stale pointers into the previous (now freed) plugin's memory -> Delphi's
-    // RTL derefs a null/stale thread-data slot and faults (dblue_Crusher load #2).
     g_tlsnext = 1; memset(g_tls, 0, sizeof g_tls); g_lasterr = 0;
-    g_tick = 1;   // tick/perf counter must restart each load, else a chained plugin sees a drifting clock
+    g_tick = 1;
 }
 
 void win32_init(void){
     heap_init();
     mem_map(AUX_BASE, 0x1000, "aux");
-    // command lines (ANSI + wide)
     g_cmdline_a = AUX_BASE+0x000; const char* cl="plugin"; int i=0; for(;cl[i];i++) wr8(g_cmdline_a+i,cl[i]); wr8(g_cmdline_a+i,0);
     g_cmdline_w = AUX_BASE+0x040; for(i=0;cl[i];i++) wr16(g_cmdline_w+2*i,cl[i]); wr16(g_cmdline_w+2*i,0);
-    // environment blocks (double-NUL terminated)
     g_env_a = AUX_BASE+0x100; const char* ev="OS=Windows_NT"; for(i=0;ev[i];i++) wr8(g_env_a+i,ev[i]); wr8(g_env_a+i,0); wr8(g_env_a+i+1,0);
     g_env_w = AUX_BASE+0x200; for(i=0;ev[i];i++) wr16(g_env_w+2*i,ev[i]); wr16(g_env_w+2*i,0); wr16(g_env_w+2*i+2,0);
-    // UCRT host data: errno, a dummy FILE table (stdin/out/err), empty narrow environment (char**=NULL)
+    /* UCRT host data: errno, a dummy FILE table (stdin/out/err), empty
+     * narrow environment (char**=NULL) */
     g_errno_va = AUX_BASE+0x400; wr32(g_errno_va,0);
     g_iob_va   = AUX_BASE+0x500; for(int k=0;k<0xC0;k+=4) wr32(g_iob_va+k,0);
     g_env_strs = AUX_BASE+0x600; wr32(g_env_strs,0);

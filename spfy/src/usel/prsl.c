@@ -1,4 +1,3 @@
-/* PRSL preselection cache loader + lookup. */
 
 #include "prsl.h"
 
@@ -26,7 +25,6 @@ int spfy_prsl_load(const spfy_vin_t *vin, spfy_prsl_t *out)
 
     uint32_t group_count = le_u32(p); p += 4;
     if (group_count == 0) return SPFY_OK;
-    /* Defensive cap: 10M groups is well above any documented voice. */
     if (group_count > 10u * 1024u * 1024u) return SPFY_E_FORMAT;
 
     spfy_prsl_group_t *groups =
@@ -47,7 +45,6 @@ int spfy_prsl_load(const spfy_vin_t *vin, spfy_prsl_t *out)
         }
         uint32_t key = le_u32(p);   p += 4;
 
-        /* (n - 1) candidate_ids follow */
         uint32_t n_cand = n - 1u;
         if ((size_t)(end - p) < (size_t)n_cand * 4u) {
             free(groups); return SPFY_E_FORMAT;
@@ -84,7 +81,6 @@ int spfy_prsl_lookup(const spfy_prsl_t *p, uint32_t context_key,
     *cands = NULL; *n_cands = 0;
     if (p->n_groups == 0) return SPFY_E_OOB;
 
-    /* Binary search on monotonically-increasing context_key. */
     uint32_t lo = 0, hi = p->n_groups;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;

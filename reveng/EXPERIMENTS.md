@@ -133,7 +133,7 @@ continuity and reducing audible "stitching" artifacts.
   - Confirmed by Frida: original HP0 51->2 survivors; broken HP0 51->0 survivors.
 - **Penalty sweep results** (pre-prune): 0.05=44K, 0.1=38K, 0.5=31K, 0.6=28K, 1.0=800.
   Degradation is gradual as more HPs lose all candidates above 0.95 threshold.
-- **Scripts**: c:/tmp/patch_dll_sweep.py, c:/tmp/patch_dll_test.py, c:/tmp/patch_dll_test2.py
+- **Scripts**: patch_dll_sweep.py, patch_dll_test.py, patch_dll_test2.py
 
 ### 10. DLL code cave: post-prune penalty (v2)
 - **Date**: 2026-03-15
@@ -151,7 +151,7 @@ continuity and reducing audible "stitching" artifacts.
   the Viterbi forward pass inner loop itself (where cumulative cost is computed from
   predecessor.cumulative + join_cost + target_cost). This requires disassembling the
   Viterbi inner loop at 0x8E8EDD0 to find the exact cost accumulation point.
-- **Script**: c:/tmp/patch_dll_v2.py
+- **Script**: patch_dll_v2.py
 
 ### 7. Fix durt tree phone_right offset bug + CART leaf recomputation
 - **Date**: 2026-03-14
@@ -166,7 +166,7 @@ continuity and reducing audible "stitching" artifacts.
 - **Date**: 2026-03-14
 - **What**: Calibrated tree variance convention by routing Tom's 169,579 units through
   Tom's own durt trees and comparing stored leaf variance to actual stddev of f0_context
-  values reaching each leaf. Script: `c:/tmp/calibrate_tree_variance.py`.
+  values reaching each leaf. Script: `calibrate_tree_variance.py`.
 - **Key finding**: Tom's durt tree variance is **~constant (~0.052-0.057)** across all
   543 leaves regardless of actual stddev (R^2=0.03, log-log exponent=-0.16). The variance
   field is a tuned cost sensitivity parameter, NOT a statistical property (stddev or 1/stddev).
@@ -581,9 +581,9 @@ continuity and reducing audible "stitching" artifacts.
   deduplicated to halfphone phonemes per recording) against MFA phone sequences from Mara's
   TextGrids. Computed a per-recording match rate.
 - **Results**: 1,941 recordings (28.8%) have poor phone match rates (< 80% of phones aligned).
-  Generated CSV at `c:/tmp/rerecord_targets/rerecord.csv` with 1,920 recordings for Qwen
+  Generated CSV at `rerecord_targets/rerecord.csv` with 1,920 recordings for Qwen
   re-synthesis.
-- **Script**: `c:/tmp/gen_rerecord_targets.py`
+- **Script**: `gen_rerecord_targets.py`
 
 ---
 
@@ -592,7 +592,7 @@ continuity and reducing audible "stitching" artifacts.
 ### 31. Overnight Qwen re-synthesis (5,917 recordings)
 - **Date**: 2026-03-16
 - **What**: Re-synthesized 5,917 recordings overnight using Qwen batch from
-  `c:\tmp\rerecord_targets\rerecord.csv`. Re-ran MFA alignment with english_mfa dictionary.
+  `rerecord_targets\rerecord.csv`. Re-ran MFA alignment with english_mfa dictionary.
 - **Result**: MFA coverage jumped from 9% to 95% (10% seq exact + 85% aligned). Only 3%
   proportional fallback remaining.
 - **MFA dictionary fix**: Was using mfa_forced_dict.txt (a 45-line phone mapping, NOT a word
@@ -1051,7 +1051,7 @@ failed on the 8kHz u-law fragments.
 | dip2_090 | "we watched the" | "we watched out" |
 | dip3_020 | "enjoy it sure" | "enjoy shore" |
 
-**Output:** `c:\tmp\resynth_final.csv` (6,288 recordings ready for Qwen re-synthesis)
+**Output:** `resynth_final.csv` (6,288 recordings ready for Qwen re-synthesis)
 
 ---
 
@@ -1223,7 +1223,7 @@ concatenation points even with perfect join costs, because the underlying voice 
 changes at every recording boundary.
 
 **Method:**
-1. `find_best_mara_wavs.py` (c:/tmp/) selects top 106 WAVs (~8 min) by quality metrics:
+1. `reveng/voice_cloning/find_best_training_wavs.py` selects top 106 WAVs (~8 min) by quality metrics:
    duration > 2.5s, speech ratio > 50%, no clipping, stable RMS
 2. Train RVC model on curated WAVs using `rvc-no-gui` CLI tool:
    - model_name=mara, 500 epochs, RTX 4070 Ti Super
@@ -1295,10 +1295,10 @@ keep Tom's entire phonetic structure (lp, dl, unit positions), swap just the voi
 **Method:**
 1. Decode Tom's 8kHz u-law VDB audio to PCM WAV (one WAV per recording)
 2. AudioSR upscale: speech model, ddim_steps=20, guidance_scale=3.5 -> 48kHz WAV
-   - Batch script: `c:/tmp/audiosr_batch.py` (processes all 6,849 recordings)
+   - Batch script: `reveng/voice_cloning/audiosr_batch.py` (processes all 6,849 recordings)
    - Speed: ~2-3 seconds/file on RTX 4070 Ti Super (~4-6 hours total)
 3. RVC convert upscaled audio: Mara model, 8 threaded workers (~0.8 files/s/worker)
-   - Batch script: `c:/tmp/rvc_batch.py`
+   - Batch script: `reveng/voice_cloning/rvc_batch.py`
 4. Build with `build_voice_pipeline.py` using RVC output as WAV source
    - No MFA needed (Tom's lp/dl values are already correct)
    - No trimming needed (Tom's recordings are already proper length)
@@ -2552,10 +2552,10 @@ by re-running both full audits.
 
 ### 89d. Trace storage
 
-Jill's 235 master traces were living in `C:\tmp\jill_traces_master` and
+Jill's 235 master traces were living in `jill_traces_master` and
 got cleaned up by a temp sweep mid-session. They now live at
 **`spfy/test/oracle/traces_master_jill`** (81.7 MB), alongside Tom's
 `traces_master` (75.4 MB). Both are covered by the `*.json*` .gitignore
 rule and neither is tracked, so this only changes where they survive --
 not what is committed. Pass `--traces-master spfy/test/oracle/traces_master_jill`
-to master_compare2.py.
+to master_spfy_parity.py.

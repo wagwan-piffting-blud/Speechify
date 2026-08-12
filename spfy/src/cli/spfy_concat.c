@@ -1,22 +1,4 @@
-/* spfy_concat -- M0b synthesis: concatenate engine-chosen units to WAV.
- *
- *   spfy_concat <voice.vin> <voice.vdb> <wsola_in.jsonl> <out.wav>
- *
- * Reads a captured wsola_buffer trace (wsola_in events) for a single
- * phrase, looks up each unit's raw audio bytes from the VDB by mapping
- * uid -> unit.file_idx -> feat[].name -> indx[name].data_offset, decodes
- * u-law to s16le, concatenates, and writes a 8 kHz mono WAV.
- *
- * This bypasses the FE, Viterbi, and WSOLA pipeline entirely. The output
- * is the engine's actual selected units stitched naively without prosody
- * modification or boundary smoothing -- it'll be slightly choppy at
- * joins but recognisable. First audible synthesis from our pipeline.
- *
- * NB: trace's lp/dl values appear to be post-prosody WSOLA params, not
- * raw byte offsets. We use the unit table's raw local_pos / dur_like
- * fields for actual audio extraction. Silence sentinels (uid=0 leading,
- * uid=169578 terminal) are skipped.
- */
+/* spfy_concat -- M0b synthesis: concatenate engine-chosen units to WAV. */
 
 #include <spfy/spfy.h>
 
@@ -33,18 +15,16 @@
 
 #define SILENCE_SENTINEL_UID 169578u
 
-/* Per-unit play record. dl is from the trace; the rest are looked up
- * from the unit table at parse time so the play loop can do pair
- * detection without redundant table lookups. */
+/* Per-unit play record. */
 typedef struct {
     uint32_t  uid;
-    uint32_t  dl;            /* engine's synth duration; 0 = no audio in oracle */
-    uint16_t  file_idx;      /* unit_table[uid].file_idx */
+    uint32_t  dl;
+    uint16_t  file_idx;
     uint16_t  local_pos;
     uint16_t  dur_like;
     uint8_t   phone_center;
     uint8_t   is_first_half;
-    int       valid;          /* unit_table lookup succeeded */
+    int       valid;
 } unit_play_t;
 
 typedef struct {
@@ -65,7 +45,6 @@ static int play_list_push(unit_play_list_t *l, unit_play_t item)
     return SPFY_OK;
 }
 
-/* Find `"<key>":` and return position after the colon, or NULL. */
 static const char *find_key_after(const char *p, const char *end, const char *key)
 {
     size_t kn = strlen(key);
@@ -87,8 +66,7 @@ static long strtol_at(const char *p, const char *end, char **endp)
     return strtol(p, endp, 10);
 }
 
-/* For each `{"uid":N,"lp":...,"dl":M}` object in the JSONL, push (N,M).
- * Order in file = order in trace = playback order (utt 1 first, etc.). */
+/* For each `{"uid":N,"lp":...,"dl":M}` object in the JSONL, push (N,M). */
 static int parse_play_list(const char *path, unit_play_list_t *out)
 {
     FILE *fp = fopen(path, "rb");
@@ -120,7 +98,6 @@ static int parse_play_list(const char *path, unit_play_list_t *out)
     return SPFY_OK;
 }
 
-/* Annotate each play list entry with unit_table fields. */
 static void annotate_play_list(unit_play_list_t *l, const spfy_unit_table_t *t)
 {
     for (size_t i = 0; i < l->n; ++i) {
@@ -139,17 +116,13 @@ static void annotate_play_list(unit_play_list_t *l, const spfy_unit_table_t *t)
     }
 }
 
-/* Cross-fade state across calls to append_unit_audio. Holds the last
- * XFADE_SAMPLES samples of the previous unit; the next unit's first
- * XFADE_SAMPLES samples will be linearly mixed with these (prev fades
- * out, current fades in, sum of weights = 1). Smooths cross-recording
- * unit boundaries without doing full WSOLA. */
+/* Cross-fade state across calls to append_unit_audio. */
 #define XFADE_MS      6u
-#define XFADE_SAMPLES (XFADE_MS * 8u)   /* 8 kHz mono */
+#define XFADE_SAMPLES (XFADE_MS * 8u)
 
 typedef struct {
     int16_t  tail[XFADE_SAMPLES];
-    size_t   tail_n;                    /* 0 if no tail held */
+    size_t   tail_n;
 } xfade_state_t;
 
 static void xfade_apply(xfade_state_t *xf, int16_t *samples, size_t n)
@@ -158,7 +131,6 @@ static void xfade_apply(xfade_state_t *xf, int16_t *samples, size_t n)
     if (k == 0 || n == 0) return;
     if (k > n) k = n;
     for (size_t i = 0; i < k; ++i) {
-        /* alpha goes 0 -> 1 across k samples */
         long double alpha = (long double)(i + 1) / (long double)(k + 1);
         long double beta  = 1.0L - alpha;
         long double mixed = beta * (long double)xf->tail[i]
@@ -181,8 +153,7 @@ static void xfade_save(xfade_state_t *xf, const int16_t *samples, size_t n)
     }
 }
 
-/* Decode (file_idx, lp_ms, dur_ms) into a freshly-allocated s16 buffer.
- * Returns 0 samples if OOB or zero duration; caller must free *out_samples. */
+/* Decode (file_idx, lp_ms, dur_ms) into a freshly-allocated s16 buffer. */
 static int decode_unit_samples(uint32_t file_idx,
                                uint32_t lp_ms, uint32_t dur_ms,
                                const spfy_feat_table_t *feat,
@@ -202,17 +173,20 @@ static int decode_unit_samples(uint32_t file_idx,
 
     uint32_t off_in_rec    = lp_ms * 8u;
     uint32_t bytes_to_play = dur_ms * 8u;
-    if (off_in_rec >= rec_size) return SPFY_OK;
-    if (off_in_rec + bytes_to_play > rec_size)
-        bytes_to_play = rec_size - off_in_rec;
+    /* The names say "bytes" because u-law made bytes and samples the same
+     * thing. */
+    uint32_t bps = vdb->bytes_per_sample ? vdb->bytes_per_sample : 1u;
+    uint32_t rec_n = rec_size / bps;
+    if (off_in_rec >= rec_n) return SPFY_OK;
+    if (off_in_rec + bytes_to_play > rec_n)
+        bytes_to_play = rec_n - off_in_rec;
     if (bytes_to_play == 0) return SPFY_OK;
 
     int16_t *buf = (int16_t *)malloc(bytes_to_play * sizeof *buf);
     if (!buf) return SPFY_E_NOMEM;
-    spfy_ulaw_decode(vdb->data + rec_offset + off_in_rec,
-                     bytes_to_play, buf);
+    spfy_vdb_decode(vdb, rec_offset, off_in_rec, bytes_to_play, buf);
     *out_samples = buf;
-    *out_n       = bytes_to_play;     /* 1 byte u-law -> 1 s16 sample */
+    *out_n       = bytes_to_play;
     return SPFY_OK;
 }
 
@@ -243,11 +217,7 @@ static int append_recording_span(uint32_t file_idx,
 }
 
 /* Cross-rec pair: linear blend the two halves' audio over max(n1,n2)
- * samples. alpha goes 0 -> 1 across the whole pair so output[i] =
- * (1-alpha)*first[i] + alpha*second[i]. Preserves first-half burst at
- * full volume at the start (critical for stop consonants like /k/, /d/,
- * /g/) while transitioning into second-half content without doubling.
- * Length = max(n1, n2). */
+ * samples. */
 static int append_crossrec_pair(uint32_t f1, uint32_t lp1, uint32_t d1,
                                 uint32_t f2, uint32_t lp2, uint32_t d2,
                                 const spfy_feat_table_t *feat,
@@ -308,7 +278,7 @@ int main(int argc, char **argv)
 
     if ((rc = spfy_vin_load(argv[1], &vin)) != SPFY_OK) goto done;
     if ((rc = spfy_vdb_load(argv[2], &vdb)) != SPFY_OK) goto done;
-    if ((rc = spfy_vdb_require_8k_mulaw(&vdb, argv[2])) != SPFY_OK) goto done;
+    if ((rc = spfy_vdb_require_supported(&vdb, argv[2])) != SPFY_OK) goto done;
     if ((rc = spfy_unit_table_load(&vin, &units)) != SPFY_OK) goto done;
     if ((rc = spfy_feat_table_load(&vin, &feat))  != SPFY_OK) goto done;
     if ((rc = spfy_vdb_lookup_build(&vdb, &lookup)) != SPFY_OK) goto done;
@@ -321,23 +291,7 @@ int main(int argc, char **argv)
 
     if ((rc = spfy_wav_open(&wav, argv[4], vdb.sample_rate)) != SPFY_OK) goto done;
 
-    /* Pair-aware playback.
-     *
-     * Walk the play list. For each unit, peek at the next:
-     *   - If both units share phone_center AND same file_idx with adjacent
-     *     local_pos: a SAME-RECORDING PAIR. Play recording[first.lp ..
-     *     second.lp + second.dur_like] -- ONE continuous span containing
-     *     the natural phoneme audio. Skip the second unit (already
-     *     covered).
-     *   - If both share phone_center but DIFFERENT file_idx (or non-
-     *     adjacent): a CROSS-RECORDING PAIR. Play only the SECOND half
-     *     (its dur_like or trace.dl, at second.local_pos). Skip the
-     *     first half -- playing both produces audible phoneme doubling
-     *     because each contains the same nominal phoneme from different
-     *     source recordings.
-     *   - If standalone (no matching neighbor): play unit.dur_like (or
-     *     trace.dl if non-zero). Catches leading/trailing silences and
-     *     non-paired units. */
+    /* Pair-aware playback. */
     xfade_state_t xf = {{0}, 0};
     size_t played = 0, skipped = 0, paired_same_rec = 0, paired_cross_rec = 0;
     size_t i = 0;
@@ -366,10 +320,10 @@ int main(int argc, char **argv)
                                                &lookup, &xf, &wav);
                     ++paired_same_rec;
                 } else {
-                    /* Cross-recording pair: linear-blend both halves so
-                     * the first-half burst (critical for stop consonants
-                     * /k/, /d/, /g/) is preserved while transitioning to
-                     * the second-half content -- WSOLA-lite. */
+                    /* Cross-recording pair: linear-blend both halves so the
+                     * first-half burst (critical for stop consonants /k/,
+                     * /d/, /g/) is preserved while transitioning to the
+                     * second-half content -- WSOLA-lite. */
                     uint32_t d_first  = (uint32_t)p.dur_like;
                     uint32_t d_second = q.dl ? q.dl : (uint32_t)q.dur_like;
                     rc = append_crossrec_pair(p.file_idx, p.local_pos, d_first,

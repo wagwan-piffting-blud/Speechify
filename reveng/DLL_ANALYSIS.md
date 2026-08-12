@@ -149,7 +149,7 @@ Initialized by constructor 0x8EE2680 based on sample rate (CONFIRMED by disassem
     decrements the cursor. Over many units, cursor can become negative (large unsigned).
     This corrupts the VDB position index passed to the audio reader.
   - The ACTUAL crash mechanism is likely cursor overflow -> wrong page_table lookup in 0x8EE4130 -> invalid source pointer -> rep movsd AV
-  - Frida hook `c:/tmp/frida_wsola_5240.py` will capture vtable[2] args (cursor + n_bytes) at crash time
+  - Frida hook `frida_wsola_5240.py` will capture vtable[2] args (cursor + n_bytes) at crash time
 
 #### 0x8EE5240 -- vtable[2]: Audio Read+Copy wrapper (CONFIRMED)
 - `__thiscall`, no standard prologue (vtable function): `ecx = audio_obj`
@@ -697,6 +697,315 @@ Set by flag at WSOLA_state+0x3614:
 | `pmdata` | (none) | Optional pitchmark data file path |
 
 Logic: `amp_enabled = (apply_target_prosody != 0) && (amp_mods != 0)`
+
+### pmindex / pmdata ON-DISK FORMAT (SOLVED 2026-08-04, Ghidra + Frida)
+
+This closes old open question #8. The two files are the ONLY source of pitch
+marks in the engine — see "Pitch marks have no runtime source" below.
+
+**Load path.** `SWIttsWsolaCreateVoice` @0x08EE53A0 reads three VCF params —
+`tts.voiceCfg.speechdb`, `tts.voiceCfg.pmindex`, `tts.voiceCfg.pmdata` (the
+latter two at requirement level 3 = optional) — and passes all three to the
+`WsolaVoiceDatabase` ctor `FUN_08EE4F20`. The ctor calls the pitch loader
+`FUN_08EE4C90` (`WsolaVoiceDatabase::pitchdbfileopen`) **only if BOTH paths
+are non-NULL**; an absent or empty VCF param yields NULL and the whole pitch
+DB stays zeroed. Both files are `_stat`ed for their size and slurped whole.
+
+**Both files are BIG-ENDIAN.** `FUN_08EE3F10` runs `ntohl` over every u32 of
+pmindex; `FUN_08EE3F50` runs `ntohs` over every u16 of pmdata. Element counts
+come straight from `st_size`: `n_u32 = size/4`, `n_u16 = size/2`.
+
+`pmindex` layout (BE uint32):
+
+| word | meaning |
+| ---- | ------- |
+| `[0]` | **sample rate the marks were measured at** (8000 or 16000). Stored at `db+0x24`. |
+| `[1]`, `[2]` | header, not read by any code found. Reserved. |
+| `[3 + 2k]` | **offset of sub-unit k's marks into pmdata, in int16 ELEMENTS** |
+| `[4 + 2k]` | **number of marks for sub-unit k** |
+
+So `pmindex_size = 12 + 8 * n_sub_units`, and the table base kept at
+`db+0x2c` is `&pmindex[3]`.
+
+`pmdata` layout: a flat BE int16 array of pitch marks. One contiguous run per
+sub-unit at the offset the index gives.
+
+**Accessor** `FUN_08EE4200` = `WsolaVoiceDatabase::getPitchMarks`. Verified
+against disassembly, not just decompiler output:
+
+```
+if (db+0x20 == NULL) return 0;              // no pmdata -> ZERO marks
+idx = (u32*)(db+0x2c) + unit[0x08]*2;       // LEA ESI,[ECX + EAX*0x8]
+for k in 0 .. unit[0x24]-1:                 // per sub-unit
+    if (strncmp(sub_unit->name, "pau", 3) != 0):   // pauses carry no marks
+        off   = idx[0];  count = idx[1];
+        sub_unit[0x10] = count;             // MOV [EBP+0x10],ESI
+        grow *out to (unit[0x1c] + count) int16s
+        memcpy(out_cursor, db->pmdata + off*2, count*2)   // LEA ESI,[EDX+EAX*2]
+        unit[0x1c] += count;
+    idx      += 2;                          // ADD ESI,0x8  <- per SUB-UNIT
+    sub_unit += 0x30;                       // ADD EBP,0x30
+// rate conversion on the VALUES themselves:
+if (db_rate==16000 && pm_rate==8000)  v <<= 1;   // SHL word ptr [...],0x1
+if (db_rate== 8000 && pm_rate==16000) v >>= 1;   // SAR word ptr [...],0x1
+```
+
+**Values are SIGNED int16 PITCH PERIODS (deltas), proven not inferred.** The
+mode-0 block of `FUN_08EE2960` does the expansion in full view:
+
+```c
+if (state[0x3614] == 0) {                       // mode 0 only
+    n = vtable[3](&state[0x3c], unit, &state[0x40]);   // = getPitchMarks
+    marks = alloc(state[0x40] * 0x1c);           // 28 bytes per mark, zeroed
+    unit[0x20] = marks;  unit[0x1c] = n;
+    for (i = 0; i < n; i++)
+        *(int *)(marks + i*0x1c) = (int)*(short *)(state[0x3c] + i*2);  // sign-extend
+    FUN_08EE23D0(state);                         // mark[k] += mark[k-1]
+}
+```
+
+The packed int16 file buffer lands in `state+0x3c`; each value is
+sign-extended into field 0 of a fresh 28-byte record; `FUN_08EE23D0` then
+cumulative-sums them into absolute positions and chains each sub-unit's mark
+pointer (`prev_n * 0x1c + prev_ptr`). This also resolves the apparent
+stride contradiction — the int16 buffer and the 28-byte array are two stages
+of the same pipeline, not two different data sources.
+
+**MODE 0 IS GATED ONLY ON pmdata BEING LOADED — `apply_target_prosody` is
+orthogonal.** From `SWIttsWsolaConcat` @0x08EE65E0:
+
+```c
+FUN_08EE1160(state, (uint)(*(int *)(voice_db + 0x20) != 0));   // 0x20 = pmdata base
+//   arg != 0  -> state[0x3614] = 0, "Concatenating with selective F0 smoothing"
+//   arg == 0  -> state[0x3614] = 1, "Concatenating with WSOLA"
+FUN_08EE10F0(state, dur_gate);      // -> state+0x2c, duration modification
+FUN_08EE1100(state, resource+0xd);  // -> state+0x2d, amp = apply_target_prosody && amp_mods
+```
+
+So supplying valid `pmindex`/`pmdata` switches the engine to pitch-mark
+overlap-add **by itself**, with no VCF flag. `apply_target_prosody` separately
+gates the duration/amplitude modification path (`state+0x2c` / `state+0x2d`)
+inside `FUN_08EE2960`. This corrects the earlier reading of the 2026-08-04
+VCF experiment: setting `apply_target_prosody=1` on a voice with no pm files
+hung in the **dur/amp modification** path, not in the mode-0 path — mode was
+still 1. The safe first experiment is therefore **pm files only, VCF prosody
+flags untouched**.
+
+Two further consequences worth stating plainly:
+
+- **The index is keyed per SUB-UNIT, not per WsolaUnit — and a "sub-unit" is
+  exactly a VIN unit-table record.** `unit[0x08]` is the **uid** of the
+  WsolaUnit's first sub-unit; a WsolaUnit is one contiguous RUN of selected
+  half-phones, so its 1..8 sub-units are **consecutive uids**, and the index
+  cursor advances one 8-byte entry per sub-unit.
+
+  **Proven, not assumed** (`<scratchpad>/verify_subunit_is_uid.py`,
+  2026-08-04): for all 44 WsolaUnits in the two live Frida traces, decoding
+  `tom.vin` `unit/data` at `uid = key + j` reproduced **every** sub-unit
+  duration and the unit's `+0x0c` — **44 ok, 0 bad**. Mapping:
+
+  | WsolaUnit field | VIN unit-table field |
+  | --------------- | -------------------- |
+  | `unit+0x08` | `uid` (array index) |
+  | `unit+0x0c` | `local_pos` of the first uid |
+  | `unit+0x10` | sum of the run's `dur_like` |
+  | `sub_unit+0x08` | `dur_like` |
+
+  Tom's `unit/data` is 4,917,791 B / 29 B = **169,579 records**, uid 0..169578
+  — exactly the observed key range. So pmindex has **169,579 entries** and is
+  **1,356,644 bytes** (`12 + 8*169579`).
+
+  Note these are **1 ms ticks, not samples**: `FUN_08EE2960` does
+  `sub_unit[0x0c] = sub_unit[0x08] << state[0x24]`, and the shift is 3 for
+  8 kHz, i.e. `samples = ticks * 8`. Pitch-mark values, by contrast, are in
+  SAMPLES (they get the `<<1`/`>>1` rate conversion), so a sub-unit's marks
+  must sum to about `dur_like * 8`.
+
+  A sub-unit's audio is therefore
+  `vdb_entry(name(file_idx)).data_offset + local_pos*8`, length `dur_like*8`
+  — the same arithmetic spfy already does at
+  `spfy/src/cli/spfy_concat.c:203-204`.
+
+  **Supersedes the older WsolaUnit table earlier in this file**, which has
+  `+0x0c` and `+0x10` swapped.
+- **The stored values are a sample-domain quantity that scales with rate**
+  (the <<1 / >>1 conversion). `FUN_08EE23D0` cumulative-sums mark[k] += mark[k-1]
+  and then logs `"subunit length %d, last pmark %d"`, i.e. marks are stored as
+  **deltas (pitch periods) in samples** and summed into positions. NOTE: that
+  function strides 0x1c bytes over int-sized records (`IMUL EAX,EAX,0x1c`
+  @0x08EE2410), which is NOT the packed int16 buffer `getPitchMarks` fills —
+  so the two are separate representations and the period-vs-position reading
+  of the FILE is inferred, not directly proven. Verify empirically.
+
+Tom's VDB is 8 kHz, so `pmindex[0]` should be `8000` to make the conversion a
+no-op.
+
+**Confirmed live unit-struct layout** (Frida `wsola_unit_probe`, matches the
+disassembly exactly):
+
+| offset | meaning |
+| ------ | ------- |
+| `+0x08` | global sub-unit index — the pmindex key |
+| `+0x0c` | start offset |
+| `+0x10` | total duration (samples), = sum of sub-unit lengths |
+| `+0x1c` | running total mark count (filled by getPitchMarks) |
+| `+0x24` | n_sub_units (observed 1..8) |
+| `+0x28` | sub-unit array, stride 0x30 |
+
+Sub-unit: `+0x08` length in samples (observed 9..203), `+0x10` n_pmarks,
+`+0x14` pointer into the mark buffer.
+
+### THE DTD GATE — why adding any new VCF param kills the server
+
+**`bin/SWIttsConfig.dll` carries an EMBEDDED DTD** that enumerates every legal
+`param/@name`. It is resolved from the VCF's `PUBLIC` id, NOT from
+`config/SWIttsConfig.dtd` (that on-disk copy has **zero** `voiceCfg` names and
+is not what validates a VCF). The embedded enumeration lists **122**
+`tts.voiceCfg.*` names — and does **not** include `pmindex`, `pmdata`,
+`apply_target_prosody`, `use_prosody`, `dur_mods` or `amp_mods`.
+
+Adding an unlisted param makes the server **exit at startup**, rc=5:
+
+```
+CRITICAL|2064|Speechify server: XML configuration file parse error
+  |file=...\en-US\tom\tom.vcf|line=154|column=38
+  |message=Attribute 'name' does not match its defined enumeration or notation list
+```
+
+**This retroactively explains the 2026-08-04 `apply_target_prosody=1`
+"hang at synthesis".** It was not a pitch-mark-dependent code path dying — the
+server never started, so `spfy_dumpwav` was talking to nothing. Any conclusion
+drawn from that experiment is void.
+
+**Fix — no binary patching required.** An internal DTD subset is read *before*
+the external one and the FIRST declaration of an attribute wins, so
+redeclaring `param/@name` as `NMTOKEN` neutralises the enumeration:
+
+```xml
+<!DOCTYPE SWIttsConfig PUBLIC "-//SpeechWorks//DTD SPEECHIFY CONFIG 1.0//EN"
+                       "SWIttsConfig.dtd" [
+<!ATTLIST param name NMTOKEN #REQUIRED >
+]>
+```
+
+Verified working: server starts in 1.5 s and renders normally with the two new
+params present.
+
+### Pitch marks CONFIRMED WORKING END TO END (2026-08-04)
+
+`reveng/spfy4/tools/gen_pitchmarks.py` built Tom's files from the VIN unit
+table (169,579 units, 7,348.8 s of span, 780,408 marks):
+`tom8.pmindex` = **1,356,644 B** (exactly `12 + 8*169579`),
+`tom8.pmdata` = 1,560,816 B. Installed with the DTD override above.
+
+Frida `wsola_unit_probe`, same two phrases, 44 units, before vs after:
+
+| | mode_flag histogram |
+| --- | --- |
+| no pm files | `{1: 44}` — plain WSOLA |
+| pm files installed | `{0: 44}` — **selective F0 smoothing** |
+
+The engine renders cleanly in mode 0. A/B on three weather phrases:
+duration +0.3..+1.3%, RMS -0.09..-0.25 dB (i.e. not glitching), F0 median
+within +-3 Hz, and **F0 IQR consistently DOWN** (-4.72, -5.37, -0.83 Hz) —
+the direction S4 sits in. Jitter barely moved (3.23% -> 3.19% mean), which is
+expected: these marks are synthesised from the unit table's own F0 bytes, not
+measured from the VDB audio. Measuring real marks is the obvious next lever.
+
+NB the entry-only hook reads `unit+0x1c` / `sub_unit+0x10` as 0 even in mode 0,
+because `FUN_08EE2960` zeroes and then fills them *after* entry. The mode flag
+is the valid oracle for an entry hook.
+
+### Measured marks beat synthesised marks (2026-08-04)
+
+`reveng/spfy4/tools/gen_pitchmarks_real.py` detects marks on the **continuous
+recording** (pyworld dio+stonemask period track, each mark refined to the
+argmax of a ~900 Hz low-passed copy within ±30% of a period), then slices per
+uid. Two properties the synthetic generator cannot have:
+
+1. Phase stays coherent **across unit joins** — a per-unit mark train restarts
+   phase at every boundary, which is exactly what mode-0 OLA is trying to fix.
+2. A unit's **first period is the distance from unit start to its first mark**,
+   i.e. its phase offset. The synthetic generator always emitted a full period
+   there, discarding the one number mode 0 consumes.
+
+Tom: 6,849 recordings marked in ~5 s on 20 workers, 770,397 marks, median
+period 67 samples = **119 Hz** (Tom's known median F0 — a good independent
+check that the detector locks to real cycles).
+
+Three-way A/B, mean over the same 3 phrases:
+
+| marks | jitter | F0 IQR |
+| ----- | ------ | ------ |
+| none (mode 1) | 3.23% | 35.59 Hz |
+| synthesised | 3.19% | 31.95 Hz |
+| **measured** | **3.02%** | 32.98 Hz |
+
+Measured marks improve jitter on **all three** phrases (-0.06, -0.39, -0.20 pp)
+where synthesised was mixed (+0.12, -0.25, -0.02), and disturb amplitude less
+(RMS -0.03..-0.12 dB vs -0.09..-0.25). Duration grows a little more
+(+2.0..+2.9% vs +0.3..+1.3%). S4 sits near 2.7% jitter, so this closes roughly
+a third of the gap; the remaining lever is a true GCI estimator rather than a
+low-pass peak anchor.
+
+### THE MODIFICATION SURFACE IS RATE + VOLUME ONLY — NO PITCH (2026-08-04)
+
+Closes the "can we put an F0 contour in the Target relation" question.
+
+`FUN_08EE6010` looks up the ESPR **"Control"** relation
+(`PTR_s_Control_08eed084`) and hands each event to `FUN_08EE5EF0`, which
+parses exactly **two** event names:
+
+```c
+if      (name == "volume") { level -> sub_unit[0x28]; }
+else if (name == "rate")   { level -> sub_unit[0x2c]; *has_target = 1; }
+```
+
+Only `rate` raises the flag that becomes `resource+0x28` -> `state+0x2c`, the
+duration-modification gate in `FUN_08EE2960`, where
+`rate = CONST / sub_unit[0x2c]` scales `sub_unit[0x18]` (target duration)
+against `sub_unit[0x1c]` (original). So **`+0x18`/`+0x1c` is a DURATION
+source/target pair, not a pitch pair** — which is why `apply_target_prosody`
+is inert: `FUN_08EE6010` sets them equal and nothing else ever differs them.
+
+There is no pitch event type, and the DLL's entire pitch vocabulary is about
+joins: "max pitch period exceeded on one side of join", "too few pitchmarks
+across join", "pitch glitch detected", "Concatenating with selective F0
+smoothing". No pitch target, no pitch scale factor.
+
+**Empirically confirmed independently.** Scaling every stored period in
+`tom8.pmdata` by 1.25 (implying 119 Hz -> 95 Hz) moved output F0 only
+118.5 -> 110.2 Hz (-7%, not the -20% resynthesis would give) while jitter rose
+3.68 -> 4.54 and voicing fell 5 points. That is misaligned overlap-add, not
+pitch control. **Pitch lives in the waveform; the marks are a table of
+contents, not a score.**
+
+Consequences:
+
+- Speechify 3.0.5's audio-modification surface is **duration and amplitude,
+  full stop**. Both reachable via the Control relation / `tts.audio.rate`.
+- Any F0 contour control must come from unit SELECTION (f0tr targets, which
+  score against the boundary-only `f0_start` feature and so cannot see
+  accent peaks) or from POST-HOC PSOLA outside the engine
+  (`reveng/spfy4/tools/f0_contour_shape.py`).
+- If Speechify 4 genuinely had wider expressive range, it cannot have come
+  from configuring this machinery — it would require a pitch-modification
+  stage this lineage does not contain.
+
+### Pitch marks have no runtime source (Frida, 2026-08-04)
+
+`wsola_unit_probe_hook.js` was run against the live stock Tom voice
+(2 phrases, 44 units). Result across **every** unit:
+
+- `mode_flag` (state+0x3614) = **1** — plain WSOLA, always.
+- sub-unit `+0x10` (n_pmarks) = **0**, `+0x14` (mark ptr) = **NULL**.
+
+The hook's three standing hypotheses are therefore **all refuted**: marks are
+not computed per-unit at runtime (A), not carried in VDB sub-unit data (B),
+and not built once at voice load (C). With no pmindex/pmdata the engine has
+zero pitch marks and can only ever run mode 1. This is why setting
+`apply_target_prosody=1` alone loads fine but dies at synthesis: the
+mode-0 path is enabled against an empty mark table.
 
 ### Duration modification in WSOLA (FUN_08ee2960)
 

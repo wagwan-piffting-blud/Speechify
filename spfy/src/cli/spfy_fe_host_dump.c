@@ -1,14 +1,6 @@
-/*
- * spfy_fe_host_dump.c — exercise the hosted FE via the public
- * spfy_fe.h API, fill ctx[5]/sp[5]/is_voiced via the loaded voice's
- * phoneset, and dump the slot table. This is the integration smoke
- * test for the hosted FE replacement.
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- *
- * Usage:
- *   spfy_fe_host_dump <voice.vcf> "<text>"
- */
+/* spfy_fe_host_dump.c — exercise the hosted FE via the public spfy_fe.h
+ * API, fill ctx[5]/sp[5]/is_voiced via the loaded voice's phoneset, and
+ * dump the slot table. */
 
 #include "../fe/fe.h"
 #include "../fe/phoneset.h"
@@ -31,7 +23,6 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[host_dump] starting; vcf=%s text=%s\n", vcf_path, text);
 
     spfy_fe_t *fe = NULL;
-    /* Hosted FE ignores the vocab/tables paths. */
     int rc = spfy_fe_open(NULL, NULL, NULL, &fe);
     fprintf(stderr, "[host_dump] spfy_fe_open -> %d (fe=%p)\n", rc, (void *)fe);
     if (rc != 0 || !fe) {
@@ -62,7 +53,6 @@ int main(int argc, char **argv) {
         "-----+-------------------------------+---------------------+---------+------\n");
     for (uint32_t i = 0; i < utt->n_slots; i++) {
         const spfy_fe_slot_t *s = &utt->slots[i];
-        /* Decode phone from ctx[2] = phone_id*2 + side. */
         uint32_t enc = (uint32_t)s->ctx[2];
         uint32_t pid = enc / 2;
         uint32_t side = enc & 1u;

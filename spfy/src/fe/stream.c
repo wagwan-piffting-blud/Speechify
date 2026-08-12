@@ -1,4 +1,3 @@
-/* Multi-stream token framework -- minimal Delta-style data structure. */
 
 #include "stream.h"
 

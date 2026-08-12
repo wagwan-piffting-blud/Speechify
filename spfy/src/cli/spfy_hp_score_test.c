@@ -1,12 +1,5 @@
 /* spfy_hp_score_test -- quick validation that spfy_hp_innerscorer
- * reproduces the engine's per-HP cand_totals on a single utterance.
- *
- * Compares C-computed per-HP cost to captured cand_totals from
- * inner_scorer/%s.jsonl utt 0. Expected: 99% bit-exact match
- * (same as the Python verify_per_hp_cost.py reference).
- *
- *   spfy_hp_score_test <voice.vin> <voice.vcf> <hpclass.bin> <traces_dir>
- */
+ * reproduces the engine's per-HP cand_totals on a single utterance. */
 
 #include <spfy/spfy.h>
 #include "../usel/anchor_score.h"
@@ -144,7 +137,6 @@ int main(int argc, char **argv)
     av.hpclass_n = hpc_n;
     spfy_anchor_voice_set_default_weights(&av);
 
-    /* Load inner_scorer trace. Defaults to text_002, override via env. */
     const char *text_id = getenv("SPFY_TEXT");
     if (!text_id) text_id = "text_002";
     char path[1024];
@@ -162,7 +154,6 @@ int main(int argc, char **argv)
     char *cw_buf = NULL; size_t cw_n = 0;
     read_file(path, &cw_buf, &cw_n);
 
-    /* Build per-slot ctx, cart, voicing arrays (utt 0 only). */
     spfy_anchor_ctx_t ctxs[256] = {0};
     int ctx_have[256] = {0};
     {
@@ -174,7 +165,7 @@ int main(int argc, char **argv)
             int64_t slot;
             if (read_key_i64(ls, le, "slot", &slot) != 0) continue;
             if (slot == 0) {
-                if (seen_slot0) break;   /* utt 1 starts */
+                if (seen_slot0) break;
                 seen_slot0 = 1;
             }
             int64_t arr[8];
@@ -187,15 +178,11 @@ int main(int argc, char **argv)
     }
     spfy_anchor_cart_t carts[256] = {0};
     {
-        /* Detect utt boundary: slot drops back to 0/low after climbing.
-         * Within utt 0, durt+f0tr each enumerate slots 0..N in order.
-         * utt 1 starts with slot 0 durt after utt 0 has emitted slot N
-         * f0tr (or last durt). Track running max; if slot is much lower
-         * than the max we've seen, that's utt 1. */
+        /* Detect utt boundary: slot drops back to 0/low after climbing. */
         const char *p = cw_buf, *end = cw_buf + cw_n;
         const char *ls, *le;
         int64_t max_slot = -1;
-        int phase = 0;   /* 0=durt phase, 1=f0tr phase, transition allowed */
+        int phase = 0;
         while (next_line(&p, end, &ls, &le)) {
             if (!find_lit(ls, le, "\"type\":\"cart_walk\"")) continue;
             int64_t slot;
@@ -205,11 +192,9 @@ int main(int argc, char **argv)
             /* If slot drops AND we're in f0tr phase entering durt, that's
              * utt 1 boundary. */
             if (is_durt && phase == 1 && slot == 0) break;
-            /* Phase transition: first f0tr seen after durt phase. */
             if (is_f0tr) phase = 1;
             else if (is_durt && phase == 0 && slot < max_slot) {
-                /* Within utt 0, durt is monotonically increasing.
-                 * If slot drops while still in durt phase, that's utt 1. */
+                /* Within utt 0, durt is monotonically increasing. */
                 break;
             }
             if (slot > max_slot) max_slot = slot;
@@ -229,17 +214,9 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Override durt_mean / durt_var with the engine's PRESELECT-TIME
-     * durt CART output captured by inner_scorer_durt_hook.js (plan 02-05
-     * D-17 Path R, sub-case DIFF-VALUES-SAME-TREE). cart_walks JSONL
-     * captures the engine's SYNTH-TIME durt CART output, which differs
-     * from the inner-scorer's preselect-time CART output for the same
-     * slot. Use preselect-time values for the inner-scorer D-cost path
-     * to close the silence-sentinel +2.4321 drift on UID 169578.
-     *
-     * For slots not present in inner_scorer_durt JSONL (e.g. older
-     * captures), cart_walks values are preserved as a fallback so the
-     * test still runs against historical traces. */
+    /* Override durt_mean / durt_var with the engine's PRESELECT-TIME durt
+     * CART output captured by inner_scorer_durt_hook.js (plan 02-05 D-17
+     * Path R, sub-case DIFF-VALUES-SAME-TREE). */
     {
         char isd_path[1024];
         snprintf(isd_path, sizeof isd_path, "%s/inner_scorer_durt/%s.jsonl",
@@ -274,15 +251,13 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Read voicing from join_consts in inner_scorer. join_consts is only
-     * captured once per session (typically in text_001's trace), so try
-     * text_001 first, then fall back to current text. */
+    /* Read voicing from join_consts in inner_scorer. */
     char join_path[1024];
     snprintf(join_path, sizeof join_path, "%s/inner_scorer/text_001.jsonl",
              argv[4]);
     char *jc_buf = NULL; size_t jc_n = 0;
     if (read_file(join_path, &jc_buf, &jc_n) != 0) {
-        jc_buf = buf; jc_n = buf_n;   /* fall back */
+        jc_buf = buf; jc_n = buf_n;
     }
     static uint32_t voicing[256];
     int voicing_n = 0;
@@ -322,7 +297,7 @@ int main(int argc, char **argv)
     /* For each inner_scorer event in utt 0, compute pre_dp for each
      * cand_totals entry and compare. */
     int n_total = 0, n_match = 0;
-    int n_close = 0;   /* within 1e-2 */
+    int n_close = 0;
     {
         const char *p = buf, *end = buf + buf_n;
         const char *ls, *le;
@@ -342,7 +317,6 @@ int main(int argc, char **argv)
             spfy_anchor_sp_target_t sp;
             for (int i = 0; i < 5; ++i) sp.sp[i] = (uint32_t)sp_arr[i];
 
-            /* Walk cand_totals: [[uid, cost], [uid, cost], ...] */
             const char *ct_p = find_lit(ls, le, "\"cand_totals\":[");
             if (!ct_p) continue;
             ct_p += strlen("\"cand_totals\":[");
@@ -351,13 +325,11 @@ int main(int argc, char **argv)
                 if (ct_p >= le || *ct_p == ']') break;
                 if (*ct_p != '[') { ++ct_p; continue; }
                 ++ct_p;
-                /* parse uid */
                 char *ep = NULL;
                 long long uid_v = strtoll(ct_p, &ep, 10);
                 if (ep == ct_p) break;
                 ct_p = ep;
                 while (ct_p < le && (*ct_p == ' ' || *ct_p == ',')) ++ct_p;
-                /* parse cost */
                 ep = NULL;
                 double cost_v = strtod(ct_p, &ep);
                 if (ep == ct_p) break;
@@ -365,7 +337,6 @@ int main(int argc, char **argv)
                 while (ct_p < le && *ct_p != ']') ++ct_p;
                 if (ct_p < le) ++ct_p;
 
-                /* Compute via spfy_hp_innerscorer. */
                 float my_cost = NAN;
                 if (spfy_hp_innerscorer(&av, &ctxs[slot], &sp,
                                           &carts[slot], (uint32_t)uid_v,

@@ -1,21 +1,4 @@
-/* spfy_anchor_replay -- M3.4r Phase B4.4 / M5 anchor scorer validation.
- *
- * Replays captured engine traces through spfy_anchor_score() and reports
- * top-N match rate against engine's chosen cands. Mirrors v7's main loop
- * (anchor_predp_v7.py) but uses the C implementation.
- *
- * Usage:
- *   spfy_anchor_replay <voice.vin> <voice.vcf> <hpclass.bin> <traces_dir>
- *
- * traces_dir must contain:
- *   anchor_score/text_*.jsonl
- *   viterbi_dp/text_*.jsonl
- *   prsl_slot/text_*.jsonl
- *   inner_scorer/text_*.jsonl
- *   cart_walks/text_*.jsonl
- *
- * Reports total slots / matches across the corpus.
- */
+/* spfy_anchor_replay -- M3.4r Phase B4.4 / M5 anchor scorer validation. */
 
 #include <spfy/spfy.h>
 #include "../usel/anchor_score.h"
@@ -32,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---------------- minimal JSONL field extractor ----------------- */
 
 static const char *find_lit(const char *p, const char *end, const char *lit)
 {
@@ -74,8 +56,7 @@ static int read_key_f64(const char *s, const char *e, const char *key,
     return 0;
 }
 
-/* Extract a JSON int array "key":[a,b,c,...] from a line. Writes up to
- * out_cap entries, returns count written. -1 on parse error. */
+/* Extract a JSON int array "key":[a,b,c,...] from a line. */
 static int read_key_int_array(const char *s, const char *e, const char *key,
                               int64_t *out, int out_cap)
 {
@@ -97,7 +78,6 @@ static int read_key_int_array(const char *s, const char *e, const char *key,
     return n;
 }
 
-/* ---------------- per-utt accumulators ----------------- */
 
 #define MAX_HP 256
 #define MAX_CANDS 200
@@ -117,26 +97,22 @@ typedef struct {
 } hp_cart_t;
 
 typedef struct {
-    /* Per HP slot indices (IS-slot idx). */
     hp_ctx_t   ctxs[MAX_HP];
     hp_sp_t    sps[MAX_HP];
     hp_cart_t  carts[MAX_HP];
-    /* Voicing array (per-hp_class). */
     int32_t    voicing[256];
     int        voicing_n;
-    /* Anchors: list of anchor_score events with first_hp/last_hp + uid. */
     struct {
         int32_t  type;
         int32_t  first_hp;
         int32_t  last_hp;
         int32_t  cand_uid;
         int32_t  cand_jk;
-        int32_t  final_n_cands;       /* used to disambiguate same (uid,jk) */
+        int32_t  final_n_cands;
         int64_t  syl_idx[MAX_HP];
         int      n_syl;
     } as[MAX_CANDS];
     int n_as;
-    /* Engine kept cands per anchor slot. Indexed by viterbi slot_idx. */
     struct {
         int      is_anchor;
         int32_t  uid;
@@ -167,7 +143,6 @@ static int read_file_lines(const char *path, char **out_buf, size_t *out_n)
     return 0;
 }
 
-/* Iterate JSONL lines. Returns 1 if line found, 0 at EOF. */
 static int next_line(const char **p, const char *end,
                      const char **line_start, const char **line_end)
 {
@@ -181,14 +156,12 @@ static int next_line(const char **p, const char *end,
     return 1;
 }
 
-/* Load a per-utt structure from the 5 trace files for one text_*.jsonl. */
 static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
                     per_utt_t *u)
 {
     memset(u, 0, sizeof *u);
     char path[1024];
 
-    /* anchor_score: list per anchor, with first_hp/last_hp/type/uid/jk/syl_idx. */
     snprintf(path, sizeof path, "%s/anchor_score/%s", traces_dir, fname);
     char *buf = NULL; size_t buf_n = 0;
     if (read_file_lines(path, &buf, &buf_n) == 0) {
@@ -224,22 +197,13 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
         }
         free(buf);
     }
-    /* anchor_score has no utt boundary; assume single-utt files. */
 
-    /* prsl_slot: per-HP ctx[5], grouped by slot=0 reset.
-     * Multi-utt files (e.g. text_001 has 2 viterbi calls) share one
-     * prsl_slot/inner_scorer/cart_walks file with slot=0 marking utt
-     * boundaries. We must take ONLY events from the requested utt_idx,
-     * else later utts overwrite earlier ones with conflicting ctx.
-     * (Bug discovered while porting v7 anchor scorer to C: text_001 utt0
-     * slot 2 ctx=[64,64,38,...] vs utt1's [64,64,82,...]; using utt1's
-     * value when scoring utt0's slot 8 fails the hp_class boundary check
-     * for the engine-chosen cand.) */
+    /* prsl_slot: per-HP ctx[5], grouped by slot=0 reset. */
     snprintf(path, sizeof path, "%s/prsl_slot/%s", traces_dir, fname);
     if (read_file_lines(path, &buf, &buf_n) == 0) {
         const char *p = buf, *end = buf + buf_n;
         const char *ls, *le;
-        int cur_utt = -1;        /* incremented to 0 on first slot==0 */
+        int cur_utt = -1;
         while (next_line(&p, end, &ls, &le)) {
             if (!find_lit(ls, le, "\"type\":\"prsl_slot\"")) continue;
             int64_t slot_v;
@@ -256,8 +220,7 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
         free(buf);
     }
 
-    /* inner_scorer: per-HP sp_target [5]; voicing from join_consts.
-     * Per-utt grouped by slot=0 reset (same as prsl_slot). */
+    /* inner_scorer: per-HP sp_target [5]; voicing from join_consts. */
     snprintf(path, sizeof path, "%s/inner_scorer/%s", traces_dir, fname);
     if (read_file_lines(path, &buf, &buf_n) == 0) {
         const char *p = buf, *end = buf + buf_n;
@@ -265,7 +228,6 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
         int cur_utt = -1;
         while (next_line(&p, end, &ls, &le)) {
             if (find_lit(ls, le, "\"type\":\"join_consts\"")) {
-                /* Look for "by_hp_class":[...]. */
                 const char *bh = find_lit(ls, le,
                     "\"by_hp_class\":[");
                 if (bh) {
@@ -282,7 +244,6 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
                         arr[n++] = v;
                         q = ep;
                     }
-                    /* voicing array typically n_labels*2 entries; rest may be junk. */
                     int keep = (n < 256) ? n : 256;
                     for (int i = 0; i < keep; ++i)
                         u->voicing[i] = (int32_t)arr[i];
@@ -306,8 +267,7 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
         free(buf);
     }
 
-    /* cart_walks: per-HP durt + f0tr leaves.
-     * Per-utt grouped by slot=0 reset. */
+    /* cart_walks: per-HP durt + f0tr leaves. */
     snprintf(path, sizeof path, "%s/cart_walks/%s", traces_dir, fname);
     if (read_file_lines(path, &buf, &buf_n) == 0) {
         const char *p = buf, *end = buf + buf_n;
@@ -339,9 +299,7 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
         free(buf);
     }
 
-    /* viterbi_dp: per-anchor-slot kept cands list.
-     * Multi-utt files have one viterbi_enter per utt; pick the one
-     * matching utt_idx. */
+    /* viterbi_dp: per-anchor-slot kept cands list. */
     snprintf(path, sizeof path, "%s/viterbi_dp/%s", traces_dir, fname);
     if (read_file_lines(path, &buf, &buf_n) == 0) {
         const char *p = buf, *end = buf + buf_n;
@@ -351,7 +309,6 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
             if (!find_lit(ls, le, "\"stage\":\"enter\"")) continue;
             ++enter_seen;
             if (enter_seen != utt_idx) continue;
-            /* Walk through "slots":[...] manually. */
             const char *slots_start = find_lit(ls, le, "\"slots\":[");
             if (!slots_start) continue;
             const char *q = slots_start + strlen("\"slots\":[");
@@ -359,7 +316,6 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
             int depth = 1;
             while (q < le && depth > 0) {
                 if (*q == '{') {
-                    /* Slot opener -- find matching close. */
                     const char *slot_open = q;
                     int sd = 1;
                     ++q;
@@ -368,9 +324,7 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
                         else if (*q == '}') --sd;
                         ++q;
                     }
-                    /* Slot content: slot_open..q. */
                     if (slot_idx >= 1024) { ++slot_idx; continue; }
-                    /* Look for cands array. */
                     const char *cb = find_lit(slot_open, q, "\"cands\":[");
                     if (!cb) { u->vit[slot_idx].n_cands = 0; ++slot_idx; continue; }
                     const char *r = cb + strlen("\"cands\":[");
@@ -412,7 +366,7 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
                 }
             }
             u->n_vit = slot_idx;
-            break;   /* found the requested utt's enter; done */
+            break;
         }
         free(buf);
     }
@@ -420,7 +374,6 @@ static int load_utt(const char *traces_dir, const char *fname, int utt_idx,
     return 0;
 }
 
-/* Count the number of "stage":"enter" events in a viterbi_dp file. */
 static int count_viterbi_utts(const char *traces_dir, const char *fname)
 {
     char path[1024];
@@ -437,17 +390,14 @@ static int count_viterbi_utts(const char *traces_dir, const char *fname)
     return n;
 }
 
-/* Find the cklx posting list for a given (ss, se) anchor. We search both
- * groups for the matching span. Returns the (group, key index, n_postings,
- * postings array). */
+/* Find the cklx posting list for a given (ss, se) anchor. */
 static int find_cklx_postings(const spfy_chunk_tables_t *ct,
                                int anchor_type,
                                int32_t ss, int32_t se, int *out_grp,
                                const uint32_t **out_postings,
                                uint32_t *out_n)
 {
-    /* type=2 (Syl) -> _SYL_ group (idx 1).
-     * type=4 (Word) -> _WORD_ group (idx 0). */
+    /* type=2 (Syl) -> _SYL_ group (idx 1). */
     int g = (anchor_type == 2) ? SPFY_CHUNK_GROUP_SYL : SPFY_CHUNK_GROUP_WORD;
     const spfy_ckls_group_t *cg = &ct->ckls[g];
     const spfy_cklx_group_t *xg = &ct->cklx[g];
@@ -468,7 +418,6 @@ static int find_cklx_postings(const spfy_chunk_tables_t *ct,
     return 0;
 }
 
-/* List directory entries matching prefix "text_" and ending in ".jsonl". */
 #include <dirent.h>
 static int list_text_files(const char *dir, char ***out, int *out_n)
 {
@@ -489,7 +438,6 @@ static int list_text_files(const char *dir, char ***out, int *out_n)
         list[n++] = strdup(nm);
     }
     closedir(d);
-    /* Sort alphabetically. */
     for (int i = 0; i < n - 1; ++i)
         for (int j = i + 1; j < n; ++j)
             if (strcmp(list[i], list[j]) > 0) {
@@ -500,7 +448,6 @@ static int list_text_files(const char *dir, char ***out, int *out_n)
     return 0;
 }
 
-/* ---------------- main ----------------- */
 
 int main(int argc, char **argv)
 {
@@ -559,7 +506,6 @@ int main(int argc, char **argv)
     av.hpclass_n = hpclass_n;
     spfy_anchor_voice_set_default_weights(&av);
 
-    /* Iterate corpus. */
     char **files = NULL;
     int n_files = 0;
     char as_dir[1024];
@@ -581,8 +527,8 @@ int main(int argc, char **argv)
         if (load_utt(traces_dir, files[fi], utt_iter, &u) != 0) continue;
 
         /* For each viterbi anchor slot (uid != jk), look up the matching
-         * anchor_score entry by (uid, jk), pull first_hp/last_hp,
-         * find cklx postings, run anchor_score, compare top-N. */
+         * anchor_score entry by (uid, jk), pull first_hp/last_hp, find cklx
+         * postings, run anchor_score, compare top-N. */
         av.voicing = (const uint32_t *)u.voicing;
         av.voicing_n = (uint32_t)u.voicing_n;
 
@@ -591,14 +537,7 @@ int main(int argc, char **argv)
             int32_t want_uid = u.vit[vi].uid;
             int32_t want_jk  = u.vit[vi].jk;
 
-            /* Find anchor_score entry matching (uid, jk).
-             *
-             * The same (uid, jk) can be first_cand for BOTH a SYL anchor
-             * and a WORD anchor (e.g. "Eight." text_023). In that case,
-             * pick the as_ev whose final_n_cands matches this Viterbi
-             * slot's n_cands. v7 hits this on 1/179 slots; without it the
-             * scorer picks the wrong anchor type and gets the slot wrong.
-             * See project_b44_anchor_gap.md. */
+            /* Find anchor_score entry matching (uid, jk). */
             int as_idx = -1;
             int n_cands_here = u.vit[vi].n_cands;
             for (int j = 0; j < u.n_as; ++j) {
@@ -628,7 +567,6 @@ int main(int argc, char **argv)
                 continue;
             if (!u.ctxs[first_hp].have || !u.ctxs[last_hp].have) continue;
 
-            /* Build per-HP arrays for [first_hp..last_hp]. */
             int n_hp = last_hp - first_hp + 1;
             spfy_anchor_cart_t *cart_arr = (spfy_anchor_cart_t *)
                 calloc((size_t)n_hp, sizeof *cart_arr);
@@ -660,16 +598,13 @@ int main(int argc, char **argv)
             in.sp_per_hp = sp_arr;
             /* Pass syl_arr indexed [first_hp..last_hp] -- but the C API
              * expects per-HP arrays, with syl_idx_per_hp[target_idx] where
-             * target_idx is into hp_seq. Here hp_seq = [first_hp..last_hp]
-             * so we need syl_arr indexed 0..n_hp-1. We built it that way. */
+             * target_idx is into hp_seq. */
             in.syl_idx_per_hp = syl_arr;
 
-            /* Find cklx postings for this anchor. */
             int grp = -1;
             const uint32_t *postings = NULL;
             uint32_t n_postings = 0;
             if (getenv("SPFY_DEBUG_POSTINGS") && first_hp == 42) {
-                /* Dump postings for v_er anchor (slot 59 type=2). */
                 int g = SPFY_CHUNK_GROUP_SYL;
                 const spfy_ckls_group_t *cg = &ct.ckls[g];
                 for (uint32_t pi = 0; pi < cg->n_postings; ++pi) {
@@ -716,7 +651,6 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            /* Run anchor_score. */
             spfy_anchor_cand_t out_cands[200];
             uint32_t out_n = 0;
             if (spfy_anchor_score(&av, &in, postings, n_postings,
@@ -726,7 +660,6 @@ int main(int argc, char **argv)
                 continue;
             }
 
-            /* Compare top-N (N = engine kept count) by membership. */
             int n_actual = u.vit[vi].n_cands;
             int matched_all = 1;
             for (int j = 0; j < n_actual; ++j) {
@@ -759,7 +692,7 @@ int main(int argc, char **argv)
 
             free(cart_arr); free(sp_arr); free(syl_arr);
         }
-      }   /* end per-utt loop */
+      }
 
         free(files[fi]);
     }

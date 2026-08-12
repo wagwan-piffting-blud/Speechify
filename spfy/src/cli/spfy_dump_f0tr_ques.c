@@ -1,6 +1,5 @@
-/* spfy_dump_f0tr_ques — quick diagnostic dumping the f0tr CART's
- * question types and value-sets. Used to identify which q_types our
- * cart_feat callback needs to expose. */
+/* spfy_dump_f0tr_ques — quick diagnostic dumping the f0tr CART's question
+ * types and value-sets. */
 #include "../../include/spfy/spfy.h"
 #include "../cart/cart.h"
 #include "../voice/vin.h"
@@ -20,13 +19,12 @@ int main(int argc, char **argv) {
     }
     printf("f0tr: %u trees, %u questions\n", f0tr.n_trees, f0tr.n_ques);
 
-    /* Histogram of q_types referenced by any branch node in any tree. */
     uint32_t qt_count[256] = {0};
     for (uint32_t t = 0; t < f0tr.n_trees; ++t) {
         const spfy_cart_tree_t *tr = &f0tr.trees[t];
         for (uint32_t i = 0; i < tr->n_nodes; ++i) {
             const spfy_cart_node_t *n = &tr->nodes[i];
-            if (n->yes_child < 0) continue;     /* leaf */
+            if (n->yes_child < 0) continue;
             if (n->q_index >= f0tr.n_ques) continue;
             uint8_t qt = (uint8_t)f0tr.ques[n->q_index].type;
             qt_count[qt]++;
@@ -37,7 +35,6 @@ int main(int argc, char **argv) {
         if (qt_count[q] > 0)
             printf("  q_type %d: %u branches\n", q, qt_count[q]);
 
-    /* For each unique q_type, dump first ques's values to give a flavor. */
     for (int qt = 1; qt < 256; ++qt) {
         if (qt_count[qt] == 0) continue;
         for (uint32_t q = 0; q < f0tr.n_ques; ++q) {

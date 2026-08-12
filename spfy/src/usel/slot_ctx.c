@@ -1,28 +1,15 @@
-/* Phase B4 step 1: derive engine `slice.ctx[5]` per halfphone-leaf
- * slot from the FE-emitted segment chain. See build_graph.h for
- * the encoding overview.
- *
- * The Tom voice's phoneme -> label_idx mapping was extracted
- * empirically by joining captured fe_tree segment names with
- * captured prsl_slot.ctx[2] values across the corpus. Labels 13 and
- * 30 were added 2026-05-13 after the audit corpus expanded from
- * 32 -> 225 phrases surfaced `el` and `oy` (project_pool_uid0_
- * 2026_05_13 / 5 of the 6 pool_uid0 cases). Label 45 (`zh`) added
- * 2026-05-13 evening after master-capture v2 surfaced 4 ctx_center
- * mismatches in mp_031 "zhat" + nat_036 "usual". Labels 42 and 46
- * still unmapped -- no audit phrase exercises them; if a future FE
- * emit fails the lookup, extend by capturing that phrase's fe_tree +
- * prsl_slot ctx[2] and joining.
- */
+/* Phase B4 step 1: derive engine `slice.ctx[5]` per halfphone-leaf slot
+ * from the FE-emitted segment chain. */
 
 #include "build_graph.h"
+#include "syl_span.h"
+#include "env.h"
 
 #include "../../include/spfy/spfy.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
 void spfy_slice_ctx_table_free(spfy_slice_ctx_table_t *t)
 {
     if (!t) return;
@@ -31,28 +18,23 @@ void spfy_slice_ctx_table_free(spfy_slice_ctx_table_t *t)
     memset(t, 0, sizeof *t);
 }
 
-/* Tom phoneme -> label idx. Empirically derived from the captured
- * 32-entry oracle corpus. The 47-entry table includes 5 placeholder
- * gaps (UINT32_MAX) for phonemes the corpus didn't exercise. */
+/* Tom phoneme -> label idx. */
 typedef struct { const char *name; uint32_t label; } spfy_phone_t;
 static const spfy_phone_t TOM_PHONES[] = {
     { "aa",  0 }, { "ae",  1 }, { "ah",  2 }, { "ao",  3 },
     { "aw",  4 }, { "ax",  5 }, { "ay",  6 }, { "b",   7 },
     { "ch",  8 }, { "d",   9 }, { "dh", 10 }, { "dx", 11 },
-    { "eh", 12 }, { "el", 13 },     /* el (syllabic L) -- added 2026-05-13 */
+    { "eh", 12 }, { "el", 13 },
     { "en", 14 }, { "er", 15 }, { "ey", 16 }, { "f",  17 },
     { "g",  18 }, { "hh", 19 }, { "ih", 20 }, { "ix", 21 },
     { "iy", 22 }, { "jh", 23 }, { "k",  24 }, { "l",  25 },
     { "m",  26 }, { "n",  27 }, { "ng", 28 }, { "ow", 29 },
-    { "oy", 30 },                   /* oy diphthong -- added 2026-05-13 */
+    { "oy", 30 },
     { "p",  31 }, { "pau",32 }, { "r",  33 }, { "s",  34 },
     { "sh", 35 }, { "t",  36 }, { "th", 37 }, { "uh", 38 },
     { "uw", 39 }, { "v",  40 }, { "w",  41 },
-    /* 42 unmapped */
     { "y",  43 }, { "z",  44 },
-    { "zh", 45 },                   /* zh -- added 2026-05-13 evening
-                                       (mp_031 "zhat", nat_036 "usual") */
-    /* 46 unmapped */
+    { "zh", 45 },                   /* zh -- added 2026-05-13 evening (mp_031 "zhat", nat_036 "usual") */
 };
 
 uint32_t spfy_tom_phone_to_label(const char *name)
@@ -64,16 +46,11 @@ uint32_t spfy_tom_phone_to_label(const char *name)
     return UINT32_MAX;
 }
 
-/* Tom's pau sits at feat index 32, so his silence hp_classes are 64/65.
- * These are the fallback ONLY for the NULL-phone_names (Tom) path --
- * every other voice puts pau elsewhere (felix 35 -> 70/71, javier 24 ->
- * 48/49), so the real sentinel is computed per-voice below. */
+/* Tom's pau sits at feat index 32, so his silence hp_classes are 64/65. */
 #define TOM_HP_PAU_L 64u
 #define TOM_HP_PAU_R 65u
 
-/* Phone symbol -> engine phone id, against the voice's own inventory.
- * Index in feat["name"] order IS the id. Falls back to the Tom table
- * when the caller supplied no inventory. UINT32_MAX if unknown. */
+/* Phone symbol -> engine phone id, against the voice's own inventory. */
 static uint32_t ctx_phone_to_label(char *const *phone_names,
                                    uint32_t     n_phones,
                                    const char  *name)
@@ -112,25 +89,11 @@ int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
         return SPFY_E_NOMEM;
     }
 
-    /* Pre-compute hp_class per phoneme position k for each side.
-     * Out-of-range = silence sentinel. */
+    /* Pre-compute hp_class per phoneme position k for each side. */
     uint32_t n_positions = n_segments;
 
-    /* Pass 1: for each halfphone-leaf slot, identify which (segment,
-     * side) it represents. The slot's `fe_shared` is the segment's
-     * shared id; combined with `halfphone_side` we know exactly which
-     * (k, side) it is. We also need k -- enumerate halfphones in
-     * post-order: the FIRST halfphone-leaf in post-order IS the
-     * leftmost segment's left half, etc.
-     *
-     * Since BuildGraph allocates HPs in (word, syl, seg, L, seg, R)
-     * order with syl-then-segments ordering, the post-order traversal
-     * visits halfphones in left-to-right utterance order:
-     *   slot[0] = seg 0 L, slot[1] = seg 0 R,
-     *   slot[lowest_hp_in_word2] = seg 1 L (in order they appear in
-     *   syl_segs), etc.
-     * So we can just walk halfphone-kind slots in post-order; each
-     * pair (i, i+1) corresponds to segment i's L and R halfphones. */
+    /* Pass 1: for each halfphone-leaf slot, identify which (segment, side)
+     * it represents. */
 
     uint32_t k = 0;
     for (uint32_t s = 0; s < tree->n_slots && k < n_positions * 2; ++s) {
@@ -141,11 +104,9 @@ int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
         uint32_t label = ctx_phone_to_label(phone_names, n_phones,
                                             fe_segments_in_order[pos]);
         if (label == UINT32_MAX) {
-            /* Unknown phoneme -- mark this slot as not having ctx. */
             ++k;
             continue;
         }
-        /* ctx[i] = phoneme at (pos + (i-2)), same side, sentinel OOR. */
         uint32_t (*ctx5)[5] = &out->ctx[s];
         for (int i = 0; i < 5; ++i) {
             int32_t off = (int32_t)pos + (i - 2);
@@ -155,7 +116,6 @@ int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
                 uint32_t l2 = ctx_phone_to_label(phone_names, n_phones,
                                                  fe_segments_in_order[off]);
                 if (l2 == UINT32_MAX) {
-                    /* Neighbor unknown -- best-effort: silence sentinel. */
                     (*ctx5)[i] = side ? hp_pau_r : hp_pau_l;
                 } else {
                     (*ctx5)[i] = l2 * 2u + side;
@@ -168,12 +128,9 @@ int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
     return SPFY_OK;
 }
 
-/* --------------------------------------------------------------------- */
-/* CART feature kernels (q_type 3, 4, 5)                                 */
-/* --------------------------------------------------------------------- */
 /* Decoded + validated bit-exact (822/822 halfphone slots over 30-text
  * corpus) by `c:/tmp/verify_q345_kernels.py` against the captured
- * `cart_walker_args` trace. See build_graph.h for the q_type ABI. */
+ * `cart_walker_args` trace. */
 
 uint32_t spfy_cart_feature_q3(uint32_t       ctx1,
                               const uint8_t *s_ctx_remap,
@@ -202,29 +159,16 @@ int spfy_derive_q5_table(const spfy_slot_tree_t *tree,
     if (!tree || !q5_per_slot || !has_q5) return SPFY_E_INVAL;
     if (n_words != tree->n_word) return SPFY_E_FORMAT;
 
-    /* Init per-slot defaults: 0 / has=0. */
     for (uint32_t s = 0; s < tree->n_slots; ++s) {
         q5_per_slot[s] = 0;
         has_q5[s]      = 0;
     }
 
     /* Walk the slot tree top-down: phrase root -> word -> syllable ->
-     * halfphone leaves. For each syllable, count its halfphone children
-     * and assign q5 = that count to all of them, EXCEPT when the
-     * containing word's name is "_NULL_" (boundary silence) -- then
-     * q5 = 1 for all halfphones under that word's syllable.
-     *
-     * The slot tree's `slots[]` is in post-order index, with parent
-     * pointers. We iterate halfphone-leaf slots and walk up parent
-     * links to find {syllable, word}.
-     */
+     * halfphone leaves. */
 
-    /* First, build a word_idx-by-post-order map by enumerating word
-     * slots in the tree in their natural order. The fe_utt's
-     * word_shareds[] is in FE relation order (head to tail), and
-     * spfy_build_graph allocates word slots in that same order under
-     * the phrase root. So word slot k corresponds to FE word index k.
-     */
+    /* First, build a word_idx-by-post-order map by enumerating word slots
+     * in the tree in their natural order. */
     uint32_t *word_slot_idx = (uint32_t *)calloc(tree->n_word,
                                                   sizeof *word_slot_idx);
     if (!word_slot_idx) return SPFY_E_NOMEM;
@@ -243,12 +187,11 @@ int spfy_derive_q5_table(const spfy_slot_tree_t *tree,
         return SPFY_E_FORMAT;
     }
 
-    /* Reverse map: slot index -> word_idx (for halfphones, via parent
-     * walk up to find the WORD ancestor). */
+    /* Reverse map: slot index -> word_idx (for halfphones, via parent walk
+     * up to find the WORD ancestor). */
     for (uint32_t s = 0; s < tree->n_slots; ++s) {
         if (tree->slots[s].kind != SPFY_SK_HALFPHONE) continue;
 
-        /* Walk up: halfphone -> syllable -> word. */
         uint32_t syl_idx = tree->slots[s].parent_idx;
         if (syl_idx == UINT32_MAX || syl_idx >= tree->n_slots) continue;
         if (tree->slots[syl_idx].kind != SPFY_SK_SYLLABLE) continue;
@@ -256,7 +199,6 @@ int spfy_derive_q5_table(const spfy_slot_tree_t *tree,
         if (word_idx == UINT32_MAX || word_idx >= tree->n_slots) continue;
         if (tree->slots[word_idx].kind != SPFY_SK_WORD) continue;
 
-        /* Find which FE word this slot corresponds to. */
         uint32_t fe_word_idx = UINT32_MAX;
         for (uint32_t k = 0; k < tree->n_word; ++k) {
             if (word_slot_idx[k] == word_idx) { fe_word_idx = k; break; }
@@ -269,7 +211,7 @@ int spfy_derive_q5_table(const spfy_slot_tree_t *tree,
         }
 
         if (wname && strcmp(wname, "_NULL_") == 0) {
-            q5_per_slot[s] = 1u;       /* engine init default kept */
+            q5_per_slot[s] = 1u;
         } else {
             /* Count halfphones in this syllable. */
             q5_per_slot[s] = tree->slots[syl_idx].n_children;
@@ -281,9 +223,6 @@ int spfy_derive_q5_table(const spfy_slot_tree_t *tree,
     return SPFY_OK;
 }
 
-/* --------------------------------------------------------------------- */
-/* SP_target populator (workspace+0x28..0x3c)                             */
-/* --------------------------------------------------------------------- */
 /*
  * Port of `c:/tmp/sp_target_full.py` populator chain. Validated bit-
  * exact 822/822 against captured `inner_scorer.sp_target` on the
@@ -309,12 +248,11 @@ void spfy_sp_target_table_free(spfy_sp_target_table_t *t)
     memset(t, 0, sizeof *t);
 }
 
-/* Per-slot scratch state used by the populator. */
 typedef struct {
-    int32_t  syl_idx;     /* -1 for boundary _NULL_ slots */
-    int32_t  word_idx;    /* -1 for boundary _NULL_ slots */
-    uint32_t accent;      /* 0 = none */
-    int32_t  stress;      /* 0 default */
+    int32_t  syl_idx;
+    int32_t  word_idx;
+    uint32_t accent;
+    int32_t  stress;
 } sp_slot_state_t;
 
 static void run_pass_a(const sp_slot_state_t *st, uint32_t n,
@@ -322,13 +260,11 @@ static void run_pass_a(const sp_slot_state_t *st, uint32_t n,
                        int flag88,
                        uint32_t *sp0, uint32_t *sp1)
 {
-    /* Find last_syl: highest syl_idx > 0 from the tail. */
     int32_t last_syl = 0;
     for (int32_t i = (int32_t)n - 1; i >= 0; --i) {
         if (st[i].syl_idx > 0) { last_syl = st[i].syl_idx; break; }
     }
 
-    /* sp0 (sylInPhrase) */
     for (uint32_t i = 0; i < n; ++i) {
         int32_t s = st[i].syl_idx;
         if (s == 0) {
@@ -340,12 +276,10 @@ static void run_pass_a(const sp_slot_state_t *st, uint32_t n,
         }
     }
 
-    /* sp1 (sylType): default by stress; refined for accent slots. */
     for (uint32_t i = 0; i < n; ++i) {
         sp1[i] = (st[i].stress < 1) ? 1u : 2u;
         if (st[i].accent == 0) continue;
 
-        /* Backward walk over [0..i-1]. */
         int b_var3 = 1;
         for (int32_t j = (int32_t)i - 1; j >= 0; --j) {
             if (st[j].syl_idx != st[i].syl_idx && st[j].accent != 0) {
@@ -370,7 +304,6 @@ static void run_pass_a(const sp_slot_state_t *st, uint32_t n,
 
         if (mismatch_fwd) {
             if (!b_var3) sp1[i] = 3u;
-            /* else keep sp1 (already 4 or 5) */
         } else {
             if (local_10 != 0)            sp1[i] = 7u;
             else if (sp1[i] != 4u)        sp1[i] = 6u;
@@ -383,7 +316,6 @@ static void run_pass_b(const sp_slot_state_t *st, uint32_t n,
                        int voice_d4_flag,
                        uint32_t *sp0, uint32_t *sp2, uint32_t *sp3)
 {
-    /* Init sp2=1, sp3=4. */
     for (uint32_t i = 0; i < n; ++i) { sp2[i] = 1u; sp3[i] = 4u; }
 
     uint32_t i = 0;
@@ -391,7 +323,6 @@ static void run_pass_b(const sp_slot_state_t *st, uint32_t n,
         int32_t word_idx = st[i].word_idx;
         if (word_idx < 0) { ++i; continue; }
 
-        /* Word group [start..end]. */
         uint32_t start = i;
         while (start > 0 && st[start - 1].word_idx == word_idx) --start;
         uint32_t end = i;
@@ -400,7 +331,6 @@ static void run_pass_b(const sp_slot_state_t *st, uint32_t n,
         int32_t first_syl = st[start].syl_idx;
         int32_t last_syl  = st[end].syl_idx;
 
-        /* Refine sp0 (currently 2) -> 6/7/8 by syl position in word. */
         for (uint32_t j = start; j <= end; ++j) {
             if (sp0[j] == 2u) {
                 sp0[j] = 7u;
@@ -409,7 +339,6 @@ static void run_pass_b(const sp_slot_state_t *st, uint32_t n,
             }
         }
 
-        /* wordInPhrase */
         uint32_t wp = 2u;
         if (first_syl == 0) {
             if (sentence_idx != 0)      wp = 1u;
@@ -428,7 +357,6 @@ static void run_pass_b(const sp_slot_state_t *st, uint32_t n,
         }
         for (uint32_t j = start; j <= end; ++j) sp3[j] = wp;
 
-        /* sylInWord: relative to first accent-bearing syl in word. */
         int32_t accent_anchor = -1;
         for (uint32_t j = start; j <= end; ++j) {
             if (st[j].accent != 0) { accent_anchor = st[j].syl_idx; break; }
@@ -450,7 +378,7 @@ static void run_pass_b(const sp_slot_state_t *st, uint32_t n,
 static void run_pass_c(const sp_slot_state_t *st, uint32_t n,
                        uint32_t *sp4)
 {
-    for (uint32_t i = 0; i < n; ++i) sp4[i] = 3u;     /* init default */
+    for (uint32_t i = 0; i < n; ++i) sp4[i] = 3u;
 
     for (uint32_t i = 0; i < n; ++i) {
         int32_t cw = st[i].word_idx;
@@ -479,7 +407,6 @@ static void run_pass_c(const sp_slot_state_t *st, uint32_t n,
             }
             if (cw < nw || nw < 0)             sp4[i] = 5u;
             else if (cs < nsy)                  sp4[i] = 4u;
-            /* else stays at 3 */
         }
     }
 }
@@ -502,17 +429,11 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
     }
 
     /* Pass-state operates on a HALFPHONE-ONLY flat array (matching the
-     * Python reference's emission order). The slot tree's post-order
-     * interleaves non-halfphone slots between halfphones (e.g.
-     * HP-L,HP-R,SYL,HP-L,HP-R,...), which would break pass B's word-
-     * group walk and pass C's same-side neighbor lookup if we iterated
-     * the full slot range. So we collect halfphone-leaf slots into a
-     * flat array, run all 3 passes on it, then write back to out->sp[]
-     * indexed by the tree slot. */
+     * Python reference's emission order). */
     sp_slot_state_t *st = (sp_slot_state_t *)calloc(tree->n_halfphone,
                                                     sizeof *st);
-    /* hp_idx_to_tree_slot[hp] = tree slot index of the hp-th halfphone
-     * leaf in post-order. */
+    /* hp_idx_to_tree_slot[hp] = tree slot index of the hp-th halfphone leaf
+     * in post-order. */
     uint32_t *hp_to_slot = (uint32_t *)calloc(tree->n_halfphone,
                                               sizeof *hp_to_slot);
     if (!st || !hp_to_slot) {
@@ -521,8 +442,7 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
         return SPFY_E_NOMEM;
     }
 
-    /* Index each WORD slot to its FE word index by post-order. Word
-     * slots are emitted in word-order under the phrase root. */
+    /* Index each WORD slot to its FE word index by post-order. */
     uint32_t *word_slot_to_fe = (uint32_t *)calloc(tree->n_slots,
                                                    sizeof *word_slot_to_fe);
     if (!word_slot_to_fe) { free(st); spfy_sp_target_table_free(out);
@@ -542,27 +462,22 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
         }
     }
 
-    /* Index each SYLLABLE slot to its global FE syllable index. Syl
-     * slots emitted in word-order, then within each word in
-     * daughter-chain order. */
+    /* Index each SYLLABLE slot to its global FE syllable record. */
     uint32_t *syl_slot_to_fe = (uint32_t *)calloc(tree->n_slots,
                                                   sizeof *syl_slot_to_fe);
     if (!syl_slot_to_fe) { free(word_slot_to_fe); free(st);
                            spfy_sp_target_table_free(out);
                            return SPFY_E_NOMEM; }
     for (uint32_t s = 0; s < tree->n_slots; ++s) syl_slot_to_fe[s] = UINT32_MAX;
-    {
-        uint32_t fe_sidx = 0;
-        for (uint32_t s = 0; s < tree->n_slots; ++s) {
-            if (tree->slots[s].kind == SPFY_SK_SYLLABLE) {
-                if (fe_sidx >= utt->n_syls) {
-                    free(syl_slot_to_fe); free(word_slot_to_fe); free(st);
-                    spfy_sp_target_table_free(out);
-                    return SPFY_E_FORMAT;
-                }
-                syl_slot_to_fe[s] = fe_sidx++;
-            }
+    for (uint32_t s = 0; s < tree->n_slots; ++s) {
+        if (tree->slots[s].kind != SPFY_SK_SYLLABLE) continue;
+        uint32_t shared = tree->slots[s].fe_shared;
+        if (shared == 0 || (shared - 1u) >= utt->n_syls) {
+            free(syl_slot_to_fe); free(word_slot_to_fe); free(st);
+            spfy_sp_target_table_free(out);
+            return SPFY_E_FORMAT;
         }
+        syl_slot_to_fe[s] = shared - 1u;
     }
 
     /* Counter mirroring FUN_08e8cbb0: increments syl/word indexes only
@@ -587,7 +502,11 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
                           strcmp(utt->word_names[w], "_NULL_") == 0;
             for (uint32_t s = 0; s < utt->word_n_syls[w]; ++s) {
                 if (is_null) {
-                    /* leave fe_syl_to_engine_syl[global_syl] = -1 */
+                } else if (spfy_syl_continues_prev(utt, global_syl)
+                           && syl_counter > 0) {
+                    /* A continuation is not a syllable of its own: it
+                     * shares the ordinal of the one it completes. */
+                    fe_syl_to_engine_syl[global_syl] = syl_counter - 1;
                 } else {
                     fe_syl_to_engine_syl[global_syl] = syl_counter++;
                 }
@@ -629,13 +548,14 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
                 ++hp; continue;
             }
 
+            /* No re-parenting here. */
             st[hp].word_idx = fe_word_to_engine_word[fe_widx];
             st[hp].syl_idx  = fe_syl_to_engine_syl[fe_sidx];
-            if (utt->syl_accent && fe_sidx < utt->n_syls) {
+            if (utt->syl_accent) {
                 uint32_t a = utt->syl_accent[fe_sidx];
                 if (st[hp].word_idx >= 0) st[hp].accent = a;
             }
-            if (utt->syl_stress && fe_sidx < utt->n_syls) {
+            if (utt->syl_stress) {
                 int32_t v = utt->syl_stress[fe_sidx];
                 if (st[hp].word_idx >= 0 && v > 0) st[hp].stress = v;
             }
@@ -648,10 +568,17 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
     free(syl_slot_to_fe);
     free(word_slot_to_fe);
 
-    /* Phrase terminator decides local_10. */
+    /* Phrase TYPE decides local_10 -- the FE's `#{X` token, not the text's
+     * punctuation. */
     char term = utt->phrase_term;
     int local_10 = (term == '.' || term == '?' || term == '!') ? 1 : 0;
-    int flag88 = 0;   /* config+0x88; 0 for Tom */
+    /* config+0x88; 0 for Tom, and Tom is the only voice this was ever read
+     * against. */
+    int flag88 = 0;
+    {
+        const char *e = spfy_env("SPFY_SP_FLAG88");
+        if (e) flag88 = atoi(e);
+    }
 
     uint32_t *sp0 = (uint32_t *)calloc(tree->n_halfphone, sizeof(uint32_t));
     uint32_t *sp1 = (uint32_t *)calloc(tree->n_halfphone, sizeof(uint32_t));
@@ -665,7 +592,7 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
         return SPFY_E_NOMEM;
     }
 
-    if (getenv("SPFY_SP_STATE_DUMP")) {
+    if (spfy_env("SPFY_SP_STATE_DUMP")) {
         for (uint32_t hp = 0; hp < tree->n_halfphone; ++hp) {
             fprintf(stderr,
                 "{\"sp_state\":1,\"hp\":%u,\"tree_slot\":%u,"
@@ -682,7 +609,6 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
                voice_d4_flag, sp0, sp2, sp3);
     run_pass_c(st, tree->n_halfphone, sp4);
 
-    /* Emit by mapping hp index back to the tree slot index. */
     for (uint32_t hp = 0; hp < tree->n_halfphone; ++hp) {
         uint32_t s = hp_to_slot[hp];
         out->sp[s][0] = sp0[hp];

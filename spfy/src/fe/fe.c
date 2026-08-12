@@ -1,22 +1,4 @@
-/* spfy_fe top-level orchestrator (Path B skeleton).
- *
- * Stages currently land here as TODO stubs that will be filled in over
- * the next milestones:
- *
- *   F2.1  Text normalisation (numbers, abbreviations, units, TLDs)
- *   F2.2  Tokenisation + word-boundary detection
- *   F2.3  Morphological analysis (using rootdict / worddict)
- *   F2.4  Lexical stress prediction (using stress tables)
- *   F2.5  Letter-to-phoneme rules (using registry-B LTS tables)
- *   F2.6  Syllabification + intonation
- *   F2.7  Halfphone slot generation (per-slot ctx[5] + sp[5])
- *   F2.8  Prosody-hint propagation -> emphasis_level / pitch / rate
- *   F2.9  SPR escape-code emission for engine downstream prosody
- *
- * For now the public API loads resources, validates them, and returns
- * an empty utterance. This lets us wire spfy_synth_replay against the
- * FE iteratively as stages come online.
- */
+/* spfy_fe top-level orchestrator (Path B skeleton). */
 
 #include "fe.h"
 #include "stage_textnorm.h"
@@ -29,8 +11,8 @@
 struct spfy_fe_s {
     spfy_fe_vocab_t  vocab;
     spfy_fe_tables_t tables;
-    spfy_vcf_t       voice_vcf;            /* zeroed = no voice loaded */
-    spfy_phoneset_t  phoneset;             /* n_phones=0 = no phoneset */
+    spfy_vcf_t       voice_vcf;
+    spfy_phoneset_t  phoneset;
     int              voice_loaded;
 };
 
@@ -94,19 +76,19 @@ int spfy_fe_synth_text(spfy_fe_t                  *fe,
                         const spfy_prosody_hints_t *hints,
                         spfy_fe_utterance_t       **out_utt)
 {
-    (void)fe; (void)text; (void)hints;       /* stages land progressively */
+    (void)fe; (void)text; (void)hints;
     if (!out_utt) return SPFY_E_INVAL;
 
     spfy_fe_utterance_t *u = (spfy_fe_utterance_t *)
         calloc(1, sizeof *u);
     if (!u) return SPFY_E_NOMEM;
-    u->hints = hints;       /* borrowed */
+    u->hints = hints;
     *out_utt = u;
     return SPFY_OK;
 }
 
-/* Internal accessors (private to the fe library; consumed by stages
- * that need vocab/tables but shouldn't see the full struct). */
+/* Internal accessors (private to the fe library; consumed by stages that
+ * need vocab/tables but shouldn't see the full struct). */
 const spfy_fe_vocab_t *spfy_fe_vocab(const spfy_fe_t *fe)
 {
     return fe ? &fe->vocab : NULL;
@@ -118,17 +100,14 @@ const spfy_fe_tables_t *spfy_fe_tables(const spfy_fe_t *fe)
 }
 
 /* The in-house FE resolves phone ids through its own phoneset, so the
- * VIN-derived table is not consulted here. Accepted and ignored so
- * callers need not branch on which backend is compiled in. */
+ * VIN-derived table is not consulted here. */
 int spfy_fe_set_phone_names(spfy_fe_t *fe, char *const *names, uint32_t n)
 {
     (void)fe; (void)names; (void)n;
     return 0;
 }
 
-/* The in-house FE is not the hosted Eloquence DLL, so it has no ESPR mode.
- * Accept-and-decline: returns nonzero, leaving the built-in refinement
- * heuristic in force. */
+/* The in-house FE is not the hosted Eloquence DLL, so it has no ESPR mode. */
 int spfy_fe_set_espr_config(spfy_fe_t *fe, const char *name,
                             const char *gender, const char *phoneset,
                             const char *version)
@@ -166,7 +145,6 @@ void spfy_fe_print_stats(const spfy_fe_t *fe)
     fprintf(stdout, "spfy_fe stats:\n");
     fprintf(stdout, "  vocab entries: %u (expect %u)\n",
             fe->vocab.n, (unsigned)SPFY_FE_VOCAB_N);
-    /* Spot-check a few canonical IDs. */
     const char *spot[] = {
         spfy_fe_vocab_name(&fe->vocab, 0),
         spfy_fe_vocab_name(&fe->vocab, 1),
@@ -184,7 +162,6 @@ void spfy_fe_print_stats(const spfy_fe_t *fe)
             (unsigned)SPFY_FE_REG_A_N, (size_t)fe->tables.arena_size);
     fprintf(stdout, "  registry-B: %u tables\n", (unsigned)SPFY_FE_REG_B_N);
 
-    /* Show sizes of a few interesting tables for sanity. */
     fprintf(stdout, "  reg-A t000 (TLDs):              size=%u\n",
             fe->tables.a[0].size);
     fprintf(stdout, "  reg-A t001 (units of measure):  size=%u\n",

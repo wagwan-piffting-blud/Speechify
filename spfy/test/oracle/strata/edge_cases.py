@@ -1,6 +1,6 @@
 """D-04 edge-case stratum (>=50 rows, hand-curated).
 
-The first eight entries are the non-negotiable MEMORY.md regression
+The first eight entries are the non-negotiable regression
 anchors (D-04). Every subsequent row carries a one-line `# ` comment
 immediately above it explaining why it is in the corpus.
 """

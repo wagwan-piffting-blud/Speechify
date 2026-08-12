@@ -1,26 +1,4 @@
-/* spfy_sapi64.dll — 64-bit SAPI shim for the Speechify engine.
- *
- * The full spfy synth stack is 32-bit (the FE host needs the 32-bit PE
- * loader). To make Speechify voices usable from 64-bit SAPI clients
- * (Windows Narrator, modern System.Speech, 64-bit apps) we ship a
- * second DLL that:
- *
- *   - Implements ISpTTSEngine + ISpObjectWithToken natively as a
- *     64-bit in-proc COM server (so 64-bit clients load it directly,
- *     no cross-bitness COM marshaling required).
- *
- *   - Inside Speak(), shells out to the 32-bit `spfy_synth.exe` —
- *     same binary the CLI uses — to do the actual synthesis. We pass
- *     SPFY_WORD_EVENTS_FILE=<tmp.tsv> so the 32-bit child emits a
- *     per-word audio-offset sidecar; we use it to fire
- *     SPEI_WORD_BOUNDARY / SPEI_SENTENCE_BOUNDARY events back to the
- *     SAPI site as we stream the WAV chunk-by-chunk.
- *
- *   - Voice discovery uses the same auto-scan layout as the 32-bit
- *     DLL (%USERPROFILE%\Documents\Speechify\en-US\<name>\). The
- *     32-bit DLL's DllRegisterServer continues to own the CLSID and
- *     token registration; this 64-bit DLL only needs to be loadable
- *     when the 64-bit registry's InprocServer32 points at it. */
+/* spfy_sapi64.dll — 64-bit SAPI shim for the Speechify engine. */
 
 #define INITGUID 1
 
@@ -30,6 +8,7 @@
 #include <shlobj.h>
 #include <sapi.h>
 #include <stdio.h>
+#include "sapi_tmp_path.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -42,20 +21,16 @@
 
 #include <math.h>
 
-/* Module handle (set in DllMain) — used to derive paths. */
 static HMODULE g_hModule = NULL;
 static LONG    g_dll_refs = 0;
 
-/* ----------------------------------------------------------------- */
-/* COM object                                                          */
-/* ----------------------------------------------------------------- */
 
 typedef struct {
     ISpTTSEngine       tts_iface;
     ISpObjectWithToken token_iface;
     LONG               refcount;
     ISpObjectToken    *pToken;
-    WCHAR              voice_name[64];   /* read once from token */
+    WCHAR              voice_name[64];
     int                voice_resolved;
 } SpfyEngine64;
 
@@ -92,9 +67,6 @@ static ULONG impl_release(SpfyEngine64 *impl)
     return (ULONG)r;
 }
 
-/* ----------------------------------------------------------------- */
-/* Paths + voice name                                                  */
-/* ----------------------------------------------------------------- */
 
 static int get_documents_speechify(WCHAR *out, size_t out_n)
 {
@@ -119,12 +91,9 @@ static int read_voice_name_w(ISpObjectToken *tok, WCHAR *out, size_t out_n)
     return 1;
 }
 
-/* ----------------------------------------------------------------- */
-/* Word/sentence scanning of the input UTF-16 text                     */
-/* ----------------------------------------------------------------- */
 
 typedef struct {
-    ULONG offset;     /* UTF-16 char index */
+    ULONG offset;
     ULONG length;
     int   sentence_start;
 } word_pos_t;
@@ -171,14 +140,8 @@ static word_pos_t *scan_words(const WCHAR *w, int wlen, ULONG *out_n,
     return out;
 }
 
-/* ----------------------------------------------------------------- */
-/* Subprocess: invoke 32-bit spfy_synth.exe                            */
-/* ----------------------------------------------------------------- */
 
-/* Look for spfy_synth.exe in the same directory as this 64-bit DLL.
- * The 32-bit DLL + 32-bit synth.exe + 64-bit DLL all sit in the same
- * install dir post-Inno. Falls back to %USERPROFILE%\Documents\
- * Speechify\spfy_build32\src\cli\spfy_synth.exe for dev. */
+/* Look for spfy_synth.exe in the same directory as this 64-bit DLL. */
 static int locate_synth_exe(WCHAR *out, size_t out_n)
 {
     WCHAR mod[MAX_PATH] = {0};
@@ -190,18 +153,13 @@ static int locate_synth_exe(WCHAR *out, size_t out_n)
             if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return 1;
         }
     }
-    /* Dev fallback: hard-coded build dir. */
     _snwprintf(out, out_n - 1,
         L"C:\\tmp\\spfy_build32\\src\\cli\\spfy_synth.exe");
     if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return 1;
     return 0;
 }
 
-/* Run spfy_synth.exe synchronously. Returns 0 on success.
- *
- *   selection_st  semitones to pass to the subprocess as
- *                 SPFY_PITCH_SEMITONES (already clamped to the corpus-
- *                 natural range by spfy_synth_split_pitch). */
+/* Run spfy_synth.exe synchronously. */
 static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
                                 const char  *utf8_text,
                                 const WCHAR *out_wav,
@@ -217,21 +175,18 @@ static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
     _snwprintf(vdb,   MAX_PATH, L"%ls\\en-US\\%ls\\%ls8.vdb", project, voice_name, voice_name);
     _snwprintf(vcf,   MAX_PATH, L"%ls\\en-US\\%ls\\%ls.vcf",  project, voice_name, voice_name);
     /* Empty hpclass arg -> spfy_synth derives the table from this voice's
-     * own VIN. Previously pinned to data/tom_hpclass.bin, which made every
-     * non-Tom voice fail the unit-count check at load. */
+     * own VIN. */
     hpc[0] = L'\0';
     _snwprintf(vocab, MAX_PATH, L"%ls\\spfy\\build\\fe_symbol_table.json", project);
     _snwprintf(tab_a, MAX_PATH, L"%ls\\spfy\\data\\fe_tables_a", project);
     _snwprintf(tab_b, MAX_PATH, L"%ls\\spfy\\data\\fe_tables",   project);
 
-    /* Convert UTF-8 text -> UTF-16 for the cmdline (CreateProcessW). */
     int wn = MultiByteToWideChar(CP_UTF8, 0, utf8_text, -1, NULL, 0);
     if (wn <= 0) return -1;
     WCHAR *wtxt = (WCHAR *)malloc((size_t)wn * sizeof(WCHAR));
     if (!wtxt) return -1;
     MultiByteToWideChar(CP_UTF8, 0, utf8_text, -1, wtxt, wn);
 
-    /* Build cmdline. */
     size_t cmd_cap = (size_t)wn + MAX_PATH * 9 + 64;
     WCHAR *cmd = (WCHAR *)malloc(cmd_cap * sizeof(WCHAR));
     if (!cmd) { free(wtxt); return -1; }
@@ -240,7 +195,6 @@ static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
         exe, vin, vdb, vcf, hpc, vocab, tab_a, tab_b, wtxt, out_wav);
     free(wtxt);
 
-    /* Pass SPFY_WORD_EVENTS_FILE=<out_events> via environment. */
     LPWCH base_env = GetEnvironmentStringsW();
     size_t base_n = 0;
     {
@@ -298,22 +252,9 @@ static int run_synth_subprocess(const WCHAR *exe, const WCHAR *voice_name,
     return (int)exit_code;
 }
 
-/* ----------------------------------------------------------------- */
-/* Stream the rendered WAV + emit boundary events                       */
-/* ----------------------------------------------------------------- */
 
-/* Stream a fragment's rendered WAV to the SAPI site with optional gain
- * + word/sentence boundary events.
- *
- *   audio_base    cum sample count at start of this fragment; added to
- *                 the per-event audio offset so events line up globally
- *                 across all fragments in the utterance.
- *   text_base     SPVTEXTFRAG.ulTextSrcOffset of this fragment; added
- *                 to per-word UTF-16 offsets so lParam values reference
- *                 the original SSML text (not just the local frag).
- *   volume_gain   linear scalar, 1.0 = passthrough.
- *
- * On return *cum_samples_out is incremented by samples streamed. */
+/* Stream a fragment's rendered WAV to the SAPI site with optional gain +
+ * word/sentence boundary events. */
 static HRESULT stream_wav_with_events(ISpTTSEngineSite *site,
                                       const WCHAR *wav_path,
                                       const WCHAR *evt_path,
@@ -345,7 +286,6 @@ static HRESULT stream_wav_with_events(ISpTTSEngineSite *site,
                     if (!eol) eol = p + strlen(p);
                     char save = *eol; *eol = 0;
                     ULONG s = (ULONG)strtoul(p, NULL, 10);
-                    /* Scale offsets to match the time-stretched audio. */
                     if (rate_factor != 1.0f && rate_factor > 0.0f) {
                         s = (ULONG)((double)s / (double)rate_factor + 0.5);
                     }
@@ -373,10 +313,10 @@ static HRESULT stream_wav_with_events(ISpTTSEngineSite *site,
     int   apply_gain = (volume_gain < 0.999f || volume_gain > 1.001f);
     BYTE  chunk[4096];
     BYTE  scaled[4096];
-    /* Heartbeat phoneme events every 100 ms keep Balabolka & other
-     * SAPI consumers from cutting the audio buffer mid-stream when no
-     * natural word events fire (e.g. inside a long <pron>). */
-    const ULONG HEARTBEAT_SAMPLES = 800u;   /* 100 ms @ 8 kHz */
+    /* Heartbeat phoneme events every 100 ms keep Balabolka & other SAPI
+     * consumers from cutting the audio buffer mid-stream when no natural
+     * word events fire (e.g. */
+    const ULONG HEARTBEAT_SAMPLES = 800u;
     ULONG next_phone_evt = HEARTBEAT_SAMPLES;
     for (;;) {
         if (FAILED(hr)) break;
@@ -439,7 +379,7 @@ static HRESULT stream_wav_with_events(ISpTTSEngineSite *site,
 }
 
 /* Emit `n_samples` of zeros to the SAPI site — used for SilenceMSecs +
- * SPVA_Silence. Updates *cum_samples. */
+ * SPVA_Silence. */
 static HRESULT emit_silence64(ISpTTSEngineSite *site, ULONG n_samples,
                               uint64_t *cum_samples)
 {
@@ -458,7 +398,6 @@ static HRESULT emit_silence64(ISpTTSEngineSite *site, ULONG n_samples,
     return hr;
 }
 
-/* Emit SPEI_TTS_BOOKMARK for <mark name="..."> tags. */
 static void emit_bookmark64(ISpTTSEngineSite *site, uint64_t cum_samples,
                             const SPVTEXTFRAG *f)
 {
@@ -476,9 +415,6 @@ static void emit_bookmark64(ISpTTSEngineSite *site, uint64_t cum_samples,
     site->lpVtbl->AddEvents(site, &ev, 1);
 }
 
-/* ----------------------------------------------------------------- */
-/* ISpTTSEngine methods                                                 */
-/* ----------------------------------------------------------------- */
 
 static HRESULT STDMETHODCALLTYPE
 tts_QueryInterface(ISpTTSEngine *This, REFIID riid, void **ppv)
@@ -488,17 +424,10 @@ static ULONG STDMETHODCALLTYPE tts_AddRef(ISpTTSEngine *This)
 static ULONG STDMETHODCALLTYPE tts_Release(ISpTTSEngine *This)
 { return impl_release(IMPL_FROM_TTS(This)); }
 
-/* (A whole-utterance frags_to_utf8() lived here. It concatenated the
- * entire SPVTEXTFRAG list into one buffer, which the engine no longer
- * does -- tts_Speak walks the list per fragment and calls
- * speak_one_frag_text64() on each, so word-boundary offsets stay tied to
- * their own fragment. Removed as dead code once this file gained a build
- * target and -Wunused-function started firing.) */
+/* (A whole-utterance frags_to_utf8() lived here. */
 
-/* Read the WAV at `path`, pitch-shift its int16 data section by
- * `semitones` (TD-PSOLA, duration-preserving), and write it back over
- * the same file. Leaves the header bytes untouched. Best-effort: any
- * read/write failure leaves the file as-is. */
+/* Read the WAV at `path`, pitch-shift its int16 data section by `semitones`
+ * (TD-PSOLA, duration-preserving), and write it back over the same file. */
 static void psola_shift_wav_inplace(const WCHAR *path, float semitones)
 {
     HANDLE h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
@@ -507,8 +436,8 @@ static void psola_shift_wav_inplace(const WCHAR *path, float semitones)
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD sz = GetFileSize(h, NULL);
     if (sz <= 44) { CloseHandle(h); return; }
-    /* WAV header is 44 bytes for our PCM mono format; sample rate sits
-     * at offset 24 (uint32 LE). */
+    /* WAV header is 44 bytes for our PCM mono format; sample rate sits at
+     * offset 24 (uint32 LE). */
     BYTE hdr[44];
     DWORD got = 0;
     if (!ReadFile(h, hdr, 44, &got, NULL) || got != 44) {
@@ -538,10 +467,7 @@ static void psola_shift_wav_inplace(const WCHAR *path, float semitones)
     CloseHandle(h);
 }
 
-/* WSOLA time-stretch the WAV at `path` by `factor` (in-place). Output
- * is longer/shorter than input so we rewrite both the header (RIFF +
- * data chunk sizes) and the data section. Best-effort: returns silently
- * on any IO error and leaves the file unchanged. */
+/* WSOLA time-stretch the WAV at `path` by `factor` (in-place). */
 static void rate_stretch_wav_inplace(const WCHAR *path, float factor)
 {
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
@@ -572,7 +498,6 @@ static void rate_stretch_wav_inplace(const WCHAR *path, float factor)
     free(buf);
     if (rc != 0) { free(out); return; }
 
-    /* Rewrite the file from scratch with the new lengths. */
     h = CreateFileW(path, GENERIC_WRITE, 0, NULL,
                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) { free(out); return; }
@@ -593,18 +518,8 @@ static void rate_stretch_wav_inplace(const WCHAR *path, float factor)
     free(out);
 }
 
-/* Synth one fragment's text via the 32-bit spfy_synth.exe subprocess,
- * then stream its WAV (with volume gain + boundary events) to the SAPI
- * site. Advances *cum_samples by the streamed sample count.
- *
- *   selection_st   pitch shift handled at subprocess level (clamped to
- *                  Tom's corpus-natural range, ~-2..+1.5 st).
- *   psola_st       residual pitch shift applied to the returned WAV via
- *                  TD-PSOLA post-process. selection_st + psola_st
- *                  equals the user's target.
- *   rate_factor    WSOLA time-stretch factor applied AFTER pitch
- *                  shift. > 1.0 = speed up. 1.0 = no-op.
- */
+/* Synth one fragment's text via the 32-bit spfy_synth.exe subprocess, then
+ * stream its WAV (with volume gain + boundary events) to the SAPI site. */
 static HRESULT speak_one_frag_text64(SpfyEngine64 *impl,
                                      const SPVTEXTFRAG *f,
                                      ISpTTSEngineSite *site,
@@ -625,8 +540,7 @@ static HRESULT speak_one_frag_text64(SpfyEngine64 *impl,
     w[f->ulTextLen] = 0;
 
     /* For <phoneme> tags, build SPR `\![...]` from pPhoneIds; otherwise
-     * convert the verbatim UTF-16 frag text to UTF-8. The 32-bit
-     * spfy_synth.exe subprocess accepts both as command-line text. */
+     * convert the verbatim UTF-16 frag text to UTF-8. */
     char *u8 = NULL;
     int   u8n = 0;
     if (f->State.eAction == SPVA_Pronounce && f->State.pPhoneIds) {
@@ -672,19 +586,12 @@ static HRESULT speak_one_frag_text64(SpfyEngine64 *impl,
                                       u8, wav_path, evt_path,
                                       selection_st);
         if (rc == 0) {
-            /* If PSOLA residual is non-zero, pitch-shift the rendered
-             * WAV in place before streaming to the site. Rewrites only
-             * the data section (header dimensions don't change since
-             * TD-PSOLA preserves duration). */
+            /* If PSOLA residual is non-zero, pitch-shift the rendered WAV
+             * in place before streaming to the site. */
             if (psola_st != 0.0f) {
                 psola_shift_wav_inplace(wav_path, psola_st);
             }
-            /* If rate_factor != 1, WSOLA time-stretch the WAV next.
-             * Changes file length so we rewrite the whole file (header
-             * + data). Word-event sample offsets in the TSV are NOT
-             * scaled here — see the streaming loop below where we
-             * scale them by 1/rate_factor to keep events aligned with
-             * the stretched audio. */
+            /* If rate_factor != 1, WSOLA time-stretch the WAV next. */
             if (rate_factor != 1.0f) {
                 rate_stretch_wav_inplace(wav_path, rate_factor);
             }
@@ -715,24 +622,22 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     if (!pTextFragList || !pOutputSite) return E_POINTER;
     if (!impl->voice_resolved) return SPERR_UNINITIALIZED;
 
-    const ULONG sr = 8000u;   /* native rate of all spfy voices */
+    const ULONG sr = 8000u;
     uint64_t cum_samples = 0;
     HRESULT hr = S_OK;
     int abort_flag = 0;
 
-    /* See spfy_sapi.c::tts_Speak for the rationale — host rate sliders
-     * call ISpVoice::SetRate which surfaces here only via
+    /* See spfy_sapi.c::tts_Speak for the rationale — host rate sliders call
+     * ISpVoice::SetRate which surfaces here only via
      * ISpTTSEngineSite::GetRate (NOT in SPVSTATE.RateAdj). */
     long site_base_rate = 0;
     ISpTTSEngineSite_GetRate(pOutputSite, &site_base_rate);
 
-    /* SPFY_SAPI_DEBUG diagnostic — see spfy_sapi.c::tts_Speak for the
-     * full description. Logs GetEventInterest, frag list, and per-frag
-     * Speak progression so we can see exactly what a problematic SAPI
-     * consumer is doing. */
+    /* SPFY_SAPI_DEBUG diagnostic — see spfy_sapi.c::tts_Speak for the full
+     * description. */
     FILE *dbg = NULL;
     if (getenv("SPFY_SAPI_DEBUG")) {
-        dbg = fopen("C:/tmp/_sapi_dbg.log", "a");
+        dbg = spfy_sapi_debug_fopen("_sapi_dbg.log");
         if (dbg) {
             ULONGLONG interest = 0;
             HRESULT ihr = pOutputSite->lpVtbl->GetEventInterest(
@@ -799,19 +704,13 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         float gain = (float)vol / 100.0f;
 
         /* Pitch split — see spfy_synth_split_pitch in
-         * spfy/src/synth/spfy_synth_lib.c. Selection-portion is passed
-         * to the 32-bit subprocess via SPFY_PITCH_SEMITONES; residual
-         * (anything beyond Tom's corpus-natural range) is post-processed
-         * by TD-PSOLA on the returned WAV. The split itself is
-         * implemented in spfy_synth_lib (32-bit) so we re-derive the
-         * crossover here to avoid a cross-bitness library dep. */
+         * spfy/src/synth/spfy_synth_lib.c. */
         float target_st = (float)f->State.PitchAdj.MiddleAdj;
         float sel_st = target_st;
         if (sel_st >  1.5f) sel_st =  1.5f;
         if (sel_st < -2.0f) sel_st = -2.0f;
         float psola_st = target_st - sel_st;
 
-        /* Rate — same mapping as spfy_sapi.c. */
         long ra = f->State.RateAdj + site_base_rate;
         if (ra > 10) ra = 10;
         if (ra < -10) ra = -10;
@@ -826,7 +725,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
 
         switch (f->State.eAction) {
         case SPVA_Speak:
-        case SPVA_Pronounce:    /* <phoneme> / <pron> — handled inside */
+        case SPVA_Pronounce:
         case SPVA_SpellOut: {
             /* See spfy_sapi.c::tts_Speak for rationale: a synthetic
              * SPEI_WORD_BOUNDARY at the start of an empty-text Pronounce
@@ -863,9 +762,9 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
             break;
         }
     }
-    /* See spfy_sapi.c::tts_Speak — don't propagate per-frag failure
-     * if any audio was written, otherwise consumers (Balabolka) drop
-     * the entire playback queue. */
+    /* See spfy_sapi.c::tts_Speak — don't propagate per-frag failure if any
+     * audio was written, otherwise consumers (Balabolka) drop the entire
+     * playback queue. */
     if (FAILED(hr) && cum_samples > 0 && !abort_flag) {
         hr = S_OK;
     }
@@ -909,9 +808,6 @@ static const ISpTTSEngineVtbl g_tts_vtbl = {
     tts_Speak, tts_GetOutputFormat,
 };
 
-/* ----------------------------------------------------------------- */
-/* ISpObjectWithToken                                                   */
-/* ----------------------------------------------------------------- */
 
 static HRESULT STDMETHODCALLTYPE
 tok_QueryInterface(ISpObjectWithToken *This, REFIID riid, void **ppv)
@@ -950,9 +846,6 @@ static const ISpObjectWithTokenVtbl g_tok_vtbl = {
     tok_SetObjectToken, tok_GetObjectToken,
 };
 
-/* ----------------------------------------------------------------- */
-/* Class factory + DLL entry points                                     */
-/* ----------------------------------------------------------------- */
 
 typedef struct { IClassFactory iface; LONG refcount; } SpfyFactory64;
 
@@ -1036,7 +929,6 @@ HRESULT WINAPI DllCanUnloadNow(void)
 }
 
 /* Registration is owned by the 32-bit DLL — but we still need
- * DllRegisterServer / DllUnregisterServer for regsvr32 to succeed. They
- * just succeed without doing anything beyond what the 32-bit DLL did. */
+ * DllRegisterServer / DllUnregisterServer for regsvr32 to succeed. */
 HRESULT WINAPI DllRegisterServer(void) { return S_OK; }
 HRESULT WINAPI DllUnregisterServer(void) { return S_OK; }

@@ -1,13 +1,4 @@
-/* spfy_text_norm_dump — print tokens produced by the text normalizer.
- *
- *   spfy_text_norm_dump "The year 2024 had 1990 things to do."
- *   spfy_text_norm_dump --pipe   (one line per arg via stdin)
- *
- * Each token prints on its own line as
- *
- *   <TYPE> <text>
- *
- * where TYPE is WORD / PHRASE_BREAK / SENTENCE_BREAK. */
+/* spfy_text_norm_dump — print tokens produced by the text normalizer. */
 
 #include "text_norm.h"
 

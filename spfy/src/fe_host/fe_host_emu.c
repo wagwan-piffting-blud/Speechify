@@ -35,7 +35,6 @@
 
 #include "swittsfe_registry.h"
 
-/* Vtable slots — same numbering the native path uses. */
 #define SLOT_RELEASE       2
 #define SLOT_INIT_STAGE1   3
 #define SLOT_INIT_STAGE2   4
@@ -45,7 +44,6 @@
 #define SLOT_RESET        26
 #define SLOT_DELEGATE_B   42
 
-/* iobj layout (from disasm) — same field offsets the native struct uses. */
 #define IOBJ_OFF_VTABLE    0x0
 #define IOBJ_OFF_REFCOUNT  0x4
 #define IOBJ_OFF_STATE     0x8
@@ -55,26 +53,56 @@
 #define DRAIN_BUF_SIZE     256
 
 typedef struct spfy_fe_s {
-    uint32_t          iobj_va;            /* guest VA of the FE iobj */
-    uint32_t          vtable_va;          /* cached: iobj_va -> +0 */
+    uint32_t          iobj_va;
+    uint32_t          vtable_va;
     spfy_phoneset_t   phoneset;
     int               phoneset_loaded;
-    fe_phone_names_t  phone_names;      /* voice feat["name"] order */
+    fe_phone_names_t  phone_names;
     fe_parsed_t       last_parsed;
     int               last_parsed_valid;
-    int               espr_enabled;      /* ESPR mode header is set */
-    char              espr_header[512];  /* \!SWIcv... \!SWIespr1 header */
+    int               espr_enabled;
+    char              espr_header[512];
 } hosted_fe_t;
 
-/* UTF-8 / Latin-1 tolerant transcode to Latin-1 (the FE's input codepage).
- * Identical logic to fe_host.c::text_to_latin1 -- see the full rationale
- * there. Duplicated rather than shared to keep the two backends' guest/
- * host memory handling independent. */
+/* cp1252 0x80..0x9F -> Unicode. */
+static const unsigned short CP1252_HIGH[32] = {
+    0x20AC, 0,      0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0,      0x017D, 0,
+    0,      0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
+};
+
+/* Transcode to the FE's input codepage, ISO-8859-1, reproducing what the
+ * engine does to the UTF-8 it is handed (spfy_dumpwav declares
+ * "text/plain;charset=utf-8" and passes the bytes straight to SWIttsSpeak).
+ *
+ * THE RULE, measured: a codepoint Latin-1 cannot hold is DELETED, not
+ * substituted -- and deleted rather than mapped to its cp1252 byte, even when
+ * cp1252 has one. The euro is the single exception; the engine normalises it
+ * to a word.
+ *
+ * The probe (charset_probe*.jsonl, engine fe_tree captures) covers 13
+ * characters and every one agrees:
+ *
+ *   s + U+0153 + ur  -> "sur"      oe ligature deleted (cp1252 has it at 0x9C)
+ *   S Z Y f c c hats -> deleted    U+0160/017D/0178/0192/0107/010D
+ *   U+2030 per-mille -> deleted    (cp1252 0x89 -- so this is not cp1252)
+ *   U+00A3 / U+00A5  -> kept       "livre sterling" / "yenne": Latin-1 holds them
+ *   U+20AC euro      -> "euros"    reproduced by emitting cp1252 0x80, which
+ *                                  our FE normalises the same way, rather than
+ *                                  hard-coding a French word here
+ *
+ * Substituting '?' was the old behaviour and it is what made felix render
+ * "Ma soeur" where the engine renders "Ma sur": '?' never reached the FE
+ * because argv had already turned U+0153 into 0x9C, which the FE's LTS
+ * expands to "oe". Three of felix's remaining audio failures were this.
+ *
+ * Pure-ASCII input is untouched, so en-US and es-MX are unaffected. */
 static void text_to_latin1(const char *in, char *out, size_t out_n) {
     size_t o = 0;
     const unsigned char *p = (const unsigned char *)in;
     while (*p && o + 1 < out_n) {
-        unsigned c = *p;
+        unsigned c = *p, cp;
         if (c < 0x80) { out[o++] = (char)c; ++p; continue; }
         int need = ((c & 0xE0) == 0xC0) ? 1
                  : ((c & 0xF0) == 0xE0) ? 2
@@ -82,16 +110,20 @@ static void text_to_latin1(const char *in, char *out, size_t out_n) {
         int ok = need > 0;
         for (int k = 1; k <= need && ok; ++k)
             if ((p[k] & 0xC0) != 0x80) ok = 0;
-        if (!ok) { out[o++] = (char)c; ++p; continue; }
-        unsigned cp = c & (0x7Fu >> need);
-        for (int k = 1; k <= need; ++k) cp = (cp << 6) | (p[k] & 0x3F);
-        out[o++] = (cp <= 0xFF) ? (char)cp : '?';
-        p += need + 1;
+        if (ok) {
+            cp = c & (0x7Fu >> need);
+            for (int k = 1; k <= need; ++k) cp = (cp << 6) | (p[k] & 0x3F);
+            p += need + 1;
+        } else {
+            cp = (c < 0xA0 && CP1252_HIGH[c - 0x80]) ? CP1252_HIGH[c - 0x80] : c;
+            ++p;
+        }
+        if (cp == 0x20AC)   out[o++] = (char)0x80;
+        else if (cp <= 0xFF) out[o++] = (char)cp;
     }
     out[o] = '\0';
 }
 
-/* --- internal helpers --- */
 
 static uint32_t emu_read32(uint32_t va) {
     uint32_t v;
@@ -105,12 +137,10 @@ static uint8_t emu_read8(uint32_t va) {
     return v;
 }
 
-/* Read a vtable slot's function VA. */
 static uint32_t vfn_va(hosted_fe_t *fe, int slot) {
     return emu_read32(fe->vtable_va + (uint32_t)slot * 4u);
 }
 
-/* Call vtable[slot](self, args...). Returns guest EAX. */
 static uint32_t call_vfn(hosted_fe_t *fe, int slot,
                          const uint32_t *args, int n) {
     uint32_t fn = vfn_va(fe, slot);
@@ -125,23 +155,20 @@ static uint8_t iobj_err_flag(hosted_fe_t *fe) {
     return emu_read8(fe->iobj_va + IOBJ_OFF_ERR_FLAG);
 }
 
-/* Drain delegateB into a malloc'd NUL-terminated buffer. Same shape as
- * the native drain_delegate_b but reads through guest memory. */
+/* Drain delegateB into a malloc'd NUL-terminated buffer. */
 static char *drain_tagged(hosted_fe_t *fe) {
     size_t cap = 4096;
     char *out = (char *)malloc(cap);
     if (!out) return NULL;
     size_t len = 0;
 
-    /* Allocate guest scratch ONCE so we don't churn the guest heap on
-     * every drain iteration. Both buffers stay across calls; if the
-     * synth runs in a loop they get reused. */
+    /* Allocate guest scratch ONCE so we don't churn the guest heap on every
+     * drain iteration. */
     uint32_t buf_va    = spfy_dll_emu_alloc(DRAIN_BUF_SIZE, 0);
     uint32_t outlen_va = spfy_dll_emu_alloc(4, 0);
     if (!buf_va || !outlen_va) { free(out); return NULL; }
 
     for (int safety = 0; safety < 4096; safety++) {
-        /* zero out_len before each call */
         uint32_t zero = 0;
         spfy_dll_emu_write(outlen_va, &zero, 4);
 
@@ -166,8 +193,7 @@ static char *drain_tagged(hosted_fe_t *fe) {
     return out;
 }
 
-/* Feed plain text into the FE via slot 5. Text gets copied into the
- * guest heap so the DLL has a stable pointer. */
+/* Feed plain text into the FE via slot 5. */
 static void feed_text(hosted_fe_t *fe, const char *s) {
     uint32_t n = (uint32_t)strlen(s) + 1;
     uint32_t va = spfy_dll_emu_alloc(n, 0);
@@ -177,8 +203,7 @@ static void feed_text(hosted_fe_t *fe, const char *s) {
     call_vfn(fe, SLOT_FEED_CONFIG_A, args, 1);
 }
 
-/* Same shape as fe_host.c::parse_fe_output_into_slots. The phoneset
- * (if loaded) drives full slot construction; otherwise we flatten. */
+/* Same shape as fe_host.c::parse_fe_output_into_slots. */
 static int parse_fe_output_into_slots(hosted_fe_t *fe,
                                       const char *tagged,
                                       const spfy_prosody_hints_t *hints,
@@ -220,8 +245,8 @@ static int parse_fe_output_into_slots(hosted_fe_t *fe,
     return 0;
 }
 
-/* Drive the FE over plain text; return the cleaned tagged stream
- * (malloc'd; caller frees). NULL on error. */
+/* Drive the FE over plain text; return the cleaned tagged stream (malloc'd;
+ * caller frees). */
 static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     if (iobj_err_flag(fe)) {
         fprintf(stderr, "[fe_host_emu] err_flag latched before synth — bailing\n");
@@ -229,8 +254,7 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     }
 
     /* ESPR mode: feed the voice's control header first (see fe_host.c for
-     * the full rationale). Same feedConfigA(slot5)+feedConfigB(slot6) pair
-     * as the text, driven through the emulator. */
+     * the full rationale). */
     if (fe->espr_enabled) {
         feed_text(fe, fe->espr_header);
         uint32_t hdr_empty_va = spfy_dll_emu_alloc(1, 1);
@@ -238,14 +262,12 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
         call_vfn(fe, SLOT_FEED_CONFIG_B, hdrB_args, 1);
     }
 
-    /* The FE wants Latin-1, not UTF-8; convert before feeding. */
     char *latin1 = (char *)malloc(strlen(text) + 1);
     if (!latin1) return NULL;
     text_to_latin1(text, latin1, strlen(text) + 1);
     feed_text(fe, latin1);
     free(latin1);
 
-    /* feedConfigB takes a pointer to a single NUL byte (the empty cfg). */
     uint32_t empty_va = spfy_dll_emu_alloc(1, 1);
     uint32_t fcB_args[1] = { empty_va };
     call_vfn(fe, SLOT_FEED_CONFIG_B, fcB_args, 1);
@@ -254,15 +276,13 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     if (!tagged) return NULL;
     fe_clean_stream_inplace(tagged);
 
-    /* runOrAbort(0). */
     uint32_t roa_args[1] = { 0 };
     call_vfn(fe, SLOT_RUN_OR_ABORT, roa_args, 1);
     return tagged;
 }
 
-/* ============================================================
- * Public API — open
- * ============================================================ */
+/* ============================================================ Public API —
+ * open ============================================================ */
 
 int spfy_fe_open(const char *vocab_json,
                  const char *tables_a_dir,
@@ -295,18 +315,16 @@ int spfy_fe_open_lang(const char *lang,
         img = &spfy_fe_dlls[0];
     }
 
-    /* fr-CA liaison stress inheritance (see fe_host.c / fe_parse). No-op for
-     * en-US/es-MX, which never emit bare-leading words. */
+    /* fr-CA liaison stress inheritance (see fe_host.c / fe_parse). */
     fe_parse_set_liaison_inherit(img->lang && strcmp(img->lang, "fr-CA") == 0);
 
     hosted_fe_t *fe = (hosted_fe_t *)calloc(1, sizeof(*fe));
     if (!fe) return -1;
 
     /* NB: the emulator maps ONE image for the life of the process
-     * (spfy_dll_emu_boot is idempotent and returns 0 if already booted),
-     * so switching language mid-process is not supported on this backend
-     * -- the first voice opened wins. The native PE backend has the same
-     * practical constraint. */
+     * (spfy_dll_emu_boot is idempotent and returns 0 if already booted), so
+     * switching language mid-process is not supported on this backend --
+     * the first voice... */
     if (spfy_dll_emu_boot(img->data, (uint32_t)*img->size) != 0) {
         fprintf(stderr, "[fe_host_emu] spfy_dll_emu_boot(%s) failed\n",
                 img->lang);
@@ -319,7 +337,6 @@ int spfy_fe_open_lang(const char *lang,
         free(fe); return -3;
     }
 
-    /* getObject(2, &iobj) — cdecl, returns nonzero on success. */
     uint32_t out_va = spfy_dll_emu_alloc(4, 1);
     uint32_t args[2] = { 2, out_va };
     uint32_t rc = spfy_dll_emu_call(getObject_va, args, 2);
@@ -331,7 +348,6 @@ int spfy_fe_open_lang(const char *lang,
     }
     fe->vtable_va = emu_read32(fe->iobj_va + IOBJ_OFF_VTABLE);
 
-    /* initStage1(self). */
     uint32_t r3 = call_vfn(fe, SLOT_INIT_STAGE1, NULL, 0);
     if (iobj_err_flag(fe)) {
         fprintf(stderr, "[fe_host_emu] initStage1 set err_flag (ret=%#x)\n", r3);
@@ -347,9 +363,8 @@ int spfy_fe_open_lang(const char *lang,
     return 0;
 }
 
-/* ============================================================
- * Public API — close
- * ============================================================ */
+/* ============================================================ Public API —
+ * close ============================================================ */
 
 void spfy_fe_close(spfy_fe_t *opaque) {
     if (!opaque) return;
@@ -360,16 +375,13 @@ void spfy_fe_close(spfy_fe_t *opaque) {
         call_vfn(fe, SLOT_RESET,       NULL, 0);
         call_vfn(fe, SLOT_RELEASE,     NULL, 0);
     }
-    /* We deliberately don't tear down the emulator; the embedded DLL
-     * stays mapped for the life of the process. A future spfy_fe_open
-     * call boots idempotently (spfy_dll_emu_boot returns 0 on already-
-     * booted). Matches the native path which never unmaps the DLL. */
+    /* We deliberately don't tear down the emulator; the embedded DLL stays
+     * mapped for the life of the process. */
     free(fe);
 }
 
-/* ============================================================
- * Public API — synth
- * ============================================================ */
+/* ============================================================ Public API —
+ * synth ============================================================ */
 
 int spfy_fe_text_to_tagged(spfy_fe_t  *opaque,
                            const char *text,
@@ -436,25 +448,22 @@ void spfy_fe_utterance_free(spfy_fe_utterance_t *u) {
     free(u);
 }
 
-/* ============================================================
- * Public API — voice + stats
+/* ============================================================ Public API —
+ * voice + stats
  * ============================================================ */
 
 int spfy_fe_set_phone_names(spfy_fe_t *opaque, char *const *names,
                             uint32_t n) {
     if (!opaque) return -1;
     hosted_fe_t *fe = (hosted_fe_t *)opaque;
-    /* Borrowed: spfy_voice_t owns the strings via its
-     * spfy_phone_order_t, which outlives the FE. */
+    /* Borrowed: spfy_voice_t owns the strings via its spfy_phone_order_t,
+     * which outlives the FE. */
     fe->phone_names.names = names;
     fe->phone_names.n     = names ? n : 0u;
     return 0;
 }
 
-/* ESPR mode on the emulator backend. Mirrors fe_host.c::
- * spfy_fe_set_espr_config -- the emulator hosts the same DLL, so the same
- * control header switches it into ESPR output. See that function and
- * reference_reduced_vowel_is_a_rule for the full derivation. */
+/* ESPR mode on the emulator backend. */
 int spfy_fe_set_espr_config(spfy_fe_t *opaque, const char *name,
                             const char *gender, const char *phoneset,
                             const char *version) {
@@ -468,7 +477,6 @@ int spfy_fe_set_espr_config(spfy_fe_t *opaque, const char *name,
     if (!phoneset || !*phoneset) phoneset = "swi_plus_ix";
     if (!version || !*version)   version  = "3.0.0.0";
 
-    /* FOUR real backslash bytes per token (`\\\\` in C = one byte). */
     int n = snprintf(fe->espr_header, sizeof fe->espr_header,
         "\\\\\\\\!SWIcv%s \\\\\\\\!SWIcg%s \\\\\\\\!SWIcn%s "
         "\\\\\\\\!SWIcl%s \\\\\\\\!SWIespr1 \\\\\\\\!SWIwd0",

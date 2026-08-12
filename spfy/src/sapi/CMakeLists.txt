@@ -27,10 +27,23 @@ target_include_directories(spfy_sapi
             ${CMAKE_SOURCE_DIR}/src/fe_host
             ${CMAKE_SOURCE_DIR}/src/fe_internal
             ${CMAKE_SOURCE_DIR}/src/cart
+            ${CMAKE_SOURCE_DIR}/src/prosody
 )
+# spfy_prosody is required even though the stage is off by default: the calls
+# are compiled into spfy_synth.c unconditionally and only gated at RUNTIME by
+# SPFY_PROSODY_STAGE, so this DLL fails to LINK without it. Missed when the
+# stage landed because only the CLI target was being built.
+# spfy_embedded_assets carries the SAME fe_symbol_table + fe_tables blob that
+# spfy_synth.exe does. Before this, the DLL built literal paths to
+# %USERPROFILE%\Documents\Speechify\spfy\{build,data} and the installer had to
+# lay that tree out per user — so a moved Documents folder, a second Windows
+# account, or a partial uninstall broke every voice while the CLI kept working.
+# Defined in src/cli (add_subdirectory order puts it first), because that is
+# where the generating custom_command lives.
 target_link_libraries(spfy_sapi
     PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart
-            spfy_voice spfy_wsola spfy_dsp spfy_common
+            spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common
+            spfy_embedded_assets
             ole32 oleaut32 advapi32 shell32 uuid)
 target_include_directories(spfy_sapi
     PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)

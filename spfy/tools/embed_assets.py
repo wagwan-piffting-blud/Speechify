@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -57,12 +58,20 @@ HEADER = """\
 
 #ifdef _WIN32
 #  include <direct.h>
+#  include <process.h>
 #  define MKDIR(p) _mkdir(p)
 #  define PATHSEP '\\\\'
+#  define GETPID() _getpid()
 #else
+#  include <unistd.h>
 #  define MKDIR(p) mkdir((p), 0755)
 #  define PATHSEP '/'
+#  define GETPID() getpid()
 #endif
+
+/* Written LAST, once every asset is in place. Its presence means a previous
+ * run finished extracting, so the whole job can be skipped. */
+#define SPFY_ASSETS_STAMP "spfy_assets.complete"
 
 typedef struct {
     const char *name;        /* e.g. "t000.bin" */
@@ -143,18 +152,59 @@ static int write_file(const char *outdir, const char *filename,
                 outdir, PATHSEP, filename);
         return -1;
     }
-    FILE *f = fopen(path, "wb");
+    /* Already there at the right size? The tempdir name is keyed by the
+     * binary's mtime and these blobs are compiled in, so same size means
+     * same bytes -- nothing to do. */
+    struct stat st;
+    if (stat(path, &st) == 0 && (size_t)st.st_size == n) return 0;
+
+    /* Write to a PID-unique temp and rename into place. Several spfy_synth
+     * processes routinely extract at once (master_spfy_parity runs 12 workers),
+     * and a plain fopen("wb") lets one of them read a half-written asset
+     * another is still filling. Rename is atomic enough for that. */
+    char tmp[1152];
+    int tmp_len = snprintf(tmp, sizeof tmp, "%s.%ld.tmp",
+                           path, (long)GETPID());
+    if (tmp_len < 0 || (size_t)tmp_len >= sizeof tmp) {
+        fprintf(stderr, "spfy_assets: temp path too long for %s\n", path);
+        return -1;
+    }
+    FILE *f = fopen(tmp, "wb");
     if (!f) {
-        fprintf(stderr, "spfy_assets: failed to open %s: ", path);
+        fprintf(stderr, "spfy_assets: failed to open %s: ", tmp);
         perror("");
         return -1;
     }
     if (fwrite(data, 1, n, f) != n) {
-        fprintf(stderr, "spfy_assets: short write to %s\n", path);
+        fprintf(stderr, "spfy_assets: short write to %s\n", tmp);
         fclose(f);
+        remove(tmp);
         return -1;
     }
     fclose(f);
+    if (rename(tmp, path) != 0) {
+        /* Windows rename() refuses an existing target.
+         *
+         * ⚠ CHECK BEFORE DELETING. An earlier version removed the target and
+         * retried, which meant a worker that lost the race DELETED the good
+         * file a peer had just placed -- and any third process reading it at
+         * that instant failed to load its assets. Symptom: a COLD audit run
+         * (fresh binary mtime => fresh tempdir, 12 workers extracting at
+         * once) reported dozens of phrases as MISS, and the very next run was
+         * clean. Whoever wins the race wins; if their file is the right size
+         * it is byte-identical to ours, so just drop our temp. */
+        if (stat(path, &st) == 0 && (size_t)st.st_size == n) {
+            remove(tmp);
+            return 0;
+        }
+        remove(path);
+        if (rename(tmp, path) != 0) {
+            remove(tmp);
+            if (stat(path, &st) == 0 && (size_t)st.st_size == n) return 0;
+            fprintf(stderr, "spfy_assets: failed to place %s\n", path);
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -180,6 +230,23 @@ static int write_dir_files(const char *parent, const char *subdir_name,
 int spfy_assets_extract(const char *outdir,
                         spfy_asset_paths_t *out_paths)
 {
+    /* ⭐ FAST PATH. Extraction writes ~729 small files, and the CLI's 5-arg
+     * form calls this on EVERY invocation -- so an audit run that synthesises
+     * the corpus was re-writing ~171k files for no reason (measured: the
+     * corpus audit went from ~10 s on the legacy 9-arg form, which pointed at
+     * on-disk assets, to ~51 s on the 5-arg form).
+     *
+     * The tempdir is keyed by the binary's mtime, so once a run has finished
+     * extracting, the contents are correct for this executable forever. The
+     * stamp is written LAST, so seeing it means a complete extraction. */
+    char stamp[1024];
+    int stamp_len = snprintf(stamp, sizeof stamp, "%s%c%s",
+                             outdir, PATHSEP, SPFY_ASSETS_STAMP);
+    if (stamp_len < 0 || (size_t)stamp_len >= sizeof stamp) return -1;
+    struct stat sst;
+    int have_stamp = (stat(stamp, &sst) == 0);
+
+    if (!have_stamp) {
     (void)MKDIR(outdir);
     if (write_file(outdir, "fe_symbol_table.json",
                    """ + voc_sym + ", " + voc_sym + """_size) != 0) return -1;
@@ -189,6 +256,12 @@ int spfy_assets_extract(const char *outdir,
     if (write_dir_files(outdir, "fe_tables",
                         """ + tb_blob + ", " + tb_man + ", " + tb_man + """_n) != 0)
         return -1;
+    /* Stamp LAST: its presence is the promise that everything above landed. */
+    {
+        FILE *sf = fopen(stamp, "wb");
+        if (sf) { fputs("ok\\n", sf); fclose(sf); }
+    }
+    }  /* !have_stamp */
     if (out_paths) {
         snprintf(out_paths->vocab,   sizeof out_paths->vocab,
                  "%s%cfe_symbol_table.json", outdir, PATHSEP);
@@ -211,11 +284,30 @@ def main() -> int:
     ap.add_argument("--out-h", required=True, type=Path)
     args = ap.parse_args()
 
+    # Content digest over exactly what gets embedded, in a fixed order. This
+    # is what makes the extraction directory reusable ACROSS REBUILDS.
+    #
+    # It used to be keyed on the binary's mtime, which changes on every build
+    # even though these tables essentially never do — so every rebuild forced
+    # 22 parity workers to re-extract 728 files each, and the audit ran ~22 s
+    # against a ~10 s floor. Keyed on content, a rebuild that leaves the FE
+    # data alone reuses the existing directory and writes nothing; a rebuild
+    # that CHANGES it gets a different directory and cannot read stale files.
+    _h = hashlib.sha256()
+    _h.update(args.vocab.read_bytes())
+    for _d in (args.tables_a, args.tables_b):
+        for _p in sorted(_d.glob("*.bin")):
+            _h.update(_p.name.encode("utf-8"))
+            _h.update(_p.read_bytes())
+    digest = _h.hexdigest()[:16]
+
     out_h = """\
 /* Auto-generated by spfy/tools/embed_assets.py. DO NOT EDIT.
  * SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef SPFY_EMBEDDED_ASSETS_H
 #define SPFY_EMBEDDED_ASSETS_H
+
+#include <stddef.h>     /* size_t, used by spfy_assets_dir() below */
 
 #ifdef __cplusplus
 extern "C" {
@@ -237,12 +329,24 @@ typedef struct {
 int spfy_assets_extract(const char *outdir,
                         spfy_asset_paths_t *out_paths);
 
+/* Short hex digest of the embedded content. Callers put it in the extraction
+ * directory's NAME, so a directory is reused for as long as the assets are
+ * unchanged and is never reused across a change. Do not key that name on the
+ * binary's mtime -- these tables outlive thousands of rebuilds. */
+#define SPFY_ASSETS_DIGEST "__DIGEST__"
+
+/* Build "<base>/fe_assets_<digest>" into buf. Returns 0 on success, -1 if it
+ * would not fit. Both the CLI and the SAPI DLL use this so an installed
+ * spfy_synth.exe and spfy_sapi.dll sitting in the same directory share one
+ * extracted copy. */
+int spfy_assets_dir(const char *base, char *buf, size_t buf_n);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* SPFY_EMBEDDED_ASSETS_H */
-"""
+""".replace("__DIGEST__", digest)
     args.out_h.parent.mkdir(parents=True, exist_ok=True)
     args.out_h.write_text(out_h, encoding="utf-8")
 
@@ -256,6 +360,16 @@ int spfy_assets_extract(const char *outdir,
     tb_blob, tb_man = emit_dir(out, "tables_b", args.tables_b)
 
     emit_extract_fn(out, voc_sym, ta_blob, ta_man, tb_blob, tb_man)
+    out.append("""
+int spfy_assets_dir(const char *base, char *buf, size_t buf_n)
+{
+    int n;
+    if (!base || !buf || buf_n == 0) return -1;
+    n = snprintf(buf, buf_n, "%s%cfe_assets_%s",
+                 base, PATHSEP, SPFY_ASSETS_DIGEST);
+    return (n < 0 || (size_t)n >= buf_n) ? -1 : 0;
+}
+""")
 
     args.out_c.parent.mkdir(parents=True, exist_ok=True)
     args.out_c.write_text("\n".join(out), encoding="utf-8")

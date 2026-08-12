@@ -90,9 +90,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* VCF helper                                                          */
-/* ------------------------------------------------------------------ */
 
 static double get_vcf_f64(const spfy_vcf_t *vcf, const char *key, double dflt)
 {
@@ -106,18 +103,10 @@ static double get_vcf_f64(const spfy_vcf_t *vcf, const char *key, double dflt)
     return dflt;
 }
 
-/* ------------------------------------------------------------------ */
-/* Tiny JSONL field extractor for wsola_buffer lines                   */
-/* ------------------------------------------------------------------ */
 
 /* wsola_buffer line shape:
- *   {"type":"wsola_in","utt":1,"n_units":12,"units":[
- *     {"uid":0,"lp":1,"dl":0},
- *     {"uid":87072,"lp":1,"dl":0},
- *     ... ]}
- *
- * We only need the "units":[...] uid sequence. The lp/dl fields are
- * ignored here (they matter to spfy_concat, not to selection). */
+ * {"type":"wsola_in","utt":1,"n_units":12,"units":[
+ * {"uid":0,"lp":1,"dl":0}, {"uid":87072,"lp":1,"dl":0}, ... */
 
 typedef struct {
     uint32_t *uids;
@@ -145,25 +134,22 @@ static const char *find_lit(const char *p, const char *end, const char *lit)
     return NULL;
 }
 
-/* ------------------------------------------------------------------ */
-/* Captured prsl_slot data                                             */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     uint32_t  slot;
     uint32_t  ctx[5];
     uint32_t  n_cands;
-    uint32_t *uids;        /* heap, owned */
+    uint32_t *uids;
 } slot_capture_t;
 
 typedef struct {
-    slot_capture_t *slots;     /* heap, owned; n entries, ordered slot 0..n-1 */
+    slot_capture_t *slots;
     uint32_t        n;
     uint32_t        cap;
 } utt_capture_t;
 
 typedef struct {
-    utt_capture_t *utts;       /* heap, owned */
+    utt_capture_t *utts;
     uint32_t       n;
     uint32_t       cap;
 } prsl_capture_t;
@@ -206,13 +192,7 @@ static int prsl_capture_push(prsl_capture_t *p, utt_capture_t u)
     return 0;
 }
 
-/* Parse a single prsl_slot JSONL line into one slot_capture_t. The
- * format is:
- *   {"type":"prsl_slot","n":N,"slot":S,"this_ptr":T,"n_cands":C,
- *    "ctx":[c0,c1,c2,c3,c4],"uids":[u0,u1,...]}
- *
- * Note that hot-path failures emit truncated lines with no "uids" key;
- * we treat those as n_cands=0 and skip but don't error out. */
+/* Parse a single prsl_slot JSONL line into one slot_capture_t. */
 static int parse_prsl_slot_line(const char *line, size_t n,
                                 slot_capture_t *out)
 {
@@ -245,7 +225,6 @@ static int parse_prsl_slot_line(const char *line, size_t n,
     if (e == ncp || nc < 0 || nc > 100000) return -1;
     out->n_cands = (uint32_t)nc;
 
-    /* Optional uids array. */
     const char *up = find_lit(line, end, "\"uids\":[");
     if (!up || out->n_cands == 0) return 0;
     up += strlen("\"uids\":[");
@@ -260,19 +239,19 @@ static int parse_prsl_slot_line(const char *line, size_t n,
         out->uids[got++] = (uint32_t)v;
         up = e;
     }
-    out->n_cands = got;       /* in case the line was truncated */
+    out->n_cands = got;
     return 0;
 }
 
 /* Load the prsl_slot JSONL file, splitting into utterances at slot=0
- * boundaries. Returns 0 on success and populates *out. */
+ * boundaries. */
 static int load_prsl_capture(const char *path, prsl_capture_t *out)
 {
     memset(out, 0, sizeof *out);
     FILE *fp = fopen(path, "rb");
     if (!fp) return -1;
 
-    char buf[1 << 17];        /* 128 KiB lines: pools can be up to ~200 uids */
+    char buf[1 << 17];
     utt_capture_t cur = {0};
     int prev_slot = -1;
     int rc = 0;
@@ -313,19 +292,13 @@ done:
     return rc;
 }
 
-/* ------------------------------------------------------------------ */
-/* Captured inner_scorer data (per-slot SP target features)            */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     int      has;
-    uint32_t sp[5];         /* 5 target SP row indices, in cost-formula order */
+    uint32_t sp[5];
 } sp_target_t;
 
-/* Engine weights captured once from the inner_scorer trace. The engine
- * reads them from `slice+0x24` -> {weight_struct}, so they're effectively
- * per-voice constants for any given utterance. We just take the first
- * valid sample per file and assume it holds for the whole run. */
+/* Engine weights captured once from the inner_scorer trace. */
 typedef struct {
     int    has;
     float  sp[5];
@@ -333,27 +306,21 @@ typedef struct {
     float  f0;
     float  ccos;
     float  miss_f0;
-    float  flag;       /* extra term coefficient (cand.byte+0x17 * flag * c) */
+    float  flag;
 } engine_weights_t;
 
-/* hp_class remap table (voice+0x608). Maps slice.ctx encoding [0..93] to
- * ccos forest index [0..93]. Most entries follow ctx -> ctx/2 + 47*(ctx%2)
- * but the engine swaps some phone pairs (9/10/11, 14/15 in Tom). Captured
- * from inner_scorer's hp_class_remap event. */
+/* hp_class remap table (voice+0x608). */
 typedef struct {
     int      has;
-    uint32_t map[256];   /* indexed by slice.ctx value (u8 range) */
-    uint32_t n_entries;  /* typically 2 * n_labels = 94 */
+    uint32_t map[256];
+    uint32_t n_entries;
 } hp_remap_t;
 
-/* S-cost target context remap (voice+0x604). Maps slice.ctx values to
- * label indices for ccos row lookup. Pattern: ctx -> ctx/2 with the
- * same phone-pair swaps as hp_remap (phones 9/10/11 and 14/15 in Tom).
- * Captured from inner_scorer's s_ctx_remap event. */
+/* S-cost target context remap (voice+0x604). */
 typedef struct {
     int      has;
-    uint32_t map[256];   /* indexed by slice.ctx value */
-    uint32_t n_entries;  /* typically 2 * n_labels = 94 */
+    uint32_t map[256];
+    uint32_t n_entries;
 } s_ctx_remap_t;
 
 /* Voicing-flag gate for F0 cost. Captured from inner_scorer's
@@ -369,19 +336,19 @@ typedef struct {
  * F0 component. Confirmed for text_001 slot 11 uid 169578 (M3.4q). */
 typedef struct {
     int      has;
-    uint32_t by_hp_class[256]; /* index = slice.ctx[2]; 0 means unvoiced */
-    uint32_t n_entries;        /* typically 94 (2 * n_labels) */
-    uint32_t weight_8c;        /* second half of the engine gate */
+    uint32_t by_hp_class[256];
+    uint32_t n_entries;
+    uint32_t weight_8c;
 } voicing_gate_t;
 
 typedef struct {
-    sp_target_t      *slots;     /* heap, owned; index = slot number */
+    sp_target_t      *slots;
     uint32_t          n;
     uint32_t          cap;
-    engine_weights_t  weights;   /* may .has = 0 */
-    hp_remap_t        hp_remap;  /* may .has = 0 */
-    s_ctx_remap_t     s_remap;   /* may .has = 0 */
-    voicing_gate_t    voicing;   /* may .has = 0 */
+    engine_weights_t  weights;
+    hp_remap_t        hp_remap;
+    s_ctx_remap_t     s_remap;
+    voicing_gate_t    voicing;
 } utt_sp_targets_t;
 
 typedef struct {
@@ -422,14 +389,7 @@ static void sp_capture_free(sp_capture_t *c)
     memset(c, 0, sizeof *c);
 }
 
-/* Parse one inner_scorer JSONL line. Format:
- *   {"type":"inner_scorer","n":N,"slot":S,"this_ptr":P,"net_ptr":Q,
- *    "sp_target":[a,b,c,d,e],
- *    "weights":{"sp":[a,b,c,d,e],"f0":F,"d":D,"flag":FL,"ccos":CC,
- *               "w_4c":W4C,"miss_f0":M}}  (weights optional)
- * Populates *out_slot, out_sp[]; on success populates *out_weights if
- * the weights block is present (out_weights->has set to 1). Returns 0
- * on success. */
+/* Parse one inner_scorer JSONL line. */
 static int parse_inner_scorer_line(const char *line, size_t n,
                                    uint32_t *out_slot,
                                    uint32_t out_sp[5],
@@ -450,7 +410,6 @@ static int parse_inner_scorer_line(const char *line, size_t n,
     tp += strlen("\"sp_target\":[");
     for (int k = 0; k < 5; ++k) {
         while (tp < end && (*tp == ' ' || *tp == ',')) ++tp;
-        /* Each may be a number or `null` (sp field couldn't be read). */
         if (tp + 4 <= end && memcmp(tp, "null", 4) == 0) {
             out_sp[k] = 0xFFFFFFFFu;
             tp += 4;
@@ -462,7 +421,6 @@ static int parse_inner_scorer_line(const char *line, size_t n,
         tp = e;
     }
 
-    /* Optional weights block. */
     if (out_weights && !out_weights->has) {
         const char *wp = find_lit(line, end, "\"weights\":{");
         if (wp) {
@@ -500,7 +458,7 @@ static int parse_inner_scorer_line(const char *line, size_t n,
 }
 
 /* Helper: parse a `"<key>":[a,b,c,...]` array of small ints into out_map
- * (size 256). Returns count parsed (0 if key not found / parse error). */
+ * (size 256). */
 static uint32_t parse_u32_array(const char *buf, size_t n,
                                 const char *key,
                                 uint32_t out_map[256])
@@ -524,12 +482,7 @@ static uint32_t parse_u32_array(const char *buf, size_t n,
 }
 
 /* Try to extract voice-wide constants (voicing gate, hp_class_remap,
- * s_ctx_remap) from a (possibly different) inner_scorer JSONL. Used as
- * fallback because each of these events only fires on the very first
- * inner_scorer call of a Frida session — so only the FIRST trace file
- * in a corpus run carries them. The data is voice-wide (doesn't change
- * per utterance), so falling back to a sibling file is safe. Returns 0
- * if at least one of the three was loaded. */
+ * s_ctx_remap) from a (possibly different) inner_scorer JSONL. */
 static int load_voice_wide_only(const char *path,
                                 voicing_gate_t *out_voicing,
                                 hp_remap_t     *out_hp,
@@ -583,7 +536,6 @@ static int load_voice_wide_only(const char *path,
     return (out_voicing->has || out_hp->has || out_s->has) ? 0 : -1;
 }
 
-/* Load inner_scorer JSONL. Splits utterances at slot=0 boundaries. */
 static int load_sp_capture(const char *path, sp_capture_t *out)
 {
     memset(out, 0, sizeof *out);
@@ -600,8 +552,7 @@ static int load_sp_capture(const char *path, sp_capture_t *out)
         while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
         if (n == 0) continue;
 
-        /* hp_class_remap event lines: a one-shot table dump at session
-         * start. Capture into cur.hp_remap. */
+        /* hp_class_remap event lines: a one-shot table dump at session start. */
         if (find_lit(buf, buf + n, "\"type\":\"hp_class_remap\"")) {
             const char *rp = find_lit(buf, buf + n, "\"remap\":[");
             if (rp) {
@@ -624,7 +575,7 @@ static int load_sp_capture(const char *path, sp_capture_t *out)
         }
         /* join_consts: one-shot dump of the voicing-flag table
          * (voice+0x5fc, 94 entries indexed by halfphone class) and
-         * weight+0x8c. Together they form the F0-evaluation gate. */
+         * weight+0x8c. */
         if (find_lit(buf, buf + n, "\"type\":\"join_consts\"")) {
             const char *bp = find_lit(buf, buf + n, "\"by_hp_class\":[");
             if (bp) {
@@ -652,8 +603,8 @@ static int load_sp_capture(const char *path, sp_capture_t *out)
             }
             continue;
         }
-        /* s_ctx_remap (voice+0x604): target ctx -> label remap for
-         * S-cost row lookup. Same parser as hp_class_remap. */
+        /* s_ctx_remap (voice+0x604): target ctx -> label remap for S-cost
+         * row lookup. */
         if (find_lit(buf, buf + n, "\"type\":\"s_ctx_remap\"")) {
             const char *rp = find_lit(buf, buf + n, "\"remap\":[");
             if (rp) {
@@ -682,8 +633,8 @@ static int load_sp_capture(const char *path, sp_capture_t *out)
 
         if ((int)slot == 0 && prev_slot > 0 && cur.n > 0) {
             /* Save voice-wide constants (weights, remap tables) before
-             * reset -- they only fire on the FIRST inner_scorer call
-             * per file, but apply to every utterance in the file. */
+             * reset -- they only fire on the FIRST inner_scorer call per
+             * file, but apply to every utterance in the file. */
             engine_weights_t saved_w  = cur.weights;
             hp_remap_t       saved_h  = cur.hp_remap;
             s_ctx_remap_t    saved_s  = cur.s_remap;
@@ -715,11 +666,8 @@ done:
     if (rc != 0) sp_capture_free(out);
 
     /* Fallback: voice-wide events (join_consts / hp_class_remap /
-     * s_ctx_remap) are dumped by the Frida hook only on the FIRST
-     * trace of a session — typically text_001.jsonl. Pull them from
-     * the sibling so all corpus entries inherit the same voice-wide
-     * tables. Apply each table to every utterance we just pushed
-     * (only filling in tables that the current file didn't have). */
+     * s_ctx_remap) are dumped by the Frida hook only on the FIRST trace of
+     * a session — typically text_001.jsonl. */
     if (rc == 0 && out->n > 0 &&
         (!out->utts[0].voicing.has  ||
          !out->utts[0].hp_remap.has ||
@@ -754,16 +702,8 @@ done:
     return rc;
 }
 
-/* ------------------------------------------------------------------ */
-/* Captured cart_walks data                                            */
-/* ------------------------------------------------------------------ */
 
-/* Per-slot target prosody from the engine's CART traversals. The hook
- * emits one walk per (slot, tree) per call -- and InnerScorer calls CART
- * many times per slot (once per candidate scoring pass), so we keep only
- * the first occurrence per (utt, slot, tree). Same-tree repeats produce
- * identical leaves by construction (deterministic traversal of a fixed
- * tree against a fixed slot context). */
+/* Per-slot target prosody from the engine's CART traversals. */
 
 typedef struct {
     int   has_durt;
@@ -775,13 +715,13 @@ typedef struct {
 } cart_targets_t;
 
 typedef struct {
-    cart_targets_t *slots;     /* heap, owned; index = slot number */
+    cart_targets_t *slots;
     uint32_t        n;
     uint32_t        cap;
 } utt_targets_t;
 
 typedef struct {
-    utt_targets_t *utts;       /* heap, owned */
+    utt_targets_t *utts;
     uint32_t       n;
     uint32_t       cap;
 } cart_capture_t;
@@ -793,7 +733,6 @@ static int utt_targets_ensure(utt_targets_t *u, uint32_t need)
     while (nc <= need) nc *= 2u;
     cart_targets_t *ns = realloc(u->slots, nc * sizeof *ns);
     if (!ns) return -1;
-    /* Zero-init newly added range. */
     for (uint32_t i = u->cap; i < nc; ++i) memset(&ns[i], 0, sizeof ns[i]);
     u->slots = ns; u->cap = nc;
     return 0;
@@ -819,10 +758,7 @@ static void cart_capture_free(cart_capture_t *c)
     memset(c, 0, sizeof *c);
 }
 
-/* Parse one cart_walks JSONL line. Returns 0 on success. Out-params:
- *   *out_slot: slot index
- *   *out_tree: 0 = durt, 1 = f0tr, -1 = unknown (skip)
- *   *out_mean, *out_var: leaf values */
+/* Parse one cart_walks JSONL line. */
 static int parse_cart_walk_line(const char *line, size_t n,
                                 uint32_t *out_slot, int *out_tree,
                                 float *out_mean, float *out_var)
@@ -866,9 +802,7 @@ static int parse_cart_walk_line(const char *line, size_t n,
     return 0;
 }
 
-/* Load cart_walks JSONL. Splits into utterances at slot=0 boundaries
- * (same trick as prsl_slot loader). For each utterance + slot, keeps
- * only the FIRST durt walk and FIRST f0tr walk. */
+/* Load cart_walks JSONL. */
 static int load_cart_capture(const char *path, cart_capture_t *out)
 {
     memset(out, 0, sizeof *out);
@@ -891,14 +825,11 @@ static int load_cart_capture(const char *path, cart_capture_t *out)
         if (parse_cart_walk_line(buf, n, &slot, &tree, &mean, &var) != 0)
             continue;
 
-        /* Utterance boundary: slot reset to 0 after seeing higher.
-         * cart_walks intermixes durt and f0tr, so a slot=0 walk after
-         * earlier slot>0 walks marks a new utterance. */
+        /* Utterance boundary: slot reset to 0 after seeing higher. */
         if ((int)slot == 0 && prev_slot > 0 && cur.n > 0) {
             int has_zero = (cur.n > 0 && (cur.slots[0].has_durt ||
                                           cur.slots[0].has_f0tr));
-            /* Only flush if we already saw slot 0 in current utt. The
-             * leading boundary slot in a new utt is always slot=0. */
+            /* Only flush if we already saw slot 0 in current utt. */
             if (has_zero) {
                 if (cart_capture_push(out, cur) != 0) {
                     rc = -1; goto done;
@@ -929,11 +860,7 @@ done:
     return rc;
 }
 
-/* ------------------------------------------------------------------ */
-/* Wsola buffer parser                                                 */
-/* ------------------------------------------------------------------ */
 
-/* Parse the "units":[ ... ] uid sequence into list. Returns 0 on success. */
 static int parse_units(const char *line, size_t n, uid_list_t *out)
 {
     out->n = 0;
@@ -941,7 +868,6 @@ static int parse_units(const char *line, size_t n, uid_list_t *out)
     const char *p   = find_lit(line, end, "\"units\":[");
     if (!p) return -1;
     p += strlen("\"units\":[");
-    /* Walk objects { ... }, extract "uid": NUMBER from each, until ']'. */
     while (p < end && *p != ']') {
         const char *u = find_lit(p, end, "\"uid\":");
         if (!u || u >= end) break;
@@ -951,7 +877,6 @@ static int parse_units(const char *line, size_t n, uid_list_t *out)
         if (e == u) break;
         if (uid_list_push(out, (uint32_t)v) < 0) return -1;
         p = e;
-        /* Advance past this object's closing brace. */
         const char *brace = find_lit(p, end, "}");
         if (!brace) break;
         p = brace + 1;
@@ -960,27 +885,18 @@ static int parse_units(const char *line, size_t n, uid_list_t *out)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Cost glue                                                           */
-/* ------------------------------------------------------------------ */
 
-/* Per-replay scoring context. Held by reference inside the join callback
- * via a small wrapper so the Viterbi DP stays generic. Cost weights can
- * be overridden per-utterance from the inner_scorer capture (where the
- * engine's real weight struct was read from slice+0x24); when no
- * capture is present we use the VCF/default values. */
+/* Per-replay scoring context. */
 typedef struct {
     const spfy_unit_table_t       *units;
     const spfy_voice_maps_t       *maps;
     const spfy_ccos_t             *ccos;
-    const spfy_proscost_matrix_t  *pmats;     /* [SPFY_PROSCOST_N] */
-    /* Cost weights. */
+    const spfy_proscost_matrix_t  *pmats;
     float dur_w;
     float f0_w;
     float ccos_w;
     float miss_f0;
     float w_sp[5];
-    /* Target features (chosen unit). */
     spfy_unit_record_t target;
 } score_ctx_t;
 
@@ -1002,8 +918,8 @@ typedef struct {
  * MISSING_JOIN_COST (~7000) to those transitions. */
 typedef struct {
     const spfy_hash_t       *hash;
-    const spfy_unit_table_t *units;     /* for flag_b lookup */
-    float                    miss_default;  /* legacy fallback miss cost (curve == NULL path) */
+    const spfy_unit_table_t *units;
+    float                    miss_default;
     /* Engine-faithful F0-prob curve (VIN `hist` chunk + voice+0xc8) for
      * the CCOS-gate hash-miss path (FUN_08e8b620 @ 0x08e8b7f8). Same
      * shape as spfy_synth.c's join_ctx_t — see plan 02-02 §"THIRD scope
@@ -1017,9 +933,7 @@ typedef struct {
     float                    missing_join_cost;
 } join_ctx_t;
 
-/* Parse VIN `hist` sub-chunks (head + data) and populate the curve params.
- * On any malformed-chunk error returns a "no curve" state (legacy miss).
- * Lifted verbatim from spfy_synth.c::load_f0_hist_curve (plan 02-02). */
+/* Parse VIN `hist` sub-chunks (head + data) and populate the curve params. */
 static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
 {
     jc->curve = NULL;
@@ -1035,13 +949,13 @@ static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
                      | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
         const uint8_t *body = p + 8;
         if (body + sz > end) return;
-        if (fcc == 0x64616568u /* 'head' LE */ && sz >= 8) {
+        if (fcc == 0x64616568u  && sz >= 8) {
             uint32_t mx, off;
             memcpy(&mx,  body,     4);
             memcpy(&off, body + 4, 4);
             jc->curve_max_idx = (int32_t)mx;
             jc->curve_sub_off = (int32_t)off;
-        } else if (fcc == 0x61746164u /* 'data' LE */) {
+        } else if (fcc == 0x61746164u ) {
             jc->curve = body;
         }
         p = body + sz;
@@ -1091,8 +1005,7 @@ static float join_cb(uint32_t prev_uid, uint32_t curr_uid, void *user)
  *       J = MISSING_JOIN_COST + 0    (CCOS_DEFAULT = 0 for Tom)
  *
  * If jc->curve == NULL falls back to miss_default for any miss. */
-/* Diagnostic counters for the DAG-path join cost. Reset in main() and
- * printed at end. SPFY_DAG_JOIN_TRACE=1 dumps each call to stderr. */
+/* Diagnostic counters for the DAG-path join cost. */
 static long g_dag_total = 0;
 static long g_dag_same_rec = 0;
 static long g_dag_hash_hit = 0;
@@ -1143,7 +1056,6 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
     return jc->missing_join_cost + curve_val;
 }
 
-/* Per-component cost breakdown for diagnostic output. */
 typedef struct {
     float D, F0, SP, S, FLAG;
 } cost_breakdown_t;
@@ -1179,19 +1091,15 @@ static float score_candidate(const score_ctx_t        *sc,
     float durt_mean, durt_scale;
     if (tgt && tgt->has_durt) {
         durt_mean  = tgt->durt_mean;
-        durt_scale = tgt->durt_var;     /* engine uses var as 1/stddev */
+        durt_scale = tgt->durt_var;
     } else {
         durt_mean  = (float)sc->target.f0_context;
         durt_scale = 0.1f;
     }
     /* IMPORTANT (M3.4g): The engine's "D-cost" formula in
      * USelNetworkSlice::all_half_phone_costs reads cand byte at mem+0x12,
-     * which the in-memory unit record layout probe (this session) showed
-     * to be `f0_context`, NOT `dur_like`. Despite the engine's parameter
-     * being named DUR_WEIGHT in the VCF, this term is scored against
-     * f0_context. The naming mismatch is in the engine -- DUR_WEIGHT
-     * mostly likely refers to a duration-sensitive prosody decision,
-     * not a literal duration delta. Use f0_context here. */
+     * which the in-memory unit record layout probe (this session) showed to
+     * be `f0_context`, NOT... */
     float D = spfy_cost_d((uint32_t)cand->f0_context,
                           durt_mean, durt_scale, sc->dur_w);
 
@@ -1224,8 +1132,7 @@ static float score_candidate(const score_ctx_t        *sc,
                           tgt->f0tr_mean, tgt->f0tr_var,
                           sc->f0_w, sc->miss_f0);
     } else if (tgt) {
-        /* No engine voicing capture, no f0tr leaf for this slot. Most
-         * commonly silence / unvoiced. F0 = 0 conservatively. */
+        /* No engine voicing capture, no f0tr leaf for this slot. */
         F0 = 0.0f;
     } else {
         F0 = spfy_cost_f0((uint32_t)cand->f0_start,
@@ -1240,13 +1147,7 @@ static float score_candidate(const score_ctx_t        *sc,
         sp_views[k].n_cols = sc->pmats[k].n_cols;
     }
     /* Target SP indices: prefer engine capture, fall back to chosen-as-
-     * target proxy. The capture order matches InnerScorer's cost-formula
-     * order (matrix 0 row, ..., matrix 4 row), which is *not* the same as
-     * our cost.h doc strings -- those used a sp_syl_in_phrase / sp_syl_type
-     * / sp_word_in_phrase / sp_syl_in_word / phoneInSyl naming for the
-     * candidate columns. The cost is symmetric in the sense that both
-     * sides index the same matrix; the row/column slots just need to be
-     * consistent. */
+     * target proxy. */
     uint32_t sp_tgt_idx[5];
     if (sp_tgt && sp_tgt->has) {
         for (int k = 0; k < 5; ++k) {
@@ -1263,20 +1164,11 @@ static float score_candidate(const score_ctx_t        *sc,
     uint32_t sp_cnd[5] = {
         cand->sp_syl_in_phrase, cand->sp_syl_type,
         cand->sp_word_in_phrase, cand->sp_syl_in_word,
-        cand->sp_phone_in_syl   /* 6 unless the record is v100008 */
+        cand->sp_phone_in_syl
     };
     float SP = spfy_cost_sp(sp_views, sp_tgt_idx, sp_cnd, sc->w_sp);
 
-    /* hp_class indexes the ccos forest. The ccos forest layout uses
-     * "left-first-then-right" hp_class order (0..n_labels-1 are LEFT
-     * halves, n_labels..2*n_labels-1 are RIGHT). The engine's
-     * slice.ctx[2] is in "interleaved phone*2+side" order (with two
-     * phone-pair swaps in Tom: phones 9/10/11 and 14/15).
-     *
-     * Prefer slice.ctx[2] (engine-truth halfphone class) over the
-     * chosen-UID-derived computation. With the captured `hp_remap` we
-     * use it directly; without it we fall through to our (Tom-swap-
-     * patched) `maps->hp_class[]` which has the same semantics. */
+    /* hp_class indexes the ccos forest. */
     uint32_t hp_class;
     if (slice_ctx) {
         if (hp_remap && hp_remap->has &&
@@ -1295,15 +1187,7 @@ static float score_candidate(const score_ctx_t        *sc,
                    ? sc->maps->hp_class[hp_class_idx] : 0;
     }
 
-    /* Target context. With slice_ctx we use the engine-captured 5-tuple
-     * (ctx[0,1,3,4] -- skipping center ctx[2]). The slice values are
-     * halfphone classes in [0..92] (Tom: 46 phones * 2 sides + 1 silence
-     * sentinel). We need to convert each to a label index for ccos row
-     * lookup. The engine uses voice+0x604 as a remap table; without that
-     * capture we fall back to ctx >> 1 (paired-halfphone -> phone_id
-     * for Tom). The remap version is more accurate -- it applies the
-     * 4 phone-pair swaps Tom has (phones 9/10/11 and 14/15) so e.g.
-     * `slice.ctx=31` maps to label 14 (engine) instead of 15 (>>1). */
+    /* Target context. */
     uint8_t target_ctx[4];
     if (slice_ctx && s_remap && s_remap->has &&
         slice_ctx[0] < s_remap->n_entries &&
@@ -1345,21 +1229,15 @@ static float score_candidate(const score_ctx_t        *sc,
     return D + F0 + SP + S + FLAG;
 }
 
-/* ------------------------------------------------------------------ */
-/* Slot building                                                       */
-/* ------------------------------------------------------------------ */
 
 /* Halfphone-class encoding: the engine's PRSL key uses phone_center*2 +
- * side (0 = first/left half, 1 = second/right half). This matches the
- * 0..92 range observed in dump_voice --prsl output. */
+ * side (0 = first/left half, 1 = second/right half). */
 static uint32_t hp_class_of(const spfy_unit_record_t *u)
 {
     return (uint32_t)u->phone_center * 2u + (u->is_first_half ? 0u : 1u);
 }
 
-/* Try to look up a PRSL pool for slot i. We try the halfphone-class
- * triphone encoding first; on miss we try phone-center triphone (some
- * voices key differently). On either hit, *out_cands / *out_n is set. */
+/* Try to look up a PRSL pool for slot i. */
 static int prsl_try_lookup(const spfy_prsl_t *prsl,
                            const spfy_unit_record_t *l,
                            const spfy_unit_record_t *c,
@@ -1383,9 +1261,6 @@ static int prsl_try_lookup(const spfy_prsl_t *prsl,
     return SPFY_E_OOB;
 }
 
-/* ------------------------------------------------------------------ */
-/* One-utterance replay                                                */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     long n_utts;
@@ -1393,34 +1268,30 @@ typedef struct {
     long n_slots_prsl_hit;
     long n_slots_chosen_in_pool;
     long n_slots_matched;
-    long n_utts_complete;             /* ran to end without DP error */
-    long n_slots_pool_matches_capture; /* C-side pool == captured pool */
+    long n_utts_complete;
+    long n_slots_pool_matches_capture;
 } stats_t;
 
 static int replay_utterance(const uid_list_t              *chosen,
-                            const utt_capture_t           *cap,   /* may be NULL */
-                            const utt_targets_t           *tgts,  /* may be NULL */
-                            const utt_sp_targets_t        *spts,  /* may be NULL */
+                            const utt_capture_t           *cap,
+                            const utt_targets_t           *tgts,
+                            const utt_sp_targets_t        *spts,
                             const spfy_unit_table_t       *units,
                             const spfy_prsl_t             *prsl,
                             const spfy_hash_t             *hash,
                             const spfy_ccos_t             *ccos,
                             const spfy_voice_maps_t       *maps,
                             const spfy_proscost_matrix_t  *pmats,
-                            const spfy_vin_t              *vin,    /* plan 02-02: F0-curve loader */
+                            const spfy_vin_t              *vin,
                             float dur_w, float f0_w, float ccos_w,
                             float miss_f0, const float w_sp[5],
                             float join_miss_default,
+                            int path_f0_flag,
                             uint32_t utt_idx,
                             stats_t *st)
 {
     (void)join_miss_default;
-    /* Build the slot list. Two modes:
-     *   - With a captured prsl_slot trace: keep ALL chosen UIDs as slots
-     *     (the engine emits PRSL slots for boundary uids too).
-     *   - Without: drop uid=0 / oob entries since we'd have no way to
-     *     derive a meaningful triphone for them.
-     * Also drop UIDs we cannot resolve in the unit table either way. */
+    /* Build the slot list. */
     uint32_t *slot_uids = (uint32_t *)calloc(chosen->n, sizeof *slot_uids);
     spfy_unit_record_t *recs = (spfy_unit_record_t *)
         calloc(chosen->n, sizeof *recs);
@@ -1433,7 +1304,6 @@ static int replay_utterance(const uid_list_t              *chosen,
             if (u >= units->n_units) continue;
             if (u == 0) continue;
         } else {
-            /* With captures we keep boundary slots; we still skip OOB. */
             if (u >= units->n_units) {
                 slot_uids[n_slots] = u;
                 memset(&recs[n_slots], 0, sizeof recs[n_slots]);
@@ -1450,13 +1320,11 @@ static int replay_utterance(const uid_list_t              *chosen,
         recs[n_slots]      = r;
         n_slots++;
     }
-    if (n_slots < 2) {           /* need at least 2 slots for a join test */
+    if (n_slots < 2) {
         free(slot_uids); free(recs);
         return 0;
     }
-    /* If we have captures but counts disagree (rare -- e.g. truncated
-     * trace), fall back to neighbor-derived ctx so the run still completes
-     * with sensible numbers. */
+    /* If we have captures but counts disagree (rare -- e.g. */
     if (cap != NULL && cap->n != n_slots) {
         fprintf(stderr,
                 "  utt %u: prsl_slot count %u != wsola slot count %u; "
@@ -1465,7 +1333,6 @@ static int replay_utterance(const uid_list_t              *chosen,
         cap = NULL;
     }
 
-    /* Build per-slot candidate pools and target-cost arrays. */
     spfy_viterbi_slot_t *slots = (spfy_viterbi_slot_t *)
         calloc(n_slots, sizeof *slots);
     /* Owning copies of cand arrays + target_cost (since PRSL pools alias
@@ -1473,12 +1340,7 @@ static int replay_utterance(const uid_list_t              *chosen,
      * UID if it's missing). */
     uint32_t **cand_buf = (uint32_t **)calloc(n_slots, sizeof *cand_buf);
     float    **tc_buf   = (float    **)calloc(n_slots, sizeof *tc_buf);
-    /* Plan 02-02 — per-cand engine F0-state bytes for the DAG join cost.
-     * c68 = unit_mem+0x11 (f0_mid)   — gate's run-length reset threshold
-     * c6c = unit_mem+0x10 (f0_end)   — passed as curr_c6c to dag_join_cb
-     * c70 = unit_mem+0x0f (f0_start) — stored on cand+0x70
-     * c78 = unit_mem+0x0f (f0_start) — gate's smooth-miss counter seed
-     * (see spfy/src/usel/viterbi.h spfy_viterbi_dag_slot_t comments). */
+    /* Plan 02-02 — per-cand engine F0-state bytes for the DAG join cost. */
     uint8_t  **cand_c68 = (uint8_t **)calloc(n_slots, sizeof *cand_c68);
     uint8_t  **cand_c6c = (uint8_t **)calloc(n_slots, sizeof *cand_c6c);
     uint8_t  **cand_c70 = (uint8_t **)calloc(n_slots, sizeof *cand_c70);
@@ -1495,17 +1357,13 @@ static int replay_utterance(const uid_list_t              *chosen,
     long u_slots_pool_matches_capture = 0;
 
     for (uint32_t s = 0; s < n_slots; ++s) {
-        const uint8_t  *pcands   = NULL;   /* u32[] aliasing VIN; see prsl.h */
+        const uint8_t  *pcands   = NULL;
         uint32_t        pn       = 0;
         uint32_t        used_key = 0;
         int             rc_p     = SPFY_E_OOB;
 
         if (cap != NULL) {
-            /* Use the engine's captured ctx[5] from the prsl_slot trace.
-             * The decoded encoding is:
-             *     key = ctx[1] * 10000 + ctx[2] * 100 + ctx[3]
-             * where ctx[1..3] are halfphone classes at positions slot-2,
-             * slot, slot+2 (same-side triphone). */
+            /* Use the engine's captured ctx[5] from the prsl_slot trace. */
             const slot_capture_t *cs = &cap->slots[s];
             used_key = spfy_prsl_context_key(cs->ctx[1], cs->ctx[2],
                                              cs->ctx[3]);
@@ -1519,8 +1377,7 @@ static int replay_utterance(const uid_list_t              *chosen,
             rc_p = prsl_try_lookup(prsl, L, C, R, &pcands, &pn, &used_key);
         }
 
-        /* Decide candidate set. Always include the chosen UID (so the test
-         * can run; if it isn't in PRSL output we'll log it). */
+        /* Decide candidate set. */
         int chosen_in_pool = 0;
         if (rc_p == SPFY_OK) {
             u_slots_prsl_hit++;
@@ -1548,8 +1405,7 @@ static int replay_utterance(const uid_list_t              *chosen,
         }
 
         /* Same-recording continuation: for s>0, the engine may select
-         * `chosen[s-1] + 1` directly without going through PRSL. Augment
-         * the pool with that uid (if not already present and in range). */
+         * `chosen[s-1] + 1` directly without going through PRSL. */
         uint32_t prev_plus_one = 0;
         int      add_prev_plus_one = 0;
         if (s > 0) {
@@ -1591,12 +1447,7 @@ static int replay_utterance(const uid_list_t              *chosen,
         if (!chosen_in_pool)   cand_buf[s][k++] = slot_uids[s];
         if (add_prev_plus_one) cand_buf[s][k++] = prev_plus_one;
 
-        /* Set up the scoring context. The 'target' field of score_ctx is
-         * still recs[s] so SP and S costs use the chosen-UID-as-target
-         * proxy (no engine capture for those features yet). D and F0 will
-         * use the captured cart_walks leaves below if available. Weights
-         * are overridden by the inner_scorer-captured engine values when
-         * present (engine reads them from slice+0x24+offset). */
+        /* Set up the scoring context. */
         score_ctx_t sc = {0};
         sc.units   = units;
         sc.maps    = maps;
@@ -1634,13 +1485,10 @@ static int replay_utterance(const uid_list_t              *chosen,
             uint32_t cu = cand_buf[s][i];
             spfy_unit_record_t cr;
             if (spfy_unit_record_get(units, cu, &cr) != SPFY_OK) {
-                tc_buf[s][i] = -1.0f;     /* forbidden */
-                /* leave c68/c6c/c70/c78 = 0 (calloc) for forbidden cands */
+                tc_buf[s][i] = -1.0f;
                 continue;
             }
-            /* Plan 02-02: per-cand F0-state bytes for dag_join_cb.
-             * Engine reads these from in-mem unit struct at cand+0x68 etc;
-             * derived from disk fields per spfy_synth.c:1396-1401. */
+            /* Plan 02-02: per-cand F0-state bytes for dag_join_cb. */
             cand_c6c[s][i] = cr.f0_end;
             cand_c68[s][i] = cr.f0_mid;
             cand_c70[s][i] = cr.f0_start;
@@ -1750,12 +1598,9 @@ static int replay_utterance(const uid_list_t              *chosen,
     float    total  = 0.0f;
     int      rc_v;
     if (getenv("SPFY_LEGACY_VIT")) {
-        /* Legacy linear DP for diagnostic A/B against the DAG path. */
         rc_v = spfy_viterbi_run(slots, n_slots, join_cb, &jc, path, &total);
     } else {
-        /* DAG-with-CCOS-gate. Build a per-slot pred list of length 1
-         * (= [s-1]) for s>0 and zero-length for s=0. The DAG variant
-         * forwards per-cand c7c/c80 along the chosen pred path. */
+        /* DAG-with-CCOS-gate. */
         spfy_viterbi_dag_slot_t *dag_slots = (spfy_viterbi_dag_slot_t *)
             calloc(n_slots, sizeof *dag_slots);
         uint32_t *pred_cells = (uint32_t *)
@@ -1767,7 +1612,7 @@ static int replay_utterance(const uid_list_t              *chosen,
         for (uint32_t s = 0; s < n_slots; ++s) {
             pred_cells[s] = (s == 0) ? 0u : (s - 1u);
             dag_slots[s].cands       = cand_buf[s];
-            dag_slots[s].join_keys   = cand_buf[s];   /* HP leaf: uid == join_key */
+            dag_slots[s].join_keys   = cand_buf[s];
             dag_slots[s].target_cost = tc_buf[s];
             dag_slots[s].n_cands     = slots[s].n_cands;
             dag_slots[s].preds       = (s == 0) ? NULL : &pred_cells[s];
@@ -1780,8 +1625,8 @@ static int replay_utterance(const uid_list_t              *chosen,
         uint32_t *path_slots = (uint32_t *)calloc(n_slots, sizeof *path_slots);
         uint32_t  path_len   = 0;
         rc_v = spfy_viterbi_run_dag(dag_slots, n_slots, dag_join_cb, &jc,
-                                     path_slots, path, &path_len, &total);
-        /* All n_slots are HP leaves so path_len == n_slots on success. */
+                                     path_slots, path, &path_len, &total,
+                                     path_f0_flag);
         if (rc_v == SPFY_OK && path_len != n_slots) {
             fprintf(stderr,
                     "  utt %u: dag path_len=%u != n_slots=%u; downstream "
@@ -1800,9 +1645,7 @@ static int replay_utterance(const uid_list_t              *chosen,
         st->n_utts_complete++;
     }
 
-    /* Per-cand totals dump (env: SPFY_DUMP_CAND_TOTALS=1). Emits one
-     * line per (utt, slot, cand) to stdout for offline diff against the
-     * engine's per-cand totals captured via the inner_scorer hook. */
+    /* Per-cand totals dump (env: SPFY_DUMP_CAND_TOTALS=1). */
     if (getenv("SPFY_DUMP_CAND_TOTALS")) {
         for (uint32_t s = 0; s < n_slots; ++s) {
             for (uint32_t i = 0; i < slots[s].n_cands; ++i) {
@@ -1813,21 +1656,14 @@ static int replay_utterance(const uid_list_t              *chosen,
         }
     }
 
-    /* Per-slot mismatch dump (env: SPFY_DEBUG_MISMATCH=1 or =UTT_NUM).
-     * For each slot where best_path != chosen, print:
-     *   slot s: chosen=UID_C tc=TC_C [pool_idx=I_C]  best=UID_B tc=TC_B [pool_idx=I_B]
-     *   diff target = TC_C - TC_B   (positive = chosen worse)
-     * The DP-level total cost difference can include join contributions
-     * which we don't break out here -- look at the per-slot target cost
-     * gap to find systematic component scoring bugs. */
+    /* Per-slot mismatch dump (env: SPFY_DEBUG_MISMATCH=1 or =UTT_NUM). */
     const char *dbg_env = getenv("SPFY_DEBUG_MISMATCH");
     int dbg_enabled = (dbg_env != NULL) &&
                       (atoi(dbg_env) == 0 ||
                        (uint32_t)atoi(dbg_env) == utt_idx);
     if (rc_v == SPFY_OK && dbg_enabled) {
         for (uint32_t s = 0; s < n_slots; ++s) {
-            if (path[s] == slot_uids[s]) continue;     /* match -- skip */
-            /* Find pool indices for chosen and best. */
+            if (path[s] == slot_uids[s]) continue;
             int     ic = -1, ib = -1;
             for (uint32_t i = 0; i < slots[s].n_cands; ++i) {
                 if (slots[s].cands[i] == slot_uids[s]) ic = (int)i;
@@ -1858,7 +1694,6 @@ static int replay_utterance(const uid_list_t              *chosen,
         }
     }
 
-    /* Per-utterance summary line. */
     fprintf(stdout,
         "utt %3u: slots=%2u  prsl=%2ld  chosen_in_pool=%2ld  "
         "pool_eq_cap=%2ld  matched=%2ld  rc=%s  cost=%.3f\n",
@@ -1867,11 +1702,7 @@ static int replay_utterance(const uid_list_t              *chosen,
         rc_v == SPFY_OK ? "ok" : spfy_strerror(rc_v),
         (double)total);
 
-    /* Per-phrase JSONL emit for plan 02-06 Task 2 / D-12 schema. Gated
-     * on SPFY_VR_JSONL_OUT env var; the corpus driver sets SPFY_VR_ID
-     * and SPFY_VR_MODE per phrase. n_uid_match is the canonical integer
-     * field the corpus aggregate sums directly to avoid float round-trip
-     * through uid_match_pct (per plan 02-06 Threat T-02-26). */
+    /* Per-phrase JSONL emit for plan 02-06 Task 2 / D-12 schema. */
     {
         const char *jsonl_out = getenv("SPFY_VR_JSONL_OUT");
         if (jsonl_out && *jsonl_out) {
@@ -1929,9 +1760,6 @@ cleanup:
     return ok;
 }
 
-/* ------------------------------------------------------------------ */
-/* main                                                                */
-/* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv)
 {
@@ -1969,7 +1797,6 @@ int main(int argc, char **argv)
     float ccos_w  = (float)get_vcf_f64(&vcf, "tts.voiceCfg.CONTEXT_COST_WEIGHT",1.0);
     float miss_f0 = (float)get_vcf_f64(&vcf, "tts.voiceCfg.MISSING_F0_COST", 1000.0);
     float join_miss = (float)get_vcf_f64(&vcf, "tts.voiceCfg.JOIN_COST_OFFSET", 0.2);
-    /* SP weights: Tom defaults; configurable in VCF too. */
     float w_sp[5] = {0.1f, 0.1f, 0.0f, 0.0f, 0.0f};
 
     fprintf(stdout, "loaded: %u units, %u prsl groups, %u hash rows / %u cells\n",
@@ -1979,7 +1806,6 @@ int main(int argc, char **argv)
             dur_w, f0_w, ccos_w, w_sp[0], w_sp[1], w_sp[2], w_sp[3], w_sp[4],
             miss_f0, join_miss);
 
-    /* Optional prsl_slot capture. */
     prsl_capture_t pcap = {0};
     int have_cap = 0;
     if (argc >= 5) {
@@ -1993,7 +1819,6 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Optional cart_walks capture for real per-slot D + F0 targets. */
     cart_capture_t ccap = {0};
     int have_tgts = 0;
     if (argc >= 6) {
@@ -2008,7 +1833,6 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Optional inner_scorer capture for real per-slot SP target features. */
     sp_capture_t scap = {0};
     int have_sp = 0;
     if (argc >= 7) {
@@ -2050,7 +1874,9 @@ int main(int argc, char **argv)
                                        : NULL;
         replay_utterance(&chosen, cap, tgts, spts, &units, &prsl, &hash,
                          &ccos, &maps, pmats, &vin, dur_w, f0_w, ccos_w,
-                         miss_f0, w_sp, join_miss, utt, &st);
+                         miss_f0, w_sp, join_miss,
+                         (get_vcf_f64(&vcf, "GET_RID_OF_PATH_F0", 0.0) != 0.0),
+                         utt, &st);
     }
     fclose(fp);
     free(chosen.uids);
@@ -2064,8 +1890,7 @@ int main(int argc, char **argv)
     fprintf(stdout, "slots total          : %ld\n", st.n_slots_total);
     /* Percentages cast their long counters to double explicitly: on 64-bit
      * hosts `long` is 64-bit and GCC's -Wconversion flags the implicit
-     * widening as possibly lossy. These are slot/call tallies that never
-     * approach 2^53, so the cast is exact — it just states the intent. */
+     * widening as possibly lossy. */
     fprintf(stdout, "slots PRSL hit       : %ld  (%.1f%%)\n",
             st.n_slots_prsl_hit,
             st.n_slots_total
@@ -2089,7 +1914,6 @@ int main(int argc, char **argv)
             st.n_slots_matched,
             st.n_slots_total
             ? 100.0 * (double)st.n_slots_matched / (double)st.n_slots_total : 0);
-    /* DAG-path join cost diagnostics (plan 02-02 THIRD scope revision). */
     if (g_dag_total > 0) {
         fprintf(stdout, "dag join calls       : %ld\n", g_dag_total);
         fprintf(stdout, "  same-rec adjacent  : %ld  (%.2f%%)\n",

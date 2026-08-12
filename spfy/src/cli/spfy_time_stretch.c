@@ -1,9 +1,4 @@
-/* spfy_time_stretch — A/B tester for the WSOLA time-stretch DSP.
- *
- *   spfy_time_stretch <in.wav> <factor> <out.wav>
- *
- * factor > 1.0 speeds up (shorter output), < 1.0 slows down.
- * Pure post-process on rendered PCM. */
+/* spfy_time_stretch — A/B tester for the WSOLA time-stretch DSP. */
 
 #include "time_stretch.h"
 

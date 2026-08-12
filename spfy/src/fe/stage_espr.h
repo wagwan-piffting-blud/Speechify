@@ -41,12 +41,7 @@
  */
 
 /* Emit ESPR text for the parsed-and-prosody-tagged delta into a
- * caller-supplied buffer. Returns SPFY_OK on success or SPFY_E_OOB
- * if the buffer would overflow (caller should retry with larger).
- *
- * On success, *out_len is set to the number of bytes written
- * (excluding NUL terminator). The buffer is NUL-terminated.
- */
+ * caller-supplied buffer. */
 int  spfy_fe_espr_emit(const spfy_fe_t *fe,
                        const char       *original_text,
                        spfy_fe_delta_t  *delta,

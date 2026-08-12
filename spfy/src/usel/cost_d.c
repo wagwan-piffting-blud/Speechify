@@ -1,4 +1,3 @@
-/* Duration cost component. */
 
 #include "cost.h"
 

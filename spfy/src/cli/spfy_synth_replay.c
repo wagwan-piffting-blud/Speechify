@@ -1,20 +1,5 @@
-/* spfy_synth_replay -- end-to-end synth using FE traces (no FE port required).
- *
- * Pipeline:
- *   FE traces (prsl_slot, cart_walks, inner_scorer) ->
- *   per-slot cand pool ->
- *   per-cand cost via spfy_hp_innerscorer (engine-truth, 99% bit-exact) ->
- *   Viterbi DP with hash-based join cost ->
- *   chosen UIDs ->
- *   concat audio (same-rec / cross-rec pair detection from spfy_concat) ->
- *   WAV.
- *
- * Targets utt 0 of one text_id at a time. wsola_buffer trace (oracle) is
- * loaded only for the match% comparison; not required for synthesis.
- *
- *   spfy_synth_replay <voice.vin> <voice.vdb> <voice.vcf>
- *                     <hpclass.bin> <traces_dir> <text_id> <out.wav>
- */
+/* spfy_synth_replay -- end-to-end synth using FE traces (no FE port
+ * required). */
 
 #include <spfy/spfy.h>
 
@@ -43,9 +28,6 @@
 #define MAX_SLOTS            256
 #define MAX_CANDS_PER_SLOT   512
 
-/* ------------------------------------------------------------------ */
-/* Tiny JSONL parsers (same shape as spfy_hp_score_test)               */
-/* ------------------------------------------------------------------ */
 
 static const char *find_lit(const char *p, const char *end, const char *lit)
 {
@@ -138,9 +120,6 @@ static int next_line(const char **p, const char *end,
     return 1;
 }
 
-/* ------------------------------------------------------------------ */
-/* Per-slot inputs assembled from the captured traces (utt 0)          */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     int      have;
@@ -151,8 +130,7 @@ typedef struct {
     uint32_t                n_cands;
 } slot_input_t;
 
-/* Parse prsl_slot/<text>.jsonl utt 0 into per-slot ctx + cands.
- * Stops at the start of utt 1 (slot=0 reappearing). */
+/* Parse prsl_slot/<text>.jsonl utt 0 into per-slot ctx + cands. */
 static int load_prsl_slot_utt0(const char *path, slot_input_t *slots,
                                uint32_t *n_slots_out)
 {
@@ -171,7 +149,7 @@ static int load_prsl_slot_utt0(const char *path, slot_input_t *slots,
         if (read_key_i64(ls, le, "slot", &slot) != 0) continue;
         if (slot < 0 || slot >= MAX_SLOTS) continue;
         if (slot == 0) {
-            if (seen0) break;            /* utt 1 starts */
+            if (seen0) break;
             seen0 = 1;
         }
         int64_t arr[8];
@@ -182,7 +160,6 @@ static int load_prsl_slot_utt0(const char *path, slot_input_t *slots,
         sl->have = 1;
         if ((uint32_t)slot > max_slot) max_slot = (uint32_t)slot;
 
-        /* Cands. */
         const char *up = find_lit(ls, le, "\"uids\":[");
         if (up) {
             up += strlen("\"uids\":[");
@@ -204,8 +181,7 @@ static int load_prsl_slot_utt0(const char *path, slot_input_t *slots,
     return 0;
 }
 
-/* Parse cart_walks/<text>.jsonl utt 0: per-slot durt + f0tr leaves.
- * Same utt-boundary detection (slot-drop) as spfy_hp_score_test. */
+/* Parse cart_walks/<text>.jsonl utt 0: per-slot durt + f0tr leaves. */
 static int load_cart_walks_utt0(const char *path, slot_input_t *slots)
 {
     char *buf = NULL; size_t buf_n = 0;
@@ -213,7 +189,7 @@ static int load_cart_walks_utt0(const char *path, slot_input_t *slots)
     const char *p = buf, *end = buf + buf_n;
     const char *ls, *le;
     int64_t max_slot = -1;
-    int phase = 0;       /* 0=durt, 1=f0tr */
+    int phase = 0;
     while (next_line(&p, end, &ls, &le)) {
         if (!find_lit(ls, le, "\"type\":\"cart_walk\"")) continue;
         int64_t slot;
@@ -241,7 +217,6 @@ static int load_cart_walks_utt0(const char *path, slot_input_t *slots)
     return 0;
 }
 
-/* Parse inner_scorer/<text>.jsonl utt 0: per-slot sp_target. */
 static int load_inner_scorer_sp_utt0(const char *path, slot_input_t *slots)
 {
     char *buf = NULL; size_t buf_n = 0;
@@ -268,8 +243,7 @@ static int load_inner_scorer_sp_utt0(const char *path, slot_input_t *slots)
     return 0;
 }
 
-/* Read voicing[] from inner_scorer/text_001.jsonl join_consts (singleton).
- * Voicing is voice-wide; only emitted on the first hook fire of the session. */
+/* Read voicing[] from inner_scorer/text_001.jsonl join_consts (singleton). */
 static int load_voicing(const char *traces_dir, uint32_t *voicing,
                         uint32_t *n_out)
 {
@@ -302,7 +276,6 @@ static int load_voicing(const char *traces_dir, uint32_t *voicing,
     return 0;
 }
 
-/* Parse wsola_buffer/<text>.jsonl utt 0 chosen UIDs (oracle for compare). */
 static int load_oracle_utt0(const char *path, uint32_t *out, uint32_t *n_out,
                             uint32_t cap)
 {
@@ -335,10 +308,6 @@ static int load_oracle_utt0(const char *path, uint32_t *out, uint32_t *n_out,
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Audio path (M4 WSOLA: streaming Hann OLA at every boundary,         */
-/*             cross-correlation alignment for cross-rec joins)        */
-/* ------------------------------------------------------------------ */
 
 static int decode_unit_samples(uint32_t file_idx, uint32_t lp_ms,
                                uint32_t dur_ms,
@@ -357,19 +326,20 @@ static int decode_unit_samples(uint32_t file_idx, uint32_t lp_ms,
     if (rc != SPFY_OK) return rc;
     uint32_t off  = lp_ms * 8u;
     uint32_t blen = dur_ms * 8u;
-    if (off >= rec_size) return SPFY_OK;
-    if (off + blen > rec_size) blen = rec_size - off;
+    uint32_t bps = vdb->bytes_per_sample ? vdb->bytes_per_sample : 1u;
+    uint32_t rec_n = rec_size / bps;
+    if (off >= rec_n) return SPFY_OK;
+    if (off + blen > rec_n) blen = rec_n - off;
     if (blen == 0) return SPFY_OK;
     int16_t *buf = (int16_t *)malloc(blen * sizeof *buf);
     if (!buf) return SPFY_E_NOMEM;
-    spfy_ulaw_decode(vdb->data + rec_off + off, blen, buf);
+    spfy_vdb_decode(vdb, rec_off, off, blen, buf);
     *out   = buf;
     *out_n = blen;
     return SPFY_OK;
 }
 
-/* Push one decoded chunk into the streamer. align=1 when the chunk
- * starts a new recording (cross-rec or non-adjacent same-rec). */
+/* Push one decoded chunk into the streamer. */
 static int push_decoded(spfy_wsola_streamer_t *ws, int16_t *buf, size_t n,
                         int align)
 {
@@ -392,9 +362,6 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
     return rc;
 }
 
-/* ------------------------------------------------------------------ */
-/* Viterbi join cost                                                   */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     const spfy_hash_t       *hash;
@@ -419,9 +386,6 @@ static float join_cb(uint32_t prev_uid, uint32_t curr_uid, void *user)
     return jc->miss_default;
 }
 
-/* ------------------------------------------------------------------ */
-/* Main                                                                */
-/* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv)
 {
@@ -449,10 +413,8 @@ int main(int argc, char **argv)
     spfy_proscost_matrix_t pros[SPFY_PROSCOST_N] = {0};
     spfy_hash_t hash = {0};
     uint8_t *hpc = NULL; uint32_t hpc_n = 0;
-    /* Declared here rather than at first use: every `goto fail` below
-     * lands in the shared cleanup block, which frees these. Declaring
-     * them further down means an early failure jumps over the
-     * initialisation and cleanup then frees indeterminate pointers. */
+    /* Declared here rather than at first use: every `goto fail` below lands
+     * in the shared cleanup block, which frees these. */
     spfy_viterbi_slot_t *vslots = NULL;
     uint32_t **cbuf = NULL;
     float    **tbuf = NULL;
@@ -461,7 +423,7 @@ int main(int argc, char **argv)
 
     if ((rc = spfy_vin_load(vin_path, &vin))            != SPFY_OK) goto fail;
     if ((rc = spfy_vdb_load(vdb_path, &vdb))            != SPFY_OK) goto fail;
-    if ((rc = spfy_vdb_require_8k_mulaw(&vdb, vdb_path)) != SPFY_OK) goto fail;
+    if ((rc = spfy_vdb_require_supported(&vdb, vdb_path)) != SPFY_OK) goto fail;
     if ((rc = spfy_vcf_load(vcf_path, &vcf))            != SPFY_OK) goto fail;
     if ((rc = spfy_unit_table_load(&vin, &units))       != SPFY_OK) goto fail;
     if ((rc = spfy_feat_table_load(&vin, &feat))        != SPFY_OK) goto fail;
@@ -489,7 +451,6 @@ int main(int argc, char **argv)
         av.voicing_n = voicing_n;
     }
 
-    /* Load per-slot inputs from FE traces. */
     static slot_input_t slots[MAX_SLOTS];
     memset(slots, 0, sizeof slots);
     char path[1024];
@@ -502,7 +463,6 @@ int main(int argc, char **argv)
     snprintf(path, sizeof path, "%s/inner_scorer/%s.jsonl", traces_dir, text_id);
     load_inner_scorer_sp_utt0(path, slots);
 
-    /* Load oracle (chosen UIDs) for match% reporting. */
     static uint32_t oracle[MAX_SLOTS];
     uint32_t oracle_n = 0;
     snprintf(path, sizeof path, "%s/wsola_buffer/%s.jsonl", traces_dir, text_id);
@@ -512,15 +472,7 @@ int main(int argc, char **argv)
                     "voicing_n=%u\n",
             units.n_units, n_slots, text_id, oracle_n, voicing_n);
 
-    /* Build per-slot Viterbi inputs.
-     *
-     * For each slot s:
-     *   - cand pool = prsl_slot uids (in capture order)
-     *   - augment with chosen[s-1]+1 (same-rec continuation) when not present
-     *   - score every cand via spfy_hp_innerscorer
-     *   - boundary slots (where ctx[2] is silence sentinel) keep 1 cand
-     *     with cost 0 (terminal) so the DP can still walk through.
-     */
+    /* Build per-slot Viterbi inputs. */
     vslots = (spfy_viterbi_slot_t *)calloc(n_slots, sizeof *vslots);
     cbuf   = (uint32_t **)calloc(n_slots, sizeof *cbuf);
     tbuf   = (float    **)calloc(n_slots, sizeof *tbuf);
@@ -529,8 +481,7 @@ int main(int argc, char **argv)
     for (uint32_t s = 0; s < n_slots; ++s) {
         slot_input_t *sl = &slots[s];
         if (!sl->have) {
-            /* Slot missing from capture (truncated trace). Inject the
-             * oracle UID as a single-cand "free" slot so the DP can run. */
+            /* Slot missing from capture (truncated trace). */
             uint32_t fb = (s < oracle_n) ? oracle[s] : 0u;
             cbuf[s] = (uint32_t *)calloc(1, sizeof **cbuf);
             tbuf[s] = (float    *)calloc(1, sizeof **tbuf);
@@ -541,7 +492,6 @@ int main(int argc, char **argv)
             continue;
         }
 
-        /* Augment cand pool with prev-oracle+1 same-rec continuation. */
         uint32_t cap_n = sl->n_cands + 2u;
         cbuf[s] = (uint32_t *)calloc(cap_n, sizeof **cbuf);
         tbuf[s] = (float    *)calloc(cap_n, sizeof **tbuf);
@@ -551,9 +501,7 @@ int main(int argc, char **argv)
         for (uint32_t i = 0; i < sl->n_cands; ++i)
             cbuf[s][k++] = sl->cands[i];
 
-        /* Same-rec continuation cand: oracle[s-1]+1 if not present. We
-         * use the oracle predecessor here because we want the augmented
-         * pool to MATCH what the engine actually had access to. */
+        /* Same-rec continuation cand: oracle[s-1]+1 if not present. */
         if (s > 0 && (s - 1) < oracle_n) {
             uint32_t pp = oracle[s-1] + 1u;
             if (pp < units.n_units) {
@@ -563,7 +511,6 @@ int main(int argc, char **argv)
                 if (!present) cbuf[s][k++] = pp;
             }
         }
-        /* Always include oracle[s] for diagnosis (no-op if already present). */
         if (s < oracle_n) {
             int present = 0;
             for (uint32_t i = 0; i < k; ++i)
@@ -571,13 +518,12 @@ int main(int argc, char **argv)
             if (!present) cbuf[s][k++] = oracle[s];
         }
 
-        /* Score each cand. */
         for (uint32_t i = 0; i < k; ++i) {
             float c = NAN;
             int rcs = spfy_hp_innerscorer(&av, &sl->ctx, &sl->sp,
                                           &sl->cart, cbuf[s][i], &c);
             if (rcs != SPFY_OK || isnan(c) || isinf(c)) {
-                tbuf[s][i] = 1e9f;       /* effectively forbidden */
+                tbuf[s][i] = 1e9f;
             } else {
                 tbuf[s][i] = c;
             }
@@ -587,7 +533,6 @@ int main(int argc, char **argv)
         vslots[s].n_cands     = k;
     }
 
-    /* Run Viterbi. */
     join_ctx_t jc;
     jc.hash         = &hash;
     jc.units        = &units;
@@ -604,7 +549,6 @@ int main(int argc, char **argv)
         rc = rc_v; free(path_uids); goto fail;
     }
 
-    /* Match% vs oracle. */
     uint32_t n_match = 0, n_cmp = 0;
     uint32_t cmp_n = oracle_n < n_slots ? oracle_n : n_slots;
     for (uint32_t s = 0; s < cmp_n; ++s) {
@@ -626,17 +570,16 @@ int main(int argc, char **argv)
         }
     }
 
-    /* ----- Write WAV from chosen UIDs via streaming WSOLA ----- */
     spfy_wav_writer_t wav = {0};
     if ((rc = spfy_wav_open(&wav, out_wav, vdb.sample_rate)) != SPFY_OK) {
         free(path_uids); goto fail;
     }
     spfy_wsola_streamer_t ws;
     spfy_wsola_init(&ws, &wav);
-    /* Track previous unit's recording for cross-rec detection (drives
-     * the `align` flag passed to the streamer: 1 means run the
-     * cross-correlation lag search to align pitch periods at the join,
-     * 0 means trust the source audio is already continuous). */
+    /* Track previous unit's recording for cross-rec detection (drives the
+     * `align` flag passed to the streamer: 1 means run the
+     * cross-correlation lag search to align pitch periods at the join, 0
+     * means trust the source audio... */
     int      prev_have    = 0;
     uint16_t prev_file_idx = 0;
     uint16_t prev_local_pos = 0;
@@ -657,9 +600,8 @@ int main(int argc, char **argv)
             ++skipped; ++s; prev_have = 0;
             continue;
         }
-        /* Same-rec pair detection (still useful: lets us emit ONE
-         * combined span instead of two halves with a join). The streamer
-         * will then OLA against the previous unit's tail. */
+        /* Same-rec pair detection (still useful: lets us emit ONE combined
+         * span instead of two halves with a join). */
         int paired = 0;
         if (s + 1 < n_slots) {
             uint32_t v = path_uids[s+1];
@@ -689,18 +631,14 @@ int main(int argc, char **argv)
             }
         }
         if (!paired) {
-            /* Cross-rec / standalone: emit unit's natural span and let
-             * the streamer Hann-OLA the boundary. align=1 whenever the
-             * recording or position changes (i.e. not a continuation
-             * within the same source). */
+            /* Cross-rec / standalone: emit unit's natural span and let the
+             * streamer Hann-OLA the boundary. */
             int align = !prev_have || prev_file_idx != r1.file_idx
                      || (uint32_t)r1.local_pos
                         != (uint32_t)prev_local_pos + prev_dur_like;
             if (s + 1 < n_slots) {
                 /* Sanity-only counter for cross-rec joins (vs standalone
-                 * adjacents that share phone_center but different recs).
-                 * The streamer doesn't care; this is for the summary
-                 * line below. */
+                 * adjacents that share phone_center but different recs). */
                 spfy_unit_record_t r2;
                 if (path_uids[s+1] < units.n_units
                     && spfy_unit_record_get(&units, path_uids[s+1], &r2)
@@ -743,8 +681,8 @@ fail_wav:
 fail:
     if (rc != 0) fprintf(stderr, "error: %s\n", spfy_strerror(rc));
 cleanup:
-    /* Guard on the arrays actually indexed below: vslots can allocate
-     * while cbuf/tbuf fail, and n_slots is 0 on any early failure. */
+    /* Guard on the arrays actually indexed below: vslots can allocate while
+     * cbuf/tbuf fail, and n_slots is 0 on any early failure. */
     if (cbuf && tbuf) {
         for (uint32_t i = 0; i < n_slots; ++i) {
             free(cbuf[i]); free(tbuf[i]);

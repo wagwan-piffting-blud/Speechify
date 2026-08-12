@@ -15,7 +15,7 @@
  * not a constant expression and so cannot initialise a struct field
  * directly. */
 typedef struct {
-    const char          *lang;   /* e.g. "en-US", "fr-CA", "es-MX" */
+    const char          *lang;
     const unsigned char *data;
     const size_t        *size;
 } spfy_fe_dll_entry_t;
@@ -23,8 +23,7 @@ typedef struct {
 extern const spfy_fe_dll_entry_t spfy_fe_dlls[];
 extern const size_t              spfy_fe_n_dlls;
 
-/* Look up an embedded FE image by VCF language tag (case-insensitive).
- * Returns NULL when the language was not built in. */
+/* Look up an embedded FE image by VCF language tag (case-insensitive). */
 const spfy_fe_dll_entry_t *spfy_fe_dll_for_lang(const char *lang);
 
 #endif

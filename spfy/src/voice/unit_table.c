@@ -11,16 +11,15 @@
 
 #define OFF_ABSENT 0xFFu
 
-/* Per-version record geometry. Bytes +0x00..+0x0F are common to all
- * versions; only the tail differs. See unit_table.h for the derivation. */
+/* Per-version record geometry. */
 typedef struct {
     uint32_t version;
     uint8_t  rec_size;
     uint8_t  phone_in_syl;
-    uint8_t  f0_start;      /* f0_end/f0_mid/f0_context follow at +1/+2/+3 */
+    uint8_t  f0_start;
     uint8_t  phone_center;
     uint8_t  is_first_half;
-    uint8_t  phone_ctx;     /* first of 4 */
+    uint8_t  phone_ctx;
     uint8_t  flag_b;
     uint8_t  context_cost;
 } unit_layout_t;
@@ -49,25 +48,18 @@ static const unit_layout_t UNIT_LAYOUTS[] = {
      * loader for completeness and are untested against real data. */
     { 100004u, 23u, OFF_ABSENT, 0x10u, 0x14u, 0x15u, OFF_ABSENT,
       OFF_ABSENT, OFF_ABSENT },
-    /* Paulina. No phone_ctx[4] and no flag_b on disk; the loader forces
-     * flag_b = 1 for every unit. +0x16 is a small-integer field (1..12)
-     * that the loader skips outright. */
+    /* Paulina. */
     { 100005u, 24u, OFF_ABSENT, 0x10u, 0x14u, 0x15u, OFF_ABSENT,
       OFF_ABSENT, 0x17u },
-    /* Tom, Felix, Javier, aimara, aicraig. +0x16 is a per-voice constant
-     * (Tom 3, Jill 3, Javier 4, Felix 5) that the loader skips. */
+    /* Tom, Felix, Javier, aimara, aicraig. */
     { 100006u, 29u, OFF_ABSENT, 0x10u, 0x14u, 0x15u, 0x17u, 0x1Bu, 0x1Cu },
     { 100007u, 25u, 0x10u,      0x11u, 0x15u, 0x16u, OFF_ABSENT,
       OFF_ABSENT, 0x18u },
-    /* Jill. One byte inserted at +0x10 (phoneInSylCosts column); every
-     * field from f0_start onward shifts by +1. */
+    /* Jill. */
     { 100008u, 30u, 0x10u,      0x11u, 0x15u, 0x16u, 0x18u, 0x1Cu, 0x1Du },
 };
 
-/* v100006 voices have no on-disk phoneInSyl column. 6 == "SyllUnknown",
- * matching the constant the engine passes for these voices. Inert in
- * practice: their VCFs ship no phoneInSylCosts matrix and their
- * PHONE_IN_SYL_MISMATCH_COST weight is 0. */
+/* v100006 voices have no on-disk phoneInSyl column. */
 #define PHONE_IN_SYL_DEFAULT 6u
 
 static uint16_t le_u16(const uint8_t *p)
@@ -87,9 +79,7 @@ int spfy_unit_table_load(const spfy_vin_t *vin, spfy_unit_table_t *out)
     if (!vin->unit || vin->unit_n == 0) return SPFY_E_FORMAT;
     memset(out, 0, sizeof *out);
 
-    /* The 'unit' chunk wraps {vers, data}. Version must be read before the
-     * data size can be validated, so stash the data chunk and resolve the
-     * layout afterwards -- chunk order within 'unit' is not guaranteed. */
+    /* The 'unit' chunk wraps {vers, data}. */
     spfy_riff_iter it;
     spfy_riff_iter_init(&it, vin->unit, vin->unit_n);
     spfy_chunk c;
@@ -155,19 +145,15 @@ int spfy_unit_record_get(const spfy_unit_table_t *t, uint32_t uid,
         return SPFY_E_FORMAT;
     }
 
-    /* +0x00..+0x0F are identical across all record versions. */
     out->file_idx       = le_u16(p + 0x04);
     out->local_pos      = le_u16(p + 0x06);
-    /* +0x08 always 0 -- not exposed */
     out->dur_like       = le_u16(p + 0x0A);
-    /* +0x0C..+0x0F: SP feature bytes. Order CORRECTED 2026-04-19 via
-     * empirical distribution sweep -- see README_TECHNICAL.md "SP" section. */
+    /* +0x0C..+0x0F: SP feature bytes. */
     out->sp_syl_in_phrase  = p[0x0C];
     out->sp_syl_type       = p[0x0D];
     out->sp_word_in_phrase = p[0x0E];
     out->sp_syl_in_word    = p[0x0F];
 
-    /* Version-dependent tail. */
     out->sp_phone_in_syl = (t->off_phone_in_syl == OFF_ABSENT)
                          ? (uint8_t)PHONE_IN_SYL_DEFAULT
                          : p[t->off_phone_in_syl];
@@ -190,8 +176,7 @@ int spfy_unit_record_get(const spfy_unit_table_t *t, uint32_t uid,
      * under-advancing for multi-syllable spans. */
 
     if (t->off_phone_ctx == OFF_ABSENT) {
-        /* v100005 stores no phone context. 255 is the engine's "no context"
-         * sentinel, which the S-cost treats as a free match. */
+        /* v100005 stores no phone context. */
         out->phone_ctx[0] = out->phone_ctx[1] = 255u;
         out->phone_ctx[2] = out->phone_ctx[3] = 255u;
     } else {
@@ -204,7 +189,7 @@ int spfy_unit_record_get(const spfy_unit_table_t *t, uint32_t uid,
     /* When flag_b is absent the loader stores a literal 1 for every unit
      * (`*(undefined *)(psVar17 + 0xb) = 1` in load_chunky_index), NOT 0 --
      * so on v100005 the "same recording, consecutive uid" zero-join
-     * shortcut loses its discriminating power rather than never firing. */
+     * shortcut loses its... */
     out->flag_b       = (t->off_flag_b == OFF_ABSENT)
                       ? 1u : p[t->off_flag_b];
     out->context_cost = (t->off_context_cost == OFF_ABSENT)

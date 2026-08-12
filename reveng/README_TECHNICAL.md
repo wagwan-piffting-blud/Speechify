@@ -3024,7 +3024,7 @@ forward pass (`0x8E8EDD0`) recomputes costs from component fields + join cost ha
 does NOT read `total_score`. Only 31-37% of pre-prune best UIDs match the actual Viterbi path.
 
 To capture the true path, hook `SWIttsWsolaConcat` and read the unit list from arg4. See
-`c:/tmp/diag_ground_truth.py` for implementation.
+`diag_ground_truth.py` for implementation.
 
 ### Viterbi NoJoin inner loop (disassembled 2026-03-17)
 

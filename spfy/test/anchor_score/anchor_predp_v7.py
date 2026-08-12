@@ -178,7 +178,7 @@ def histogram_prune(cands_4cell, anchor_type):
     # Engine FUN_08e8adc0 histogram walk (asm 0x08e8b240..b46e): unrolled
     # 50-step loop. Step k uses cum = sum(bins[0..k-1]) and bin_dist = k*0.1.
     # Break when slack DROPS below bin_dist; threshold = best + bin_dist_at_break
-    # (NOT best + slack). See project_b44_anchor_gap.md.
+    # (NOT best + slack).
     cum = 0
     final_bin_dist = _f32(50 * bin_w)        # default if loop never breaks
     for k in range(1, 51):

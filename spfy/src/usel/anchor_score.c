@@ -14,10 +14,10 @@
  *   - When the same (uid, jk) is the first_cand of BOTH a SYL and a
  *     WORD anchor, disambiguate via the matching anchor's
  *     final_n_cands == this Viterbi slot's len(cands).
- * See project_b44_anchor_gap.md.
  */
 
 #include "anchor_score.h"
+#include "env.h"
 #include "../common/log.h"
 #include "../../include/spfy/spfy.h"
 
@@ -26,17 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-/* feat-order phone -> ccos labl index, i.e. the engine's voice+0x608
- * permutation with the side term factored out. This used to be a
- * hardcoded `tom_swap_label` (9->10, 10->11, 11->9; 14<->15), which is
- * Tom's `d`/`dh`/`dx` 3-cycle plus his `en`/`er` swap. That is wrong for
- * every voice whose ccos labl order differs from Tom's: identity for
- * Jill/Felix/Javier, and a 28-of-31 permutation for Paulina. The table
- * now comes from the voice's own feat/labl name tables.
- *
- * Verified against the engine's live voice+0x608 dump (inner_scorer
- * hp_class_remap event): 92/92 exact for both Tom and Jill. */
+/* feat-order phone -> ccos labl index, i.e. */
 static uint32_t phone_feat_to_labl(const spfy_anchor_voice_t *av,
                                    uint32_t phone)
 {
@@ -45,7 +35,6 @@ static uint32_t phone_feat_to_labl(const spfy_anchor_voice_t *av,
     return (lab == 0xFFu) ? phone : lab;
 }
 
-/* s_ctx_remap: hp_class -> ccos label. Returns -1 on OOB. */
 static int32_t s_ctx_remap(const spfy_anchor_voice_t *av,
                            int32_t c, uint32_t n_labels)
 {
@@ -83,26 +72,26 @@ typedef struct {
     const spfy_anchor_hp_feat_t *hf;
     int                          anchor_type;
     /* 2026-05-14 evening: engine's anchor-time durt walks use per-unit
-     * phone_ctx (from voice DB unit_table) for q3/q4 on interior HPs,
-     * NOT slot's predicted ctx[1]/ctx[3]. Decoded via surgical Frida
-     * capture on nat_048 ss=27944 (engine q3 sequence [5, 34, 36, 36,
-     * 6, 6] vs slot_init q3 [5, 5, 36, 36, 6, 6] — only HP 1 differs,
-     * and engine's HP 1 q3=34 = phone_ctx[1] of u=27945 direct).
-     *
-     * Rules:
-     *   q3 at HP=0    : slot's predicted ctx[1] (= our pre-existing path,
-     *                    matches slot_init q3 we already have bit-exact)
-     *   q3 at HP=1..N-1: unit's phone_ctx[1] DIRECT (no tom_swap, no >>1)
-     *   q4 at HP=N-1  : slot's predicted ctx[3] (slot_init q4)
-     *   q4 at HP=0..N-2: unit's phone_ctx[2] DIRECT
-     *
-     * NULL cb_phone_ctx falls back to slot's predicted ctx for both
-     * (preserves caller compatibility — non-anchor-time uses pass NULL).
-     */
-    const uint8_t               *cb_phone_ctx;  /* len 4 OR NULL */
-    int                          is_first_hp;   /* HP at index 0 of anchor */
-    int                          is_last_hp;    /* HP at index n_hp-1 */
-    const spfy_anchor_voice_t   *av;            /* for the phone permutation */
+     * phone_ctx (from voice DB unit_table) for q3/q4 on interior HPs, NOT
+     * slot's predicted ctx[1]/ctx[3]. */
+    const uint8_t               *cb_phone_ctx;
+    int                          is_first_hp;
+    int                          is_last_hp;
+    const spfy_anchor_voice_t   *av;
+    /* q8/q9 come from sp[3]/sp[4] one phone OUTSIDE the anchor -- see the
+     * comment at the assignment site. */
+    int32_t                      q8_val;
+    int32_t                      q9_val;
+    /* q3/q4 are the phone ids of the units TWO positions away in the voice
+     * DB (= one phone, since units are half-phones), read directly rather
+     * than taken from the current unit's stored phone_ctx. */
+    uint32_t                     cur_u;
+    uint32_t                     ss_u;
+    uint32_t                     se_u;
+    const uint8_t               *phone_all;
+    int32_t                      n_all;
+    int32_t                      first_hp_g;
+    int32_t                      last_hp_g;
 } spfy_anchor_feat_user_t;
 
 static int32_t anchor_cart_feat(uint32_t q_type, void *user)
@@ -112,14 +101,42 @@ static int32_t anchor_cart_feat(uint32_t q_type, void *user)
     switch (q_type) {
         case 1: return (int32_t)h->sp[1];
         case 2: return (int32_t)h->sp[0];
+        /* FUN_08e89530 reads byte +0x14 of unit[i-2] for q3 and unit[i+2] for
+         * q4 -- the unit two positions back/forward in the voice DB, i.e. one
+         * phone. At the anchor's own first/last unit it falls back to the
+         * slot's predicted context instead. Measured on paulina es_014: the
+         * old phone_ctx[1] route agreed with the engine on only 121 of 586
+         * anchor walks. SPFY_NO_UNIT_PHONE_CTX keeps the old behaviour. */
         case 3:
-            if (u->cb_phone_ctx && !u->is_first_hp)
-                return (int32_t)u->cb_phone_ctx[1];
+            if (u->cb_phone_ctx && u->cur_u != u->ss_u && u->cur_u >= 2) {
+                spfy_unit_record_t r;
+                if (u->av->units
+                    && spfy_unit_record_get(u->av->units, u->cur_u - 2, &r)
+                       == SPFY_OK)
+                    return (int32_t)r.phone_center;
+            }
+            /* anchor's own FIRST unit: the engine takes the external branch
+             * and reads the utterance's phone label two half-phones before
+             * the anchor. */
+            if (u->phone_all && u->first_hp_g >= 2
+                && u->first_hp_g - 2 < u->n_all)
+                return (int32_t)u->phone_all[u->first_hp_g - 2];
             return (int32_t)phone_feat_to_labl(u->av,
                                                (uint32_t)h->ctx[1] >> 1);
         case 4:
-            if (u->cb_phone_ctx && !u->is_last_hp)
-                return (int32_t)u->cb_phone_ctx[2];
+            if (u->cb_phone_ctx && u->cur_u != u->se_u) {
+                spfy_unit_record_t r;
+                if (u->av->units
+                    && u->cur_u + 2 < u->av->units->n_units
+                    && spfy_unit_record_get(u->av->units, u->cur_u + 2, &r)
+                       == SPFY_OK)
+                    return (int32_t)r.phone_center;
+            }
+            /* anchor's own LAST unit: same external branch, two half-phones
+             * AFTER the anchor. */
+            if (u->phone_all && u->last_hp_g + 2 >= 0
+                && u->last_hp_g + 2 < u->n_all)
+                return (int32_t)u->phone_all[u->last_hp_g + 2];
             return (int32_t)phone_feat_to_labl(u->av,
                                                (uint32_t)h->ctx[3] >> 1);
         case 5: return (int32_t)h->q5;
@@ -129,14 +146,25 @@ static int32_t anchor_cart_feat(uint32_t q_type, void *user)
          * applies here too. (Was sp[2], which produced wrong leaves at
          * q_type=7 nodes for nat_036 slots 7/10/12/16/18/20.) */
         case 7: return 0;
-        case 8: return (int32_t)u->anchor_type;  /* OVERRIDE */
-        case 9: return (int32_t)h->sp[4];
+        /* q8 = sp[3] (wordInPhrase) read one phone OUTSIDE the anchor. */
+        case 8: {
+            static int q8_override = -2;
+            if (q8_override == -2) {
+                const char *e = spfy_env("SPFY_ANCHOR_Q8");
+                q8_override = (e && *e) ? atoi(e) : -2;
+            }
+            if (q8_override != -2) return (int32_t)q8_override;
+            if (u->q8_val >= 0) return u->q8_val;
+            return (int32_t)u->anchor_type;
+        }
+        case 9:
+            if (u->q9_val >= 0) return u->q9_val;
+            return (int32_t)h->sp[4];
         default: return 0;
     }
 }
 
-/* Read a single ccos cell with signed col index (engine reads via MOVSX).
- * For col == -1, reads (row-1, n-1) per matrix-flat semantics. */
+/* Read a single ccos cell with signed col index (engine reads via MOVSX). */
 static float ccos_cell_signed(const spfy_ccos_t *ccos,
                                uint32_t hp, uint32_t slot,
                                int32_t row, int32_t col_signed)
@@ -150,7 +178,6 @@ static float ccos_cell_signed(const spfy_ccos_t *ccos,
     return ccos->tables[base + (size_t)off];
 }
 
-/* 4-cell ccos boundary cost. Returns NaN on OOB. */
 static float compute_4cell_ccos(const spfy_anchor_voice_t *av,
                                  uint32_t ss, uint32_t se,
                                  const spfy_anchor_ctx_t *first_ctx,
@@ -168,14 +195,13 @@ static float compute_4cell_ccos(const spfy_anchor_voice_t *av,
     if (sl0 < 0 || sl1 < 0 || sl2 < 0 || sl3 < 0) return NAN;
 
     /* Cand col bytes: SS phone_ctx[0..1] for slots 0,1, SE phone_ctx[2..3]
-     * for slots 2,3. Read SIGNED via MOVSX (255 sentinel = -1). */
+     * for slots 2,3. */
     spfy_unit_record_t ss_rec, se_rec;
     if (spfy_unit_record_get(av->units, ss, &ss_rec) != SPFY_OK) return NAN;
     if (spfy_unit_record_get(av->units, se, &se_rec) != SPFY_OK) return NAN;
     int32_t pc_ss0, pc_ss1, pc_se2, pc_se3;
     if (av->ctx4) {
-        /* v100005: derived, pre-remapped ccos-labl columns (voice+0xc4).
-         * ss supplies the left cells [0,1], se the right cells [2,3]. */
+        /* v100005: derived, pre-remapped ccos-labl columns (voice+0xc4). */
         pc_ss0 = (int32_t)(int8_t)av->ctx4[ss * 4u + 0u];
         pc_ss1 = (int32_t)(int8_t)av->ctx4[ss * 4u + 1u];
         pc_se2 = (int32_t)(int8_t)av->ctx4[se * 4u + 2u];
@@ -194,16 +220,14 @@ static float compute_4cell_ccos(const spfy_anchor_voice_t *av,
     return (c0 + c1 + c2 + c3) * av->w_ccos;
 }
 
-/* Internal cand record during scoring. */
 typedef struct {
-    float    cost4;       /* 4-cell ccos cost (or 1e9 if boundary mismatch) */
+    float    cost4;
     uint32_t pid;
     uint32_t ss;
     uint32_t se;
 } cand_buf_t;
 
-/* Phase 1 + histogram prune. Compacts `cands` in place to accepted set;
- * writes accepted_n into *out_n. Returns the final cost threshold. */
+/* Phase 1 + histogram prune. */
 static float histogram_prune(const spfy_anchor_voice_t *av,
                               cand_buf_t *cands, uint32_t n_cands,
                               uint32_t *out_n)
@@ -211,7 +235,6 @@ static float histogram_prune(const spfy_anchor_voice_t *av,
     float norm  = av->anchor_norm;
     float norm2 = av->anchor_norm2;
 
-    /* Phase 1: dynamic threshold tightening. Drop cands w/ cost >= threshold. */
     float best = 10000.0f;
     float threshold_running = norm + 10000.0f;
     uint32_t accepted_n = 0;
@@ -227,13 +250,39 @@ static float histogram_prune(const spfy_anchor_voice_t *av,
 
     if (accepted_n == 0) { *out_n = 0; return INFINITY; }
 
-    /* Phase 2: 50-bin histogram. */
+    /* Phase 2: 50-bin histogram.
+     *
+     * 2026-08-10, read off the instructions at 0x08e8b1b6..0x08e8b1f4 rather
+     * than the decompile (Ghidra folds the conversion into an argument-less
+     * `FUN_08e9504c()` and loses the x87 operand):
+     *
+     *     fld   [0x08e98a24]      ; 50.0
+     *     fdiv  <norm>            ; scale = 50.0 / norm
+     *     ...
+     *     fld   [ebp + esi*4]     ; cost4[i]
+     *     fsub  <best>            ; - best
+     *     fmul  <scale>
+     *     call  0x08e9504c        ; _ftol -> TRUNCATES toward zero
+     *     cmp   eax, 0x32 / jge   ; only the upper bound is checked
+     *
+     * Two corrections against the old port, both invisible when best ~= 0
+     * (which is why this measured 179/179 on tom and still lost candidates
+     * on paulina, where best is not small):
+     *   - the divisor is `norm`, NOT `norm + best` (the running threshold)
+     *   - the conversion truncates; lroundf() rounds to nearest, so every
+     *     bucket whose fraction is >= .5 landed one bin too high
+     *
+     * SPFY_ANCHOR_PRUNE_LEGACY=1 restores the old behaviour for A/B. */
     int bins[50] = {0};
-    float scale = (threshold_running > 0.0f)
-                    ? (av->dat_98a24 / threshold_running) : 1.0f;
+    static int prune_legacy = -1;
+    if (prune_legacy < 0)
+        prune_legacy = (spfy_env("SPFY_ANCHOR_PRUNE_LEGACY") != NULL);
+    float scale_den = prune_legacy ? threshold_running : norm;
+    float scale = (scale_den > 0.0f) ? (av->dat_98a24 / scale_den) : 1.0f;
     for (uint32_t i = 0; i < accepted_n; ++i) {
         float diff = cands[i].cost4 - best;
-        long bin_idx = lroundf(diff * scale);
+        long bin_idx = prune_legacy ? lroundf(diff * scale)
+                                    : (long)(diff * scale);
         if (bin_idx >= 0 && bin_idx < 50) {
             bins[bin_idx]++;
         }
@@ -248,10 +297,9 @@ static float histogram_prune(const spfy_anchor_voice_t *av,
      * > slack; after the jump, FLD best ; FADD ST0,ST1 produces best+bin_dist.
      *
      * Verified bit-exact against engine via the cost4 capture
-     * (179/179 = 100.00% on the 30-text corpus).
-     * See memory: project_b44_anchor_gap.md. */
+     * (179/179 = 100.00% on the 30-text corpus). */
     int cum = 0;
-    float final_bin_dist = 50.0f * av->dat_971d8;     /* default if no break */
+    float final_bin_dist = 50.0f * av->dat_971d8;
     for (int k = 1; k <= 50; ++k) {
         cum += bins[k - 1];
         float slack = norm - (float)cum * norm2;
@@ -264,7 +312,6 @@ static float histogram_prune(const spfy_anchor_voice_t *av,
 
     float final_threshold = best + final_bin_dist;
 
-    /* Phase 4: filter accepted by final_threshold. */
     uint32_t survive_n = 0;
     for (uint32_t i = 0; i < accepted_n; ++i) {
         if (cands[i].cost4 <= final_threshold) {
@@ -275,16 +322,7 @@ static float histogram_prune(const spfy_anchor_voice_t *av,
     return final_threshold;
 }
 
-/* Full anchor cand cost = 4-cell + FLAG-sum + SP-span + D-span + F0-span.
- *
- * 2026-05-14: PROPAGATE the 10000.0 placeholder when hp_class boundary
- * doesn't match expected first_ctx[2]/last_ctx[2]. Engine sets cost4=10000
- * in phase 1 (line ~517) and the placeholder PROPAGATES to final TC for
- * survivors. Our previous version recomputed ccos_4cell from scratch and
- * lost the rejection — 361 of 2093 corpus anchors had eng_tc=10000 but
- * our small TC, letting our DP pick anchors engine rejected.
- * Returns NaN on input error.
- */
+/* Full anchor cand cost = 4-cell + FLAG-sum + SP-span + D-span + F0-span. */
 static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
                                        const spfy_anchor_slot_input_t *in,
                                        uint32_t ss, uint32_t se,
@@ -301,7 +339,7 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
         uint8_t se_hpc = (av->hpclass_table && se < av->hpclass_n)
             ? av->hpclass_table[se] : 0xff;
         if (ss_hpc != expect_first_hpc || se_hpc != expect_last_hpc) {
-            if (getenv("SPFY_ANCHOR_TC_DUMP_ALL")) {
+            if (spfy_env("SPFY_ANCHOR_TC_DUMP_ALL")) {
                 fprintf(stderr, "{\"anchor_tc\":1,\"ss\":%u,\"se\":%u,"
                                 "\"anchor_type\":%d,\"n_hp\":-1,"
                                 "\"total\":10000.0,\"rejected\":\"boundary\"}\n",
@@ -313,7 +351,7 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
     float ccos_4cell = compute_4cell_ccos(av, ss, se, &in->first_ctx,
                                            &in->last_ctx);
     if (isnan(ccos_4cell)) {
-        if (getenv("SPFY_ANCHOR_TC_DUMP_ALL")) {
+        if (spfy_env("SPFY_ANCHOR_TC_DUMP_ALL")) {
             fprintf(stderr, "{\"anchor_tc\":1,\"ss\":%u,\"se\":%u,"
                             "\"anchor_type\":%d,\"n_hp\":-1,"
                             "\"total\":10000.0,\"rejected\":\"ccos_nan\"}\n",
@@ -350,41 +388,96 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
      */
     /* Engine k matches C proscost index directly: spfy_proscost_load loads
      * matrices in ENGINE order (KIND_NAME[2]="sylInWordCosts",
-     * KIND_NAME[3]="wordInPhraseCosts"). Identity mapping. */
+     * KIND_NAME[3]="wordInPhraseCosts"). */
     static const uint8_t k_to_proscost[5] = { 0, 1, 2, 3, 4 };
 
-    /* target_hp tracking. Mirrors engine FUN_08e89530's local_34/local_10
-     * walk: starts at slot first_hp, on every non-first iter advances forward
-     * through syl_idx_per_hp[] until the value differs from the previously
-     * stored cur_syl (== engine's local_10). Engine's outer gate `byte != 0`
-     * is degenerate (byte at disk+0x16 is constant 3 for Tom voice), so the
-     * advance fires on EVERY non-first iter, NOT on `is_first_half == 1` as
-     * a prior version of this code assumed. */
+    /* target_hp tracking. Mirrors engine FUN_08e89530 / FUN_08e897b0's
+     * local_34+local_10 (D) / iVar10+local_24 (SP) walk: start at first_hp,
+     * and on a gated iteration advance forward through syl_idx_per_hp[]
+     * until the value differs from the stored cur_syl.
+     *
+     * ⚠ THE GATE IS `is_first_half`, AND IT IS NOT DEGENERATE.
+     *
+     * Both engine functions guard the advance with
+     *     iVar9 != first_unit && *(char *)(unit_rec + 0x15) != 0 && tgt < last
+     * where +0x15 is an IN-MEMORY offset. A previous reading mapped that to
+     * DISK +0x16 -- a per-voice constant (3 for Tom) -- concluded the gate
+     * was always true, and dropped it, advancing on EVERY non-first unit.
+     *
+     * The loader (FUN_08e857a0) says otherwise. It reads the post-prefix
+     * byte block and scatters it: byte[7] -> mem 0x12, byte[8] -> mem 0x14,
+     * byte[9] -> mem 0x15. With the 12-byte fixed prefix that makes
+     * mem 0x15 == DISK 0x15 == is_first_half. (Cross-checks: byte[7] ->
+     * mem 0x12 == disk 0x13 == f0_context, which is the D byte we already
+     * use; and mem 0x0e defaults to 6 when phone_in_syl is absent, which is
+     * the SP cand_bytes[4] fallback we already implement.)
+     *
+     * Cost of getting this wrong: advancing every unit runs the target index
+     * off the end of a WIDE anchor and pins it at n_hp-1. On edge_042's
+     * 14-unit / 16-HP "etcetera" Word anchor the walk went 0,4,8,12 then
+     * saturated at 15 for the last ten units, so they were all scored
+     * against the final HP's CART target. D came out 1.1817 against the
+     * engine's 0.0064 and SP 1.8650 against 0.3097, and the anchor lost by
+     * 3.81 to a path the engine never takes.
+     *
+     * SPFY_ANCHOR_NO_FH_GATE=1 restores the always-advance behaviour. */
+    static int no_fh_gate = -1;
+    if (no_fh_gate < 0)
+        no_fh_gate = (spfy_env("SPFY_ANCHOR_NO_FH_GATE") != NULL);
     int target_idx = 0;
     int32_t cur_syl = -1;
     if (in->syl_idx_per_hp && n_hp > 0) {
         cur_syl = in->syl_idx_per_hp[0];
     }
 
+    /* D-cost target index, the engine's `local_34` in FUN_08e89530.
+     *
+     * The decompile is explicit: local_34 starts at first_hp and advances ONLY
+     * when the unit is not the first AND unit+0x15 (is_first_half) is set AND
+     * local_34 < last_hp; the advance then walks forward to the next index
+     * whose entry in the per-half-phone array at net+0x18 DIFFERS, capped at
+     * last_hp. Every unit's durt walk is then indexed by local_34, and the
+     * walk is unconditional -- there is no `d_idx < n_hp` guard.
+     *
+     * `target_idx` above groups by SYLLABLE, which cannot be that array: in a
+     * Syl anchor every half-phone shares one syllable, so the advance runs
+     * straight to the end and pins there -- precisely the "advanced on every
+     * unit and pinned at n_hp-1" failure recorded below. The array has to
+     * change at PHONE boundaries for the advance to land on the next phone's
+     * left half, so the group is the segment ordinal (hp >> 1) and the advance
+     * is +2, clamped.
+     *
+     * Kept separate from `target_idx` because F0 uses that one and F0 is
+     * already exact against the engine; folding them together would break a
+     * term that currently matches.
+     *
+     * ⚠ OFF BY DEFAULT, and that is a measurement, not caution. The clamp is
+     * real -- it takes our anchor walk count to the engine's 666 exactly,
+     * from 654 -- but the 12 walks it adds are performed with FEATURES we
+     * still compute wrongly, and doing them is worse than skipping them:
+     * tom 221 -> 215, javier 85 -> 83, paulina 74 -> 73, felix 100 -> 99.
+     * The grouping is not the missing piece either: `none`, `step1` and
+     * `segment` all score IDENTICALLY against the engine's walk capture
+     * (multiset distance 432), so the target index barely moves the leaf.
+     * Whatever is wrong lives in the question features, not the index.
+     * SPFY_ANCHOR_D_TGT_DECOMP=1 enables this path for further work. */
+    int d_tgt = 0;
+    static int d_tgt_legacy = -1;
+    if (d_tgt_legacy < 0)
+        d_tgt_legacy = (spfy_env("SPFY_ANCHOR_D_TGT_DECOMP") == NULL);
+
     for (uint32_t u = ss, u_idx = 0; u <= se; ++u, ++u_idx) {
         spfy_unit_record_t u_rec;
         if (spfy_unit_record_get(av->units, u, &u_rec) != SPFY_OK) {
             return NAN;
         }
-        /* The engine tracks is_first_half via in-mem mem+0x15. We use
-         * disk byte +0x15 here since the existing unit_record loader
-         * exposes it. For advance-on-dup, reading prev-unit's byte. */
+        /* The engine tracks is_first_half via in-mem mem+0x15. */
         /* Re-read prev unit's is_first_half to mirror Python (which uses
-         * u_rec[0x15] of CURRENT unit at the start of each iteration --
-         * but Python checks `u_rec[0x15] != 0` of the just-read unit at
-         * iter start, which equals the current iter's is_first_half).
-         *
-         * Reviewing v7 line:
-         *   if (syl_idx_array is not None and u_idx > 0 and
-         *       u_rec[0x15] != 0 and target_idx < len(hp_seq) - 1):
-         * It uses u_rec[0x15] of CURRENT unit (not previous).  Match that.
-         */
-        if (in->syl_idx_per_hp && u_idx > 0 && target_idx < n_hp - 1) {
+         * u_rec[0x15] of CURRENT unit at the start of each iteration -- but
+         * Python checks `u_rec[0x15] != 0` of the just-read unit at iter
+         * start, which equals the... */
+        if (in->syl_idx_per_hp && u_idx > 0 && target_idx < n_hp - 1
+            && (no_fh_gate || u_rec.is_first_half != 0)) {
             while (target_idx < n_hp - 1) {
                 ++target_idx;
                 int32_t ns = in->syl_idx_per_hp[target_idx];
@@ -395,17 +488,35 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
             }
         }
 
-        /* FLAG byte = unit context_cost (mem+0x17 = disk+0x1c). */
+        /* The advance gate and the clamp are read straight off the decompile. */
+        if (u_idx > 0 && d_tgt < n_hp - 1 && u_rec.is_first_half != 0) {
+            static int grp = -1;
+            if (grp < 0) {
+                const char *e = spfy_env("SPFY_ANCHOR_D_GROUP");
+                grp = (e && *e) ? atoi(e) : 2;
+            }
+            if (grp == 1) {
+                ++d_tgt;
+            } else if (grp == 2) {
+                int seg = d_tgt >> 1;
+                while (d_tgt < n_hp - 1 && (d_tgt >> 1) == seg) ++d_tgt;
+            } else if (grp == 3 && in->syl_idx_per_hp) {
+                int32_t s0 = in->syl_idx_per_hp[d_tgt];
+                while (d_tgt < n_hp - 1
+                       && in->syl_idx_per_hp[d_tgt + 1] == s0) ++d_tgt;
+                if (d_tgt < n_hp - 1) ++d_tgt;
+            }
+        }
+
         flag_sum += u_rec.context_cost;
 
-        /* SP-span: 5-matrix sum at target_hp. */
         if (target_idx >= 0 && target_idx < n_hp) {
             const spfy_anchor_sp_target_t *spt = &in->sp_per_hp[target_idx];
             uint8_t cand_bytes[5];
-            cand_bytes[0] = u_rec.sp_syl_in_phrase;   /* disk 0x0c */
-            cand_bytes[1] = u_rec.sp_syl_type;        /* disk 0x0d */
-            cand_bytes[2] = u_rec.sp_word_in_phrase;  /* disk 0x0e */
-            cand_bytes[3] = u_rec.sp_syl_in_word;     /* disk 0x0f */
+            cand_bytes[0] = u_rec.sp_syl_in_phrase;
+            cand_bytes[1] = u_rec.sp_syl_type;
+            cand_bytes[2] = u_rec.sp_word_in_phrase;
+            cand_bytes[3] = u_rec.sp_syl_in_word;
             /* v100008 (Jill) stores this at disk 0x10; older record
              * versions have no column and the decoder yields 6. */
             cand_bytes[4] = u_rec.sp_phone_in_syl;
@@ -454,24 +565,82 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
          * reverts to old target_idx behavior for A/B audit. */
         float durt_mean = 0.0f, durt_var = 0.0f;
         int   durt_ok = 0;
-        int d_idx = getenv("SPFY_D_IDX_TARGET") ? target_idx : (int)u_idx;
+        /* q8/q9 are sp[3]/sp[4] at `iVar11` in FUN_08e89530, which the compiler
+         * assigns ONLY inside the two boundary branches. So it holds
+         * first_hp-2 for every unit except the last, where it becomes
+         * last_hp+2 -- one phone OUTSIDE the anchor either way, landing on the
+         * utterance's silence padding at the edges (measured: first_hp never
+         * below 2, last_hp never above n_hp-3, so the reads stay in range).
+         *
+         * Measured, not inferred: hooking FUN_08e87d90 at entry for the full
+         * 7-arg question tuple and FUN_08e89530 at entry for the net arrays
+         * gives 666/666 agreement on BOTH q8 and q9 over every anchor walk of
+         * paulina es_014, 0 mismatches. The rule can fail and does not --
+         * pinning the index instead drops q1/q2 to 634/666, and all 137 anchor
+         * candidates do take a different index on their last unit.
+         *
+         * The old q8 = anchor_type was fitted: the engine puts q8 outside
+         * {2,4} on 175 of those 666 walks. */
+        int32_t q8_val = -1, q9_val = -1;
+        int     tq3 = -1, tq4 = -1;
+        if (in->sp_all_hp && in->n_all_hp > 0) {
+            int32_t oi = (u == se) ? in->last_hp + 2 : in->first_hp - 2;
+            if (oi < 0) oi = 0;
+            if (oi >= in->n_all_hp) oi = in->n_all_hp - 1;
+            q8_val = (int32_t)in->sp_all_hp[oi].sp[3];
+            q9_val = (int32_t)in->sp_all_hp[oi].sp[4];
+        }
+        /* ⭐ target_idx, per FUN_08e89530 (local_34). This was u_idx while the
+         * walk itself was broken (it advanced on every unit and pinned at
+         * n_hp-1, so target_idx was garbage and u_idx beat it empirically).
+         * With the is_first_half gate restored the walk is correct and the
+         * engine's own index wins: on edge_042's Word anchor D drops
+         * 1.1817 -> 0.0941 against the engine's 0.0064.
+         * SPFY_D_IDX_UIDX=1 restores the old per-unit indexing. */
+        int d_idx = d_tgt_legacy
+                    ? (spfy_env("SPFY_D_IDX_UIDX") ? (int)u_idx : target_idx)
+                    : d_tgt;
+        /* ⚠ WORD anchors only, and this split is EMPIRICAL -- I cannot derive
+         * it from the decompile. FUN_08e89530 uses local_34 for every anchor
+         * type, and for a Syl anchor (all HPs in one syllable) the walk
+         * saturates at n_hp-1 on both sides, so the engine should be using
+         * target_feat[last] there too. Yet applying target_idx to Syl anchors
+         * costs 5 texts (235 -> 229 emitted-unit matches) while restricting it
+         * to Word anchors gives 235/235.
+         *
+         * ⚠ And even for the Word anchor our D is NOT exact: 0.0941 against
+         * the engine's 0.0064. It is close enough to flip the decision, not
+         * close enough to call the formula understood -- the residual is
+         * somewhere in the durt lookup (the FUN_08e87d90 walk with the
+         * q_type=8 anchor_type override), not in the pooling, which matches
+         * the decompile exactly. SP and F0 both land EXACT after the same
+         * index change, so D is the odd one out.
+         *
+         * Treat this line as a known-incomplete port, not a settled rule.
+         * SPFY_D_IDX_ALL_TYPES=1 applies target_idx to every anchor type. */
+        /* The per-anchor-type split below was empirical and is not in the
+         * decompile: FUN_08e89530 uses local_34 for EVERY anchor type. It only
+         * looked necessary because the syllable-grouped index saturated for Syl
+         * anchors. With the segment-grouped index it no longer applies. */
+        if (d_tgt_legacy
+            && !spfy_env("SPFY_D_IDX_ALL_TYPES") && in->anchor_type != 4)
+            d_idx = (int)u_idx;
+        /* The engine never drops a unit: local_34 is clamped at last_hp, so
+         * a candidate whose unit count exceeds its half-phone count keeps
+         * walking with the saturated index. */
+        if (d_idx >= n_hp && n_hp > 0
+            && !spfy_env("SPFY_ANCHOR_NO_D_CLAMP"))
+            d_idx = n_hp - 1;
         if (in->durt_cart && in->hp_feat
             && d_idx >= 0 && d_idx < n_hp
             && in->hp_feat[d_idx].durt_valid
-            && !getenv("SPFY_NO_ANCHOR_DURT_WALK")) {
+            && !spfy_env("SPFY_NO_ANCHOR_DURT_WALK")) {
             /* q4 for NON-LAST HP = phone of unit AFTER the pair containing
-             * this HP (walk forward until phone_center differs). For LAST
-             * HP, we use slot's predicted ctx[3] (is_last_hp branch).
-             *
-             * For ss=27944 nat_048 anchor, HPs 0-3 share next-pair phone
-             * with current unit's phone_ctx[2], but HP 4 (first HP of
-             * anchor's LAST pair) needs voice-DB next-pair phone which
-             * may differ from phone_ctx[2]'s prediction. Engine's q4 for
-             * such HPs = actual voice-DB next-pair phone. */
-            uint8_t next_pair_phone = u_rec.phone_ctx[2]; /* default fallback */
+             * this HP (walk forward until phone_center differs). */
+            uint8_t next_pair_phone = u_rec.phone_ctx[2];
             if ((int)u_idx < n_hp - 1) {
                 uint32_t scan = u + 1;
-                uint32_t scan_max = u + 8;  /* phone pairs rarely > 4 units */
+                uint32_t scan_max = u + 8;
                 if (av->units && scan < av->units->n_units) {
                     while (scan < scan_max && scan < av->units->n_units) {
                         spfy_unit_record_t sr;
@@ -493,12 +662,27 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
             spfy_anchor_feat_user_t fu = {
                 .hf = &in->hp_feat[d_idx],
                 .anchor_type = in->anchor_type,
-                .cb_phone_ctx = getenv("SPFY_NO_UNIT_PHONE_CTX")
+                .cb_phone_ctx = spfy_env("SPFY_NO_UNIT_PHONE_CTX")
                                   ? NULL : feat_pctx,
                 .is_first_hp = (u_idx == 0),
                 .is_last_hp  = ((int)u_idx == n_hp - 1),
-                .av = av
+                .av = av,
+                .q8_val = q8_val,
+                .q9_val = q9_val,
+                .cur_u = u,
+                .ss_u = ss,
+                .se_u = se,
+                .phone_all = in->phone_all_hp,
+                .n_all = in->n_all_hp,
+                .first_hp_g = in->first_hp,
+                .last_hp_g = in->last_hp
             };
+            if (spfy_env("SPFY_ANCHOR_D_TRACE")) {
+                /* the production callback itself, so the trace cannot drift
+                 * from what the walk actually asked for */
+                tq3 = (int)anchor_cart_feat(3, &fu);
+                tq4 = (int)anchor_cart_feat(4, &fu);
+            }
             float am = 0.0f, av_var = 0.0f;
             /* 2026-05-14: engine FUN_08e89530 passes byte at unit_record
              * mem+0x14 = disk+0x14 = phone_center (current unit's phoneme
@@ -528,14 +712,33 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
             float inv_var = (durt_var != 0.0f)
                 ? (av->dat_8e9857c / durt_var) : 0.0f;
             d_var_sum += inv_var * inv_var;
-            if (getenv("SPFY_ANCHOR_D_TRACE")
-                && getenv("SPFY_ANCHOR_COMP_UID")
-                && (uint32_t)atoi(getenv("SPFY_ANCHOR_COMP_UID")) == ss) {
-                fprintf(stderr, "    D u_idx=%u u=%u target_idx=%d "
-                                "f0mid=%u f0c=%u "
+            /* SPFY_ANCHOR_COMP_UID narrows this to one candidate; with only
+             * SPFY_ANCHOR_D_TRACE set it dumps every walk, in call order,
+             * so the sequence can be aligned against the engine's durt_walk
+             * capture (which records EDX = the... */
+            if (spfy_env("SPFY_ANCHOR_D_TRACE")
+                && (!spfy_env("SPFY_ANCHOR_COMP_UID")
+                    || (uint32_t)atoi(spfy_env("SPFY_ANCHOR_COMP_UID")) == ss)) {
+                /* d_idx and the question tuple are dumped too: the engine's
+                 * FUN_08e89530-entry capture records first_unit, which IS ss,
+                 * so engine walks key to ours on (ss, u_idx) exactly and every
+                 * question can be diffed one at a time. */
+                int tq1 = -1, tq2 = -1, tq5 = -1;
+                if (d_idx >= 0 && d_idx < n_hp && in->hp_feat) {
+                    tq1 = (int)in->hp_feat[d_idx].sp[1];
+                    tq2 = (int)in->hp_feat[d_idx].sp[0];
+                    tq5 = (int)in->hp_feat[d_idx].q5;
+                }
+                fprintf(stderr, "    D ss=%u fhp=%d lhp=%d atype=%d "
+                                "u_idx=%u u=%u target_idx=%d "
+                                "d_idx=%d phone=%u f0mid=%u f0c=%u "
+                                "q1=%d q2=%d q3=%d q4=%d q5=%d q8=%d q9=%d "
                                 "mean=%.4f var=%.6f inv_var=%.4f delta=%.4f\n",
-                        u_idx, u, target_idx,
+                        ss, in->first_hp, in->last_hp, in->anchor_type,
+                        u_idx, u, target_idx, d_idx,
+                        (unsigned)u_rec.phone_center,
                         u_rec.f0_mid, u_rec.f0_context,
+                        tq1, tq2, tq3, tq4, tq5, q8_val, q9_val,
                         (double)durt_mean, (double)durt_var,
                         (double)inv_var, (double)delta);
             }
@@ -573,14 +776,15 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
             v_active = (av->voicing[unit_hpc] != 0);
         }
 
-        /* F0 indexed by u_idx (per-HP), not target_idx. Engine's
-         * anchor_f0 walks (Frida surgical on nat_038 ss=66958) match
-         * slot_init f0tr leaves per slot. SPFY_F0_IDX_TARGET=1 reverts. */
-        int f0_idx = getenv("SPFY_F0_IDX_TARGET") ? target_idx : (int)u_idx;
+        /* ⭐ target_idx, same story as D above: the earlier u_idx default was
+         * chosen while the walk was broken. On edge_042's Word anchor this
+         * takes f0 from 6.5366 to 5.7052 -- EXACT against the engine.
+         * SPFY_F0_IDX_UIDX=1 restores the old per-unit indexing. */
+        int f0_idx = spfy_env("SPFY_F0_IDX_UIDX") ? (int)u_idx : target_idx;
         if (v_active && f0_idx >= 0 && f0_idx < n_hp
             && in->cart_per_hp[f0_idx].f0tr_valid) {
             const spfy_anchor_cart_t *ct = &in->cart_per_hp[f0_idx];
-            uint8_t f0_b = u_rec.f0_start;   /* disk +0x10 = mem+0x0f */
+            uint8_t f0_b = u_rec.f0_start;
             if (f0_b == 0) {
                 f0_cost += av->w_f0_miss;
             } else {
@@ -595,17 +799,17 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
     if (d_var_sum > 0.0f) {
         d_cost = (d_delta_sum / d_var_sum) * d_delta_sum * av->w_dur;
     }
-    if (getenv("SPFY_ANCHOR_COMP_UID")
-        && (uint32_t)atoi(getenv("SPFY_ANCHOR_COMP_UID")) == ss) {
+    if (spfy_env("SPFY_ANCHOR_COMP_UID")
+        && (uint32_t)atoi(spfy_env("SPFY_ANCHOR_COMP_UID")) == ss) {
         fprintf(stderr, "  anchor ss=%u se=%u  total=%.4f "
                         "ccos4=%.4f flag=%.4f sp=%.4f d=%.4f f0=%.4f\n",
                 ss, se, (double)(ccos_4cell + flag_cost + sp_cost + d_cost + f0_cost),
                 (double)ccos_4cell, (double)flag_cost, (double)sp_cost,
                 (double)d_cost, (double)f0_cost);
     }
-    /* Corpus-wide anchor TC dump for per-anchor delta characterization
-     * vs engine's master-capture `anchor_components.final_cands.tc`. */
-    if (getenv("SPFY_ANCHOR_TC_DUMP_ALL")) {
+    /* Corpus-wide anchor TC dump for per-anchor delta characterization vs
+     * engine's master-capture `anchor_components.final_cands.tc`. */
+    if (spfy_env("SPFY_ANCHOR_TC_DUMP_ALL")) {
         fprintf(stderr, "{\"anchor_tc\":1,\"ss\":%u,\"se\":%u,"
                         "\"anchor_type\":%d,\"n_hp\":%d,"
                         "\"total\":%.6f,\"ccos4\":%.6f,\"flag\":%.6f,"
@@ -618,7 +822,6 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
     return ccos_4cell + flag_cost + sp_cost + d_cost + f0_cost;
 }
 
-/* qsort comparator: sort by pre_dp ascending. */
 static int cmp_anchor_cand(const void *a, const void *b)
 {
     const spfy_anchor_cand_t *ca = (const spfy_anchor_cand_t *)a;
@@ -642,7 +845,6 @@ int spfy_anchor_score(const spfy_anchor_voice_t          *av,
     *out_n = 0;
     if (n_postings == 0 || out_cap == 0) return SPFY_OK;
 
-    /* Phase 1 + 2 + 3: build cand cost array, prune by histogram. */
     cand_buf_t *buf = (cand_buf_t *)calloc(n_postings, sizeof *buf);
     if (!buf) return SPFY_E_NOMEM;
 
@@ -662,7 +864,6 @@ int spfy_anchor_score(const spfy_anchor_voice_t          *av,
         buf[i].ss = ss;
         buf[i].se = se;
 
-        /* Boundary check via engine-truth hp_class table. */
         uint8_t ss_hpc = (av->hpclass_table && ss < av->hpclass_n)
             ? av->hpclass_table[ss] : 0xff;
         uint8_t se_hpc = (av->hpclass_table && se < av->hpclass_n)
@@ -683,7 +884,6 @@ int spfy_anchor_score(const spfy_anchor_voice_t          *av,
     uint32_t survived = 0;
     (void)histogram_prune(av, buf, n_postings, &survived);
 
-    /* Phase 4 + 5: compute full pre_dp for survivors and rank. */
     uint32_t n_out = 0;
     for (uint32_t i = 0; i < survived && n_out < out_cap; ++i) {
         float pre_dp = compute_anchor_full_cost(av, in, buf[i].ss, buf[i].se,
@@ -742,15 +942,13 @@ int spfy_anchor_build_ctx4(spfy_anchor_voice_t *av, uint8_t **out_owned)
         return SPFY_E_INVAL;
     av->ctx4 = NULL;
     if (av->units->version != 100005u)   return SPFY_OK;
-    if (getenv("SPFY_NO_V100005_CTX4"))  return SPFY_OK;
+    if (spfy_env("SPFY_NO_V100005_CTX4"))  return SPFY_OK;
 
     uint32_t n        = av->units->n_units;
     uint32_t n_labels = av->ccos->n_labels;
     if (n == 0 || n_labels == 0)         return SPFY_OK;
 
-    /* Cache file_idx once so the neighbour walk is O(1) per cell. The engine
-     * compares in-mem record+0x00 (= disk+0x04 = file_idx) to detect a
-     * recording boundary. */
+    /* Cache file_idx once so the neighbour walk is O(1) per cell. */
     uint16_t *file_idx = (uint16_t *)malloc((size_t)n * sizeof *file_idx);
     uint8_t  *ctx4     = (uint8_t  *)malloc((size_t)n * 4u);
     if (!file_idx || !ctx4) { free(file_idx); free(ctx4); return SPFY_E_NOMEM; }
@@ -762,13 +960,12 @@ int spfy_anchor_build_ctx4(spfy_anchor_voice_t *av, uint8_t **out_owned)
         file_idx[u] = r.file_idx;
     }
 
-    static const int loff[2] = { 4, 2 };   /* left-2, left-1 */
-    static const int roff[2] = { 2, 4 };   /* right-1, right-2 */
+    static const int loff[2] = { 4, 2 };
+    static const int roff[2] = { 2, 4 };
     for (uint32_t uid = 0; uid < n; ++uid) {
         uint16_t self = file_idx[uid];
         int32_t  nb[4];
         for (int k = 0; k < 2; ++k) {
-            /* Short-circuit keeps file_idx[li] out of bounds when li < 0. */
             int32_t li = (int32_t)uid - loff[k];
             if (li < 0 || file_idx[li] != self) li = 0;
             nb[k] = li;
@@ -782,7 +979,7 @@ int spfy_anchor_build_ctx4(spfy_anchor_voice_t *av, uint8_t **out_owned)
             uint8_t hpc = ((uint32_t)nb[k] < av->hpclass_n)
                           ? av->hpclass_table[nb[k]] : 0u;
             int32_t labl = s_ctx_remap(av, (int32_t)hpc, n_labels);
-            ctx4[uid * 4u + (uint32_t)k] = (uint8_t)(labl & 0xff);  /* -1->0xFF */
+            ctx4[uid * 4u + (uint32_t)k] = (uint8_t)(labl & 0xff);
         }
     }
 
@@ -811,10 +1008,9 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
     int32_t hp_remap = hp_class_remap(av, self_hpc, n_labels);
     if (hp_remap < 0) return SPFY_E_OOB;
 
-    /* SP-sum: 5-matrix sum at this HP's sp_target. */
     /* Engine k matches C proscost index directly: spfy_proscost_load loads
      * matrices in ENGINE order (KIND_NAME[2]="sylInWordCosts",
-     * KIND_NAME[3]="wordInPhraseCosts"). Identity mapping. */
+     * KIND_NAME[3]="wordInPhraseCosts"). */
     static const uint8_t k_to_proscost[5] = { 0, 1, 2, 3, 4 };
     float sp_cost = 0.0f;
     uint8_t cand_bytes[5];
@@ -822,7 +1018,7 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
     cand_bytes[1] = u_rec.sp_syl_type;
     cand_bytes[2] = u_rec.sp_word_in_phrase;
     cand_bytes[3] = u_rec.sp_syl_in_word;
-    cand_bytes[4] = u_rec.sp_phone_in_syl;   /* 6 unless v100008 */
+    cand_bytes[4] = u_rec.sp_phone_in_syl;
     float sp_per_k[5] = {0};
     for (int k = 0; k < 5; ++k) {
         if (av->w_sp[k] == 0.0f) continue;
@@ -836,7 +1032,6 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
         sp_cost += sp_per_k[k];
     }
 
-    /* FLAG. weight at +0x38 in IS context = same value as +0x3c. */
     float flag_cost = (float)u_rec.context_cost * av->w_3c * av->w_flag_scale;
 
     /* 4-cell ccos: rows from ctx[0,1,3,4], cols from voice+0xc0[uid*4+k]
@@ -847,7 +1042,6 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
     int32_t sl3 = s_ctx_remap(av, ctx->ctx[4], n_labels);
     int32_t pc0, pc1, pc2, pc3;
     if (av->ctx4) {
-        /* v100005: derived, pre-remapped ccos-labl columns (voice+0xc4). */
         pc0 = (int32_t)(int8_t)av->ctx4[uid * 4u + 0u];
         pc1 = (int32_t)(int8_t)av->ctx4[uid * 4u + 1u];
         pc2 = (int32_t)(int8_t)av->ctx4[uid * 4u + 2u];
@@ -869,14 +1063,12 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
         ccos4 += ccos_cell_signed(av->ccos, (uint32_t)hp_remap, 3, sl3, pc3);
     ccos4 *= av->w_ccos;
 
-    /* D-cost: per-unit Mahalanobis using THIS HP's durt prediction. */
     float d_cost = 0.0f;
     if (cart && cart->durt_valid) {
         float delta = ((float)u_rec.f0_context - cart->durt_mean) * cart->durt_var;
         d_cost = delta * delta * av->w_dur;
     }
 
-    /* F0-cost: voicing gate via voicing[ctx[2]] (per-HP, NOT per-unit). */
     float f0_cost = 0.0f;
     int v_active = 1;
     if (av->voicing && (uint32_t)self_hpc < av->voicing_n) {
@@ -891,16 +1083,28 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
         }
     }
 
-    *out_cost = sp_cost + flag_cost + ccos4 + d_cost + f0_cost;
+    /* Energy target cost (SPFY_POW_TGT_W). */
+    float pow_cost = 0.0f;
+    if (av->w_pow_t > 0.0f && av->unit_pow && av->pow_mean && av->pow_sd
+        && uid < av->unit_pow_n) {
+        uint32_t row = (uint32_t)u_rec.phone_center * 2u
+                     + (u_rec.is_first_half ? 1u : 0u);
+        float p = av->unit_pow[uid];
+        if (row < av->pow_rows && p > 0.0f) {
+            float sd = av->pow_sd[row];
+            if (sd > 1e-6f) {
+                float z = ((av->pow_a * p + av->pow_b) - av->pow_mean[row])
+                          / sd;
+                pow_cost = z * z * av->w_pow_t;
+            }
+        }
+    }
 
-    /* SPFY_HP_COMP_DUMP — emit per-cand component costs for ALL cands
-     * (vs SPFY_HP_COMP_UID which gates on a single uid for verbose
-     * diagnostic). One JSON line per call. Compatible with engine's
-     * inner_scorer.cand_components from master capture (which records
-     * 4 components: D, F0, SP, CCOS — engine doesn't store FLAG; it
-     * folds FLAG into total directly). Use:
-     *   SPFY_HP_COMP_DUMP=1 spfy_synth ... 2> tc_components.jsonl */
-    if (getenv("SPFY_HP_COMP_DUMP")) {
+    *out_cost = sp_cost + flag_cost + ccos4 + d_cost + f0_cost + pow_cost;
+
+    /* SPFY_HP_COMP_DUMP — emit per-cand component costs for ALL cands (vs
+     * SPFY_HP_COMP_UID which gates on a single uid for verbose diagnostic). */
+    if (spfy_env("SPFY_HP_COMP_DUMP")) {
         fprintf(stderr,
             "{\"hp_comp\":1,\"uid\":%u,\"total\":%.6f,\"sp\":%.6f,"
             "\"flag\":%.6f,\"ccos\":%.6f,\"d\":%.6f,\"f0\":%.6f}\n",
@@ -908,7 +1112,7 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
             (double)ccos4, (double)d_cost, (double)f0_cost);
     }
 
-    const char *fuid = getenv("SPFY_HP_COMP_UID");
+    const char *fuid = spfy_env("SPFY_HP_COMP_UID");
     if (fuid && (uint32_t)atoi(fuid) == uid) {
         float c0_v = (sl0 >= 0)
             ? ccos_cell_signed(av->ccos, (uint32_t)hp_remap, 0, sl0, pc0) : 0.0f;
@@ -971,27 +1175,28 @@ void spfy_anchor_voice_set_default_weights(spfy_anchor_voice_t *av)
     av->dat_98a24 = 50.0f;
     av->dat_98528 = 10000.0f;
     av->dat_8e9857c = 1.0f;
+    /* Energy target cost OFF. */
+    av->unit_pow = NULL;
+    av->unit_pow_n = 0u;
+    av->pow_mean = NULL;
+    av->pow_sd = NULL;
+    av->pow_rows = 0u;
+    av->pow_a = 1.0f;
+    av->pow_b = 0.0f;
+    av->w_pow_t = 0.0f;
 }
 
 void spfy_anchor_voice_set_weights_from_vcf(spfy_anchor_voice_t *av,
                                             const spfy_vcf_t *vcf)
 {
     if (!av) return;
-    /* Seed with the engine's built-in defaults, then let the VCF override.
-     * A missing param must keep the built-in value, which is why every
-     * lookup passes the current field as its fallback. */
+    /* Seed with the engine's built-in defaults, then let the VCF override. */
     spfy_anchor_voice_set_default_weights(av);
     if (!vcf) return;
 
     /* Slots 2 and 3 are SWAPPED relative to the obvious reading of the VCF
      * key names, matching the matrix order in vcf_matrix.c (KIND_NAME[2] =
-     * sylInWordCosts, KIND_NAME[3] = wordInPhraseCosts). Confirmed against
-     * the engine's own per-voice weight dump (inner_scorer `weights.sp`):
-     *   Tom  [0.05, 0.05, 0.05, 0.05, 0   ]  -- all equal, tells us nothing
-     *   Jill [0.2,  0.5,  0,    0.2,  0.3 ]
-     * and Jill's VCF has SYL_IN_WORD=0, WORD_IN_PHRASE=0.2. So slot 2 is
-     * the sylInWord weight and slot 3 the wordInPhrase weight. Tom's four
-     * identical values made this unobservable on the Tom corpus. */
+     * sylInWordCosts, KIND_NAME[3] = wordInPhraseCosts). */
     av->w_sp[0] = spfy_vcf_f32(vcf, "PHRASE_POS_MISMATCH_COST",    av->w_sp[0]);
     av->w_sp[1] = spfy_vcf_f32(vcf, "STRESS_MISMATCH_COST",        av->w_sp[1]);
     av->w_sp[2] = spfy_vcf_f32_alias(vcf, "SYLL_IN_WORD_MISMATCH_COST",
@@ -1006,13 +1211,10 @@ void spfy_anchor_voice_set_weights_from_vcf(spfy_anchor_voice_t *av,
 
     /* UNIT_BIAS_WEIGHT and CHUNK_BIAS_WEIGHT are equal in all five shipped
      * voices, so which one feeds w_3c cannot be distinguished from the
-     * data. UNIT_BIAS is the better semantic match (w_3c scales the
-     * per-unit FLAG sum). Revisit if a voice ever ships them unequal. */
+     * data. */
     av->w_3c = spfy_vcf_f32(vcf, "UNIT_BIAS_WEIGHT", av->w_3c);
 
-    /* Anchor prune threshold/slope. The SYL_ and WORD_ variants are also
-     * equal in every shipped voice; the anchor path covers both anchor
-     * types with one threshold, so SYL_ is used as the representative. */
+    /* Anchor prune threshold/slope. */
     av->anchor_norm  = spfy_vcf_f32(vcf, "SYL_CAND_PRUNE_THRESH",
                                     av->anchor_norm);
     av->anchor_norm2 = spfy_vcf_f32(vcf, "SYL_CAND_PRUNE_SLOPE",

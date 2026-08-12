@@ -1,4 +1,3 @@
-/* F0 (pitch) cost component. */
 
 #include "cost.h"
 
@@ -9,7 +8,7 @@ float spfy_cost_f0(uint32_t stored_f0,
                    float missing_f0_cost)
 {
     /* Engine gates on stored_f0 == 0 (unvoiced/silence) BEFORE computing
-     * the squared-error term. See DLL_ANALYSIS "F0 scoring" step 4. */
+     * the squared-error term. */
     if (stored_f0 == 0u) return missing_f0_cost;
 
     long double diff   = (long double)stored_f0 - (long double)f0_pred_mean;

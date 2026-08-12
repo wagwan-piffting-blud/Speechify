@@ -1,0 +1,5 @@
+# cmd.exe requires CRLF in batch files: with bare LF its parser loses
+# sync and executes line fragments. core.autocrlf=input was stripping
+# these back to LF on every commit/checkout cycle.
+*.bat text eol=crlf
+*.cmd text eol=crlf

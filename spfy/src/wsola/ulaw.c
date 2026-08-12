@@ -1,15 +1,11 @@
-/* G.711 u-law decoder. Standard ITU formula, no engine-specific quirks
- * known. Plan gap #7 calls for verifying the engine's actual LUT against
- * this; for now this is the textbook reference. */
+/* G.711 u-law decoder. */
 
 #include "ulaw.h"
 
 /* G.711 u-law decode: from a u-law byte to a 14-bit signed magnitude
- * sample, then sign-extended to 16-bit. Bias = 0x84 = 132.
- * Reference: ITU-T G.711, Table 2a. */
+ * sample, then sign-extended to 16-bit. */
 int16_t spfy_ulaw_decode_byte(uint8_t b)
 {
-    /* u-law uses inverted bits: invert the byte. */
     b = (uint8_t)~b;
     int sign = (b & 0x80) ? -1 : 1;
     int exponent = (b >> 4) & 0x07;

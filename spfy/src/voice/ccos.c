@@ -42,11 +42,9 @@ static int parse_labl(const uint8_t *data, size_t n, uint32_t *out_n_labels)
 static int parse_data(const uint8_t *data, size_t n,
                       uint32_t n_labels, spfy_ccos_t *out)
 {
-    /* Each (hp_class, slot) on disk:
-     *     u32 hp_class_validator
-     *     u32 slot_validator
-     *     f32[N*(N-1)/2] upper_triangle    (j < i, row-major i=1..N-1)
-     */
+    /* Each (hp_class, slot) on disk: u32 hp_class_validator u32
+     * slot_validator f32[N*(N-1)/2] upper_triangle (j < i, row-major
+     * i=1..N-1) */
     const size_t triangle_n  = (size_t)n_labels * (n_labels - 1) / 2;
     const size_t per_slot_b  = 8 + triangle_n * 4;
     const size_t n_hp_classes = 2u * (size_t)n_labels;
@@ -56,7 +54,6 @@ static int parse_data(const uint8_t *data, size_t n,
         return SPFY_E_FORMAT;
     }
 
-    /* Allocate full matrices: n_hp_classes * SPFY_CCOS_N_SLOTS * (N*N) f32. */
     const size_t matrix_floats = (size_t)n_labels * n_labels;
     const size_t total_floats  =
         n_hp_classes * SPFY_CCOS_N_SLOTS * matrix_floats;
@@ -84,7 +81,6 @@ static int parse_data(const uint8_t *data, size_t n,
                                  matrix_floats;
             const float  scale = scale_row[slot];
 
-            /* Read N*(N-1)/2 upper-triangle entries, scale, mirror. */
             for (uint32_t i = 1; i < n_labels; ++i) {
                 for (uint32_t j = 0; j < i; ++j) {
                     float raw    = le_f32(p);                    p += 4;
@@ -93,7 +89,6 @@ static int parse_data(const uint8_t *data, size_t n,
                     mat[j * n_labels + i] = scaled;
                 }
             }
-            /* Diagonal is already 0 from calloc. */
         }
     }
     return SPFY_OK;

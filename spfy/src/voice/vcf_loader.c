@@ -35,13 +35,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* nibble -> cipher byte (file order: high nibble first, then low nibble) */
 static const uint8_t ENC_TABLE[16] = {
     0xDD, 0xDC, 0xDF, 0xDE, 0xD9, 0xD8, 0xDB, 0xDA,
     0xD5, 0xD4, 0xAC, 0xAF, 0xAE, 0xA9, 0xA8, 0xAB,
 };
 
-/* Inverse: cipher byte -> nibble (0..15), or 0xFF for invalid. */
 static uint8_t s_dec_table[256];
 static int     s_dec_table_init = 0;
 
@@ -63,7 +61,7 @@ static int vcf_decrypt(const uint8_t *src, size_t n_src,
     init_dec_table();
 
     size_t n = n_src / 2u;
-    uint8_t *plain = (uint8_t *)malloc(n + 1);   /* +1 for NUL convenience */
+    uint8_t *plain = (uint8_t *)malloc(n + 1);
     if (!plain) return SPFY_E_NOMEM;
 
     for (size_t i = 0; i < n; ++i) {
@@ -82,7 +80,6 @@ static int vcf_decrypt(const uint8_t *src, size_t n_src,
     return SPFY_OK;
 }
 
-/* Substring search bounded to [haystack, haystack+n). */
 static const char *bounded_str(const char *hay, size_t n, const char *needle)
 {
     size_t needle_n = strlen(needle);
@@ -102,7 +99,6 @@ static char *xstrdup_n(const char *s, size_t n)
     return r;
 }
 
-/* Trim leading/trailing ASCII whitespace in-place; returns new length. */
 static size_t trim_ascii(char *s)
 {
     size_t n = strlen(s);
@@ -115,8 +111,7 @@ static size_t trim_ascii(char *s)
 
 static int vcf_scan_params(const char *xml, size_t xml_n, spfy_vcf_t *out)
 {
-    /* Walks <param name="KEY"> ... <value>VAL</value> ... </param>.
-     * Tolerant of attribute whitespace and ordering. */
+    /* Walks <param name="KEY"> ... */
     const char *p   = xml;
     const char *end = xml + xml_n;
 
@@ -126,13 +121,11 @@ static int vcf_scan_params(const char *xml, size_t xml_n, spfy_vcf_t *out)
         const char *tag = bounded_str(p, (size_t)(end - p), "<param");
         if (!tag) break;
 
-        /* find "name=" attribute */
         const char *gt = bounded_str(tag, (size_t)(end - tag), ">");
         if (!gt) break;
         const char *name_attr = bounded_str(tag, (size_t)(gt - tag), "name=");
         if (!name_attr) { p = gt + 1; continue; }
 
-        /* opening quote */
         const char *q1 = name_attr + 5;
         while (q1 < gt && *q1 != '"' && *q1 != '\'') ++q1;
         if (q1 >= gt) { p = gt + 1; continue; }
@@ -143,14 +136,13 @@ static int vcf_scan_params(const char *xml, size_t xml_n, spfy_vcf_t *out)
         char *key = xstrdup_n(q1, (size_t)(q2 - q1));
         if (!key) return SPFY_E_NOMEM;
 
-        /* find <value> ... </value> within this <param>...</param> */
         const char *param_end = bounded_str(gt, (size_t)(end - gt),
                                             "</param>");
         if (!param_end) { free(key); break; }
         const char *vstart = bounded_str(gt, (size_t)(param_end - gt),
                                          "<value>");
         if (!vstart) { free(key); p = param_end + 8; continue; }
-        vstart += 7;   /* past "<value>" */
+        vstart += 7;
         const char *vend = bounded_str(vstart, (size_t)(param_end - vstart),
                                        "</value>");
         if (!vend) { free(key); p = param_end + 8; continue; }
@@ -166,7 +158,7 @@ static int vcf_scan_params(const char *xml, size_t xml_n, spfy_vcf_t *out)
         kv->next = NULL;
         *tail = kv; tail = &kv->next;
 
-        p = param_end + 8;   /* past "</param>" */
+        p = param_end + 8;
     }
     return SPFY_OK;
 }

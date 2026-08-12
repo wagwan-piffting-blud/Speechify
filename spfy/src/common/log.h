@@ -1,22 +1,14 @@
 #ifndef SPFY_COMMON_LOG_H
 #define SPFY_COMMON_LOG_H
 
-/* Lightweight logging. Trace builds (-DSPFY_TRACE=1) emit JSONL via
- * spfy_trace(); release builds compile it out. */
+/* Lightweight logging. */
 
 #include <stdio.h>
 
 void spfy_log_warn(const char *fmt, ...);
 void spfy_log_err (const char *fmt, ...);
 
-/* Trace sink primitives. These are ALWAYS compiled into spfy_common, even
- * in non-trace builds, so a translation unit built with -DSPFY_TRACE=1
- * (e.g. the spfy_synth_trace CLI) can link against them while spfy_common
- * itself is built without SPFY_TRACE. Non-trace call sites never reference
- * these symbols: the public spfy_trace_* macros below expand to no-ops, so
- * the emit calls — AND the argument expressions that build their payloads —
- * vanish entirely (zero runtime cost, byte-identical output). Distinct
- * `_impl` names avoid the macro colliding with the prototype. */
+/* Trace sink primitives. */
 void spfy_trace_set_sink_impl(FILE *fp);
 void spfy_trace_event_impl(const char *stage, const char *json_payload);
 #if defined(__GNUC__)

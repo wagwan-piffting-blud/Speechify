@@ -1,4 +1,3 @@
-/* spfy_fe tables loader: 553 + 173 = 726 carved blobs. */
 
 #include "tables.h"
 
@@ -17,7 +16,7 @@ static int load_one(const char *dir, uint32_t idx, uint8_t **out, uint32_t *out_
     fseek(fp, 0, SEEK_END);
     long sz = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-    if (sz < 0 || sz > (1 << 24)) {     /* 16 MB sanity cap */
+    if (sz < 0 || sz > (1 << 24)) {
         fclose(fp);
         return SPFY_E_FORMAT;
     }
@@ -39,8 +38,7 @@ int spfy_fe_tables_load(const char       *tables_a_dir,
     memset(out, 0, sizeof *out);
     int rc = SPFY_OK;
 
-    /* Two-pass load: first compute total arena size, then alloc and
-     * copy. Saves N-fragmented heap allocations. */
+    /* Two-pass load: first compute total arena size, then alloc and copy. */
     uint32_t  total = 0;
     uint8_t **tmp_a = (uint8_t **)calloc(SPFY_FE_REG_A_N, sizeof *tmp_a);
     uint8_t **tmp_b = (uint8_t **)calloc(SPFY_FE_REG_B_N, sizeof *tmp_b);
@@ -64,7 +62,6 @@ int spfy_fe_tables_load(const char       *tables_a_dir,
         total += n;
     }
 
-    /* Concatenate into a single arena. */
     out->arena_size = total;
     out->arena = (uint8_t *)malloc(total ? total : 1);
     if (!out->arena) { rc = SPFY_E_NOMEM; goto fail; }
@@ -106,12 +103,10 @@ void spfy_fe_tables_free(spfy_fe_tables_t *t)
 uint32_t spfy_fe_table_index(spfy_fe_table_t *t)
 {
     if (t->record_offs) return t->n_records;
-    /* Records are NUL-terminated. Count records first, then alloc. */
     uint32_t n = 0;
     for (uint32_t i = 0; i < t->size; ++i) {
         if (t->data[i] == 0) ++n;
     }
-    /* Trailing data without NUL still counts as a record. */
     if (t->size > 0 && t->data[t->size - 1] != 0) ++n;
     if (n == 0) {
         t->n_records = 0;

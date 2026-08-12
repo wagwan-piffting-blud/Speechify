@@ -1,15 +1,4 @@
-/* spfy_score_one -- M3.2 integration sanity check.
- *
- * Loads Tom voice (VIN + VCF + ccos), picks a candidate UID from the unit
- * table, computes the four target-cost components (S, D, SP, F0) for it
- * relative to a hard-coded synthetic target halfphone. This proves all
- * the loaders, maps, and cost functions wire together without crashing.
- *
- *   spfy_score_one <voice.vin> <voice.vcf> <unit_id>
- *
- * Component costs are printed plus their VCF-weighted sum. A real scorer
- * would compute these against an FE-generated target; here we use a
- * synthetic target so the values are illustrative, not engine-comparable. */
+/* spfy_score_one -- M3.2 integration sanity check. */
 
 #include <spfy/spfy.h>
 
@@ -61,7 +50,6 @@ int main(int argc, char **argv)
     if ((rc = spfy_voice_maps_build(&ccos, &maps)) != SPFY_OK) goto fail;
     if ((rc = spfy_proscost_load(&vcf, pmats)) != SPFY_OK) goto fail;
 
-    /* Read the candidate. */
     spfy_unit_record_t cand;
     if ((rc = spfy_unit_record_get(&units, uid, &cand)) != SPFY_OK) {
         fprintf(stderr, "unit %u: %s\n", uid, spfy_strerror(rc));
@@ -69,15 +57,14 @@ int main(int argc, char **argv)
     }
 
     /* Synthetic target halfphone: same phone center as the candidate,
-     * predicted dur = 100 ms, predicted f0 = 118 Hz, scales = 0.1, all
-     * SP target features = 1 (UNDEF), context phones = candidate's. */
+     * predicted dur = 100 ms, predicted f0 = 118 Hz, scales = 0.1, all SP
+     * target features = 1 (UNDEF), context phones = candidate's. */
     float durt_pred_mean  = 100.0f;
     float durt_pred_scale = 0.1f;
     float f0tr_pred_mean  = 118.0f;
     float f0tr_pred_scale = 0.1f;
     uint32_t target_sp[5] = {1, 1, 1, 1, 1};
 
-    /* VCF weights. */
     double dur_w   = get_vcf_f64(&vcf, "tts.voiceCfg.DUR_WEIGHT",         0.3);
     double f0_w    = get_vcf_f64(&vcf, "tts.voiceCfg.ABS_F0_WEIGHT",      0.2);
     double ccos_w  = get_vcf_f64(&vcf, "tts.voiceCfg.CONTEXT_COST_WEIGHT",1.0);
@@ -88,7 +75,6 @@ int main(int argc, char **argv)
     float F0 = spfy_cost_f0(cand.f0_start, f0tr_pred_mean,
                             f0tr_pred_scale, (float)f0_w, (float)miss_f0);
 
-    /* SP: 4 active matrices for Tom (5th is degenerate/missing). */
     spfy_sp_matrix_t sp_views[5];
     for (int k = 0; k < 5; ++k) {
         sp_views[k].data   = pmats[k].data;
@@ -98,13 +84,11 @@ int main(int argc, char **argv)
     uint32_t sp_cand[5] = {
         cand.sp_syl_in_phrase, cand.sp_syl_type,
         cand.sp_word_in_phrase, cand.sp_syl_in_word,
-        cand.sp_phone_in_syl   /* 6 unless the record is v100008 */
+        cand.sp_phone_in_syl
     };
-    /* Default mismatch weights from VCF (Tom). */
     float w_sp[5] = {0.1f, 0.1f, 0.0f, 0.0f, 0.0f};
     float SP = spfy_cost_sp(sp_views, target_sp, sp_cand, w_sp);
 
-    /* S: target context = candidate context (so S should be ~zero). */
     uint8_t target_ctx[4] = {
         cand.phone_ctx[0], cand.phone_ctx[1],
         cand.phone_ctx[2], cand.phone_ctx[3]

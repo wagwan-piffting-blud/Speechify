@@ -1,6 +1,4 @@
-/* ckls + cklx loader. Format per reveng/README_TECHNICAL.md "cklx" /
- * "ckls" sections; Python parser at c:/tmp/cklx_ckls_parse.py validated
- * cross-checks. */
+/* ckls + cklx loader. */
 
 #include "chunk_table.h"
 
@@ -21,16 +19,9 @@ static uint32_t le_u32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* Parse cklx chunk:
- *   u32 group_count        (= 2)
- *   for each group:
- *     u16 name_len; char[name_len] group_name
- *     u32 entry_count
- *     for each entry:
- *       u16 key_len; char[key_len] key
- *       u32 posting_count
- *       u32[posting_count] posting_ids
- */
+/* Parse cklx chunk: u32 group_count (= 2) for each group: u16 name_len;
+ * char[name_len] group_name u32 entry_count for each entry: u16 key_len;
+ * char[key_len] key u32 posting_count u32[posting_count] posting_ids */
 static int parse_cklx(const uint8_t *data, size_t n, spfy_chunk_tables_t *out)
 {
     const uint8_t *p   = data;
@@ -58,8 +49,7 @@ static int parse_cklx(const uint8_t *data, size_t n, spfy_chunk_tables_t *out)
         spfy_cklx_group_t *g = &out->cklx[group_idx];
         g->n_keys = n_entries;
         /* An empty group is legitimate -- Felix (fr-CA) ships no word
-         * chunks at all. calloc(0) may return NULL, which would otherwise
-         * be misread as OOM. */
+         * chunks at all. */
         if (n_entries == 0) {
             g->postings_offset = (uint32_t *)calloc(1,
                                                 sizeof *g->postings_offset);
@@ -71,7 +61,6 @@ static int parse_cklx(const uint8_t *data, size_t n, spfy_chunk_tables_t *out)
                                                 sizeof *g->postings_offset);
         if (!g->keys || !g->postings_offset) return SPFY_E_NOMEM;
 
-        /* Two-pass: first count total postings, then fill. */
         const uint8_t *p_save = p;
         uint32_t total = 0;
         for (uint32_t i = 0; i < n_entries; ++i) {
@@ -110,24 +99,9 @@ static int parse_cklx(const uint8_t *data, size_t n, spfy_chunk_tables_t *out)
     return SPFY_OK;
 }
 
-/* Parse ckls chunk:
- *   u32 group_count        (= 2)
- *   for each group:
- *     u16 name_len; char[name_len] group_name
- *     u32 token_count
- *     u32 unk0                     -- ONLY when token_count > 0
- *     for each (token, filename) record pair (token_count of each):
- *       token: u16 len; char[len] text; u32 ss; u32 se
- *       filename: u16 len; char[len] fname; u32 file_id
- *         (final filename has no trailing u32)
- *
- * The conditional unk0 was found 2026-07-20 on Felix (fr-CA), whose
- * _WORD_ group is genuinely EMPTY -- he ships syllable chunks but no word
- * chunks. Reading unk0 unconditionally consumed the next group's name
- * record (the bytes decode as u16 len=5 + "_S", i.e. 0x535F0005) and the
- * parse then ran off the end of the chunk. With the field made
- * conditional, all five shipped voices consume their ckls payload
- * exactly: 394375 / 355308 / 816044 / 1013449 / 5234800 bytes. */
+/* Parse ckls chunk: u32 group_count (= 2) for each group: u16 name_len;
+ * char[name_len] group_name u32 token_count u32 unk0 -- ONLY when
+ * token_count > 0 for each (token, filename) record pair... */
 static int parse_ckls(const uint8_t *data, size_t n,
                       spfy_chunk_tables_t *out)
 {
@@ -154,11 +128,11 @@ static int parse_ckls(const uint8_t *data, size_t n,
         uint32_t token_count = le_u32(p); p += 4;
         if (token_count > 0) {
             if ((size_t)(end - p) < 4) return SPFY_E_FORMAT;
-            p += 4;   /* unk0 -- absent entirely when the group is empty */
+            p += 4;
         }
         spfy_ckls_group_t *g = &out->ckls[group_idx];
         g->n_postings = token_count;
-        if (token_count == 0) continue;   /* nothing to allocate or read */
+        if (token_count == 0) continue;
         g->span_start = (uint32_t *)calloc(token_count, sizeof *g->span_start);
         g->span_end   = (uint32_t *)calloc(token_count, sizeof *g->span_end);
         g->token_text = (char    **)calloc(token_count, sizeof *g->token_text);
@@ -166,7 +140,6 @@ static int parse_ckls(const uint8_t *data, size_t n,
             return SPFY_E_NOMEM;
 
         for (uint32_t k = 0; k < token_count; ++k) {
-            /* Token record */
             if ((size_t)(end - p) < 2) return SPFY_E_FORMAT;
             uint16_t tlen = le_u16(p); p += 2;
             if ((size_t)(end - p) < tlen + 8u) return SPFY_E_FORMAT;
@@ -177,14 +150,13 @@ static int parse_ckls(const uint8_t *data, size_t n,
             p += tlen;
             g->span_start[k] = le_u32(p); p += 4;
             g->span_end[k]   = le_u32(p); p += 4;
-            /* Filename record */
             if ((size_t)(end - p) < 2) return SPFY_E_FORMAT;
             uint16_t flen = le_u16(p); p += 2;
             if ((size_t)(end - p) < flen) return SPFY_E_FORMAT;
             p += flen;
             if (k + 1 < token_count) {
                 if ((size_t)(end - p) < 4) return SPFY_E_FORMAT;
-                p += 4;   /* file_id */
+                p += 4;
             }
         }
     }
@@ -203,7 +175,6 @@ int spfy_chunk_tables_load(const spfy_vin_t *vin,
     rc = parse_ckls(vin->ckls, vin->ckls_n, out);
     if (rc != SPFY_OK) { spfy_chunk_tables_free(out); return rc; }
 
-    /* Cross-check: cklx posting count == ckls token count. */
     for (uint32_t gi = 0; gi < 2; ++gi) {
         if (out->cklx[gi].n_postings != out->ckls[gi].n_postings) {
             spfy_log_err("chunk_tables: group %u posting mismatch "
@@ -247,7 +218,6 @@ int spfy_cklx_lookup(const spfy_cklx_group_t *g,
                      uint32_t *out_count)
 {
     if (!g || !key) return 0;
-    /* Binary search; cklx keys are sorted ASCII per the docs. */
     int32_t lo = 0, hi = (int32_t)g->n_keys - 1;
     while (lo <= hi) {
         int32_t mid = (lo + hi) / 2;

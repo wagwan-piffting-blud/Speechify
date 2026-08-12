@@ -48,25 +48,18 @@ typedef enum {
 
 typedef struct {
     spfy_slot_kind_t kind;
-    /* Index in the post-ordered slot list. Identity for cross-references. */
     uint32_t         post_idx;
-    /* Parent slot index; UINT32_MAX = root (phrase). */
     uint32_t         parent_idx;
-    /* Children (slot indices). Allocated; n_children may be 0 (leaf). */
     uint32_t        *child_idx;
     uint32_t         n_children;
-    /* Source FE item identity. For PHRASE this is 0; for WORD/SYLLABLE
-     * it's the shared-item ptr; for HALFPHONE it's the segment shared
-     * item ptr (both halfphones of a segment share this). */
+    /* Source FE item identity. */
     uint32_t         fe_shared;
-    /* For HALFPHONE only: 0 = left half, 1 = right half. */
     uint32_t         halfphone_side;
 } spfy_slot_node_t;
 
 typedef struct {
-    spfy_slot_node_t *slots;        /* heap, indexed by post_idx */
+    spfy_slot_node_t *slots;
     uint32_t          n_slots;
-    /* Convenience counts (also derivable from `slots`). */
     uint32_t          n_phrase;
     uint32_t          n_word;
     uint32_t          n_syl;
@@ -74,17 +67,10 @@ typedef struct {
 } spfy_slot_tree_t;
 
 /* Flat in-memory representation of the FE-emitted utterance tree (the
- * subset BuildGraph cares about). The caller produces this from the
- * captured fe_tree trace (or, eventually, from a C frontend). Each
- * array is in FE relation order (head-to-tail). */
+ * subset BuildGraph cares about). */
 typedef struct {
-    /* Word relation, flat: word i's shared item id at word_shareds[i]. */
     uint32_t *word_shareds;
-    /* Word i's "name" feature string (or NULL if unknown). Owned by the
-     * caller (i.e. the parser that fills the struct); freed via
-     * spfy_fe_utt_free if non-NULL. Used by spfy_derive_q5_table to
-     * detect the boundary "_NULL_" wrapper words (q5=1 instead of
-     * 2*n_segs for halfphones under such words). */
+    /* Word i's "name" feature string (or NULL if unknown). */
     char    **word_names;
     uint32_t  n_words;
     /* Phrase terminator char (e.g. ',', '.', '?', '!'). The engine's
@@ -92,42 +78,37 @@ typedef struct {
      * decide local_10. From the FE Phrase relation's `name` feature. */
     char      phrase_term;
     /* Per-syllable data, indexed by global syllable index (= sum of
-     * word_n_syls[0..w-1] + s for word w's s-th syl). Length n_syls. */
-    int32_t  *syl_stress;    /* raw FE syl stress (0/1/2 etc; -1 unknown) */
-    uint32_t *syl_accent;    /* 0 = no accent, 1..6 = pitch-accent code */
+     * word_n_syls[0..w-1] + s for word w's s-th syl). */
+    int32_t  *syl_stress;
+    uint32_t *syl_accent;
     /* Per-syllable phrase-boundary tone target, in signed semitones
-     * relative to the syllable's carrier F0. 0 = no boundary tone.
-     * Derived from the ToBI boundary marker in the FE accent string
-     * (L-L% → fall, L-H%/H-H% → rise). Drives the F0 target bias that
-     * steers unit selection toward naturally-contoured units (Option A
-     * of prosody realization). NULL if not populated. */
+     * relative to the syllable's carrier F0. */
     int8_t   *syl_btone;
+    /* Per-syllable pitch-ACCENT-TYPE F0 bias in signed semitones, relative
+     * to a generic H* (so stock FE output, which is nearly all H*, biases 0
+     * and stays put). */
+    int8_t   *syl_acctype;
+    /* fr-CA liaison/enchainement: 1 when this syllable is the marker-less
+     * leading syllable of its word, i.e. */
+    uint8_t  *syl_cont_prev;
     /* For each word i, an ordered list of its syllable shared ids
      * (collected by walking the word's SylStructure daughter chain). */
-    uint32_t **word_syls;       /* word_syls[i] = array of syl shared ids */
+    uint32_t **word_syls;
     uint32_t  *word_n_syls;
-    /* Total syllables across all words (== sum of word_n_syls). */
     uint32_t  n_syls;
-    /* For each syllable in a word-major flattening, an ordered list of
-     * its segment shared ids (from SylStructure daughter chain). The
-     * indexing is "global syllable index" = sum of word_n_syls[0..w-1]
-     * + s for the s-th syllable of word w. */
-    uint32_t **syl_segs;        /* syl_segs[g] = array of segment shared ids */
+    /* For each syllable in a word-major flattening, an ordered list of its
+     * segment shared ids (from SylStructure daughter chain). */
+    uint32_t **syl_segs;
     uint32_t  *syl_n_segs;
-    /* Total segments. */
     uint32_t  n_segs;
 } spfy_fe_utt_t;
 
 void spfy_fe_utt_free(spfy_fe_utt_t *u);
 void spfy_slot_tree_free(spfy_slot_tree_t *t);
 
-/* Build the slot tree from a parsed FE utterance. On success returns 0
- * and fills *out (caller must spfy_slot_tree_free it). */
+/* Build the slot tree from a parsed FE utterance. */
 int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out);
 
-/* --------------------------------------------------------------------- */
-/* LinkGraph                                                              */
-/* --------------------------------------------------------------------- */
 /*
  * Produces the per-slot predecessor list (`slice+0x3c` in the engine,
  * with count at `slice+0x38`) that the Viterbi DP iterates.
@@ -157,79 +138,33 @@ int spfy_build_graph(const spfy_fe_utt_t *in, spfy_slot_tree_t *out);
  */
 
 typedef struct {
-    uint32_t *preds;     /* slot indices, length n_preds */
+    uint32_t *preds;
     uint32_t  n_preds;
 } spfy_slot_preds_t;
 
 typedef struct {
-    spfy_slot_preds_t *per_slot;   /* heap, indexed by slot post_idx */
+    spfy_slot_preds_t *per_slot;
     uint32_t           n_slots;
 } spfy_slot_preds_table_t;
 
 void spfy_slot_preds_table_free(spfy_slot_preds_table_t *t);
 
-/* Compute the predecessor table for a slot tree. */
 int spfy_link_graph(const spfy_slot_tree_t *tree,
                     spfy_slot_preds_table_t *out);
 
-/* --------------------------------------------------------------------- */
-/* Slice context derivation                                              */
-/* --------------------------------------------------------------------- */
-/*
- * For each halfphone-leaf slot, compute the engine's 5-tuple
- * `slice.ctx[]` (the value seen in `prsl_slot.ctx`). Encoding decoded
- * empirically from the captured prsl_slot trace:
- *
- *   slice.ctx[i]  =  hp_class of the SAME-SIDE phoneme at offset (i-2)
- *                    centered on the current halfphone slot. Out-of-
- *                    range positions use the silence sentinel (`pau_L`
- *                    = label_pau*2 = 64 for left halfphones, `pau_R`
- *                    = 65 for right halfphones).
- *
- * The hp_class encoding is interleaved: hp_class = label_idx*2 + side
- * where side = 0 (left) or 1 (right). Tom's hp_class_remap (voice+0x608)
- * additionally swaps phone classes 9/10/11 (3-cycle) and 14/15 -- those
- * swaps are applied on the LOOKUP path, not at encoding time, so we
- * just produce the raw interleaved value here.
- *
- * The phone_name -> label_idx mapping is voice-specific. For Tom we
- * hardcode the 47-phoneme inventory (see slot_ctx.c). When the FE
- * uses a phoneme outside the table we emit UINT32_MAX for that ctx
- * slot (caller can detect + skip / abort).
- */
+/* For each halfphone-leaf slot, compute the engine's 5-tuple `slice.ctx[]`
+ * (the value seen in `prsl_slot.ctx`). */
 
 typedef struct {
-    /* Per-halfphone-leaf slot ctx. Indexed by post-order slot index;
-     * non-halfphone slots are left zeroed. */
-    uint32_t (*ctx)[5];        /* heap, n_slots arrays of 5 */
+    /* Per-halfphone-leaf slot ctx. */
+    uint32_t (*ctx)[5];
     uint32_t   n_slots;
-    /* Per-halfphone-leaf flag (1 if this slot has a derived ctx). */
     uint8_t   *has;
 } spfy_slice_ctx_table_t;
 
 void spfy_slice_ctx_table_free(spfy_slice_ctx_table_t *t);
 
-/* Derive ctx[5] for every halfphone-leaf slot in the tree. The
- * `fe_segments_in_order` argument is a flat array of segment phoneme
- * names in utterance order (= fe.syl_segs flattened). Length must
- * equal tree->n_halfphone / 2 == fe.n_segs.
- *
- * `phone_names` is the VOICE's own phone inventory in VIN feat["name"]
- * order, where the array index IS the engine phone id -- the same
- * numbering hp_class and the FE's engine_phone_id() use. Pass
- * spfy_phone_order_t.phone_names / .n_phones. It is a plain array rather
- * than the struct so usel/ keeps no dependency on voice/, matching
- * fe_phone_names_t in fe_parse.h.
- *
- * Passing NULL falls back to the hardcoded TOM table (see
- * spfy_tom_phone_to_label). That is ONLY correct for Tom: every other
- * voice has a different inventory, and for a non-en-US voice most
- * symbols miss entirely, leaving ctx all-zero -- which collapses the
- * PRSL pool onto phone id 0 for every affected slot. Synthesis must
- * always pass the real table; the NULL path exists for the Tom-only
- * replay harnesses.
- *
- * Returns SPFY_OK on success. */
+/* Derive ctx[5] for every halfphone-leaf slot in the tree. */
 int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
                           const char         **fe_segments_in_order,
                           uint32_t              n_segments,
@@ -237,14 +172,9 @@ int spfy_derive_slice_ctx(const spfy_slot_tree_t *tree,
                           uint32_t              n_phones,
                           spfy_slice_ctx_table_t *out);
 
-/* Lookup a phoneme name -> label idx for Tom. Returns UINT32_MAX if
- * the name isn't in the table. Tom-only; prefer the voice's own
- * feat["name"] order via spfy_derive_slice_ctx's phone_names. */
+/* Lookup a phoneme name -> label idx for Tom. */
 uint32_t spfy_tom_phone_to_label(const char *name);
 
-/* --------------------------------------------------------------------- */
-/* CART feature kernels (q_type 3, 4, 5)                                 */
-/* --------------------------------------------------------------------- */
 /*
  * The InnerScorer (FUN_08e88de0) precomputes 8 per-slot feature values
  * and passes them as stack args to the durt / f0tr CART walkers
@@ -270,28 +200,16 @@ uint32_t spfy_tom_phone_to_label(const char *name);
  * halfphone-leaf slots match across the corpus.
  */
 
-/* Compute q_type 3 input: LEFT-context phone label.
- *
- *   q3 = s_ctx_remap[ slice_ctx[1] ]
- *
- * `s_ctx_remap` is a uint8_t[2 * n_labels] table from
- * `spfy_voice_maps_build` (voice+0x604 in the engine).
- * Returns UINT32_MAX if ctx1 is out of bounds. */
+/* Compute q_type 3 input: LEFT-context phone label. */
 uint32_t spfy_cart_feature_q3(uint32_t       ctx1,
                               const uint8_t *s_ctx_remap,
                               uint32_t       n_remap);
 
-/* Compute q_type 4 input: RIGHT-context phone label.
- *
- *   q4 = s_ctx_remap[ slice_ctx[3] ]
- */
+/* Compute q_type 4 input: RIGHT-context phone label. */
 uint32_t spfy_cart_feature_q4(uint32_t       ctx3,
                               const uint8_t *s_ctx_remap,
                               uint32_t       n_remap);
 
-/* --------------------------------------------------------------------- */
-/* SP_target populator (workspace+0x28..0x3c)                            */
-/* --------------------------------------------------------------------- */
 /*
  * Reproduces the engine's FUN_08e8c7d0 + FUN_08e8a670 + FUN_08e8a880
  * chain (all called from the end of FUN_08e8cbb0). Produces the 5
@@ -309,12 +227,9 @@ uint32_t spfy_cart_feature_q4(uint32_t       ctx3,
  */
 
 typedef struct {
-    /* Per-slot 5-tuple of SP_target indices (all uint32). For non-
-     * halfphone slots the entries are zero; halfphone-leaf slots get
-     * the populated values. */
-    uint32_t (*sp)[5];        /* heap, length n_slots */
+    /* Per-slot 5-tuple of SP_target indices (all uint32). */
+    uint32_t (*sp)[5];
     uint32_t   n_slots;
-    /* 1 if slot received a populated SP_target tuple, 0 otherwise. */
     uint8_t   *has;
 } spfy_sp_target_table_t;
 
@@ -350,7 +265,10 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
  *   has_q5       : caller-allocated u8[tree->n_slots]; set to 1 for
  *                  halfphone-leaf slots that received a q5 value.
  *
- * Returns SPFY_OK on success. */
+ * Returns SPFY_OK on success.
+ *
+ * A fr-CA liaison syllable needs no special case: spfy_build_graph merges it
+ * into one node, so its half-phone count is already the engine's. */
 int spfy_derive_q5_table(const spfy_slot_tree_t *tree,
                          const char       **word_names,
                          uint32_t            n_words,

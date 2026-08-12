@@ -1278,6 +1278,38 @@ int wmain(int argc, wchar_t **wargv) {
     WaitForSingleObject(ctx.doneEvent, (DWORD)wl);
     CloseHandle(ctx.doneEvent);
 
+    // G2P output: print phoneme sequences. Pure conversion of the marks
+    // collected during synthesis (no engine calls), so it runs here, ahead of
+    // the port/WAV teardown.
+    if (g2pMode && ctx.g2pCount > 0) {
+        // ARPAbet output (space-separated)
+        printf("ARPAbet: ");
+        for (int i = 0; i < ctx.g2pCount; i++) {
+            if (i > 0) printf(" ");
+            printf("%s", ctx.g2pPhones[i].name);
+            if (ctx.g2pPhones[i].stress) printf("(%u)", ctx.g2pPhones[i].stress);
+        }
+        printf("\n");
+
+        // SPR output (ready to paste into --pron)
+        char *sprBuf = (char *)malloc(16 * ctx.g2pCount + 1);
+        if (sprBuf) {
+            char *w = sprBuf;
+            *w = '\0';
+            for (int i = 0; i < ctx.g2pCount; i++) {
+                const char *spr = arpabet_to_spr(ctx.g2pPhones[i].name);
+                if (strcmp(spr, "_") == 0) continue;  // skip pau for SPR
+                if (is_vowel_spr(spr[0]))
+                    w += sprintf(w, "%u%s", ctx.g2pPhones[i].stress, spr);
+                else
+                    w += sprintf(w, "%s", spr);
+            }
+            printf("SPR:     %s\n", sprBuf);
+            printf("Balabolka users: Use \\![%s] to synthesize the above SPR phonemes.\n", sprBuf);
+            free(sprBuf);
+        }
+    }
+
     fwprintf(stderr, L"INFO: Done. Closing port.\n");
 
     api.ClosePort(port);
@@ -1317,30 +1349,6 @@ int wmain(int argc, wchar_t **wargv) {
             fprintf(stderr, "Wrote %u bytes of audio (%u samples at %u Hz)\n",
                     dataBytes, dataBytes / 2, sampleRate);
         }
-    }
-
-    // G2P output: print phoneme sequences
-    if (g2pMode && ctx.g2pCount > 0) {
-        // ARPAbet output (space-separated)
-        printf("ARPAbet: ");
-        for (int i = 0; i < ctx.g2pCount; i++) {
-            if (i > 0) printf(" ");
-            printf("%s", ctx.g2pPhones[i].name);
-            if (ctx.g2pPhones[i].stress) printf("(%u)", ctx.g2pPhones[i].stress);
-        }
-        printf("\n");
-
-        // SPR output (ready to paste into --pron)
-        printf("SPR:     ");
-        for (int i = 0; i < ctx.g2pCount; i++) {
-            const char *spr = arpabet_to_spr(ctx.g2pPhones[i].name);
-            if (strcmp(spr, "_") == 0) continue;  // skip pau for SPR
-            if (ctx.g2pPhones[i].stress)
-                printf(".%u%s", ctx.g2pPhones[i].stress, spr);
-            else
-                printf(".0%s", spr);
-        }
-        printf("\n");
     }
 
     free(speakBuf);   // always heap-allocated now (NULL only in batch mode)

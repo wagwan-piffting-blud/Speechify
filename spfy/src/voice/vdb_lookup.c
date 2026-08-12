@@ -22,8 +22,7 @@ static int compare_indx_entries(const void *a, const void *b, void *ctx)
 }
 
 /* qsort_r is non-portable; use a thread-local trick: stash ctx in a
- * file-static and use plain qsort. Single-threaded loader makes this
- * safe in our context. */
+ * file-static and use plain qsort. */
 static const spfy_vdb_t *g_sort_ctx_vdb;
 static int compare_indx_entries_qsort(const void *a, const void *b)
 {
@@ -75,9 +74,7 @@ int spfy_vdb_lookup_by_name(const spfy_vdb_lookup_t *l,
             else if (name_len > e->name_len) c = 1;
         }
         if (c == 0) {
-            /* Hit. Compute size as offset_of(next_entry_in_FILE_order) -
-             * this entry's offset. The indx sentinel last entry holds
-             * data_chunk_total_size as offset. */
+            /* Hit. */
             uint32_t my_idx = l->order[mid];
             uint32_t off    = e->data_offset;
             uint32_t size   = 0;

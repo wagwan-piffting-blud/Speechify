@@ -859,7 +859,7 @@ all `local_pos` values for a recording:
 `Speechify.exe` and hook `process_unit` (0x8EE2960). Watch for `start < 0` or a negative
 delta between consecutive `start` values. The first negative delta identifies the offending
 unit; its `file_idx` reveals which recording has the monotonicity violation. See
-`c:/tmp/frida_wsola_delta_start.py` for the hook script.
+`frida_wsola_delta_start.py` for the hook script.
 
 ### Creating a VCF for the New Voice
 

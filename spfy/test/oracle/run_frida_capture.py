@@ -96,6 +96,8 @@ HOOK_JS = {
     "anchor_cost4":   HOOK_DIR / "anchor_cost4_hook.js",     # B4.4 engine per-cand cost4 + survivor dump
     "anchor_components": HOOK_DIR / "anchor_components_hook.js",  # 2026-05-13 final-6.2%-UID-gap: per-cand FLAG/SP/D/F0 sync-point dump on FUN_08e8ce60
     "durt_walk":         HOOK_DIR / "durt_walk_hook.js",          # 2026-05-13 anchor-D-bug: per-call (is_first_half, leaf_mean, leaf_var) on FUN_08e87d90
+    "durt_walk_args":    HOOK_DIR / "durt_walk_args_hook.js",     # 2026-08-10 anchor-D features: full 7-arg question tuple + return address on FUN_08e87d90
+    "anchor_d_entry":    HOOK_DIR / "anchor_d_entry_hook.js",     # 2026-08-10 anchor-D features: first/last hp + net q-arrays at FUN_08e89530 entry
     "fe_lts_access":  HOOK_DIR / "fe_lts_access_trace.js",   # LTS rule index access trace (MemoryAccessMonitor)
     "ccos_cell_probe": HOOK_DIR / "ccos_cell_probe_hook.js",  # M3.4r B4.4 4-cell ccos cell probe
     "ccos_apply":      HOOK_DIR / "ccos_apply_hook.js",       # plan 02-02 D-05 CCOS context-cost reduction
@@ -113,6 +115,7 @@ HOOK_JS = {
     "fe_setpair_probe":  HOOK_DIR / "fe_setpair_probe_hook.js",   # 2026-05-12 K2-B: probe engine-side setPair callbacks to find utt_ptr offset in user_arg
     "hp_prune_trace":    HOOK_DIR / "hp_prune_trace_hook.js",     # 2026-05-14 final-residual: trace FUN_08e88830 inputs/threshold/n_kept for prune-precision diagnosis
     "viterbi_c7c":       HOOK_DIR / "viterbi_c7c_hook.js",        # 2026-05-14 evening: per-cand c7c/c80 run-length state dump on FUN_08e8b620 leave (for 14-UID residual diag)
+    "join_edge":         HOOK_DIR / "join_edge_hook.js",          # 2026-08-10: CHOSEN-path only on FUN_08e8b620 leave; per-edge join cost = dp_20[curr]-dp_20[prev]-pre_dp[curr]. For felix/fr_053, where targets AND pools match but the picked run differs.
     "wsola_unit_probe":  HOOK_DIR / "wsola_unit_probe_hook.js",   # 2026-05-14: WsolaUnit + sub-unit + pmark struct dump at FUN_08EE2960 entry (PSOLA port scoping)
     "userdict_lookup":   HOOK_DIR / "userdict_lookup_hook.js",    # 2026-05-20: dump (dict, key, value) at UserDict::lookup. Used to extract engine's disambigDict contents byte-exact for fe_internal POS port.
     "probe_fe_module":   HOOK_DIR / "probe_fe_module.js",         # 2026-05-20: one-shot diag — list FE/engine module bases in target process.
@@ -189,7 +192,7 @@ def build_master_script(child_paths: list[Path]) -> str:
     Additionally we shadow Frida's global `send()` with a wrapper that
     stamps every outgoing payload with a monotonic `master_seq` (across
     ALL children) -- the global timeline used for cross-hook ordering
-    and (downstream) for sweep correlation in master_compare2. The
+    and (downstream) for sweep correlation in master_spfy_parity. The
     `type:'ready'` events bypass the stamp.
     """
     parts: list[str] = [
@@ -199,7 +202,7 @@ def build_master_script(child_paths: list[Path]) -> str:
         "/* Global cross-hook send sequence stamp. Per-child IIFEs\n"
         " * shadow `send` with a wrapper that increments this counter and\n"
         " * stamps every outgoing payload (`type:'ready'` excepted). The\n"
-        " * stamp is the cross-hook timeline used by master_compare2 for\n"
+        " * stamp is the cross-hook timeline used by master_spfy_parity for\n"
         " * sweep correlation. We can't reassign Frida's global `send`\n"
         " * (read-only), so we shadow inside each IIFE. */\n"
         "var __MASTER_SEQ = 0;\n"
@@ -289,12 +292,12 @@ def write_unified_master_jsonl(out_path: Path,
                                events: list[dict]) -> int:
     """Write one unified JSONL per phrase, ordered by `master_seq`. Each
     line carries the original event payload PLUS a `hook_origin` field
-    (derived via MASTER_TYPE_TO_HOOK) so master_compare2 can route
+    (derived via MASTER_TYPE_TO_HOOK) so master_spfy_parity can route
     events without re-deriving the source. Batched events are flattened
     into per-sample lines (each sample inherits the batch's master_seq
     plus a sub-index for ordering within the batch).
 
-    The unified format is the canonical input for master_compare2.py;
+    The unified format is the canonical input for master_spfy_parity.py;
     legacy per-hook JSONL still gets written by write_master_jsonl()
     in parallel for backward compatibility.
     """
@@ -467,7 +470,19 @@ def synth_one(dumpwav: Path, entry: dict, scratch: Path) -> tuple[bool, str]:
     if entry["mode"] == "text":
         argv = [str(dumpwav), entry["text"], str(out_wav)]
     elif entry["mode"] == "spr":
-        argv = [str(dumpwav), "--pron", entry["text"], str(out_wav)]
+        # ⚠ These corpus entries already carry the inline `\![...]` wrapper,
+        # so `--pron` (which applies that wrapper itself) double-wraps them
+        # and the engine returns "no audio produced" -- which is why all 9
+        # mode="spr" entries had EMPTY traces and were never audited.
+        #
+        # dumpwav parses the inline form natively, and passing the text
+        # straight through is exactly what audio_compare.py does. Capturing
+        # the answer key through the SAME invocation the gate renders with is
+        # the point: key and gate must agree on what is being synthesized.
+        if entry["text"].lstrip().startswith("\\!["):
+            argv = [str(dumpwav), entry["text"], str(out_wav)]
+        else:
+            argv = [str(dumpwav), "--pron", entry["text"], str(out_wav)]
     else:
         return False, f"unknown mode {entry['mode']!r}"
     try:
@@ -510,8 +525,13 @@ class BatchSynth:
         if entry["mode"] == "text":
             text = entry["text"]
         elif entry["mode"] == "spr":
-            # Same inline-SPR wrapper that --pron applies internally.
-            text = "\\![" + entry["text"] + "]"
+            # Same inline-SPR wrapper that --pron applies internally -- but
+            # ONLY when the entry does not already carry it. Our mode="spr"
+            # corpus entries do, and wrapping twice yields `\![\![...]]`,
+            # which the engine renders as nothing. See synth_one().
+            text = entry["text"]
+            if not text.lstrip().startswith("\\!["):
+                text = "\\![" + text + "]"
         else:
             return False, f"unknown mode {entry['mode']!r}"
 

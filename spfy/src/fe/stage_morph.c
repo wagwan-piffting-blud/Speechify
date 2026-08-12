@@ -1,8 +1,4 @@
-/* Stage 2: Morphological analysis.
- *
- * Decomposes each word in the %word stream into prefix + root + suffix
- * morphemes via a small hand-curated affix list. Emits to %morph.
- */
+/* Stage 2: Morphological analysis. */
 
 #include "stage_morph.h"
 #include "fe.h"
@@ -15,8 +11,8 @@
 #include <stddef.h>
 #include <string.h>
 
-/* Common English prefixes -- ORDERED LONGEST FIRST so longest match
- * wins with a simple linear scan. Each entry: prefix string, length. */
+/* Common English prefixes -- ORDERED LONGEST FIRST so longest match wins
+ * with a simple linear scan. */
 static const struct { const char *p; uint8_t n; } PREFIXES[] = {
     {"super", 5}, {"under", 5}, {"trans", 5},
     {"over",  4}, {"anti",  4}, {"semi",  4}, {"para", 4},
@@ -28,7 +24,6 @@ static const struct { const char *p; uint8_t n; } PREFIXES[] = {
     {NULL,    0}
 };
 
-/* Common English suffixes (longest first). */
 static const struct { const char *s; uint8_t n; } SUFFIXES[] = {
     {"ation",  5}, {"ition", 5},
     {"ment",   4}, {"ness",  4}, {"tion",  4}, {"sion", 4},
@@ -45,10 +40,8 @@ static const struct { const char *s; uint8_t n; } SUFFIXES[] = {
 
 #define MIN_ROOT_LEN 3
 
-/* Lower-case a single ASCII byte. */
 static char lc(char c) { return (char)tolower((unsigned char)c); }
 
-/* True if input[off..off+n) matches lit (case-insensitive ASCII). */
 static int match_ci(const char *input, uint32_t off, uint32_t avail,
                      const char *lit, uint8_t n)
 {
@@ -59,7 +52,6 @@ static int match_ci(const char *input, uint32_t off, uint32_t avail,
     return 1;
 }
 
-/* True if input[off+n..end) ends with suffix lit (case-insensitive). */
 static int match_suffix_ci(const char *input, uint32_t off, uint32_t len,
                             const char *lit, uint8_t n)
 {
@@ -83,11 +75,9 @@ int spfy_fe_morph_run(const spfy_fe_t *fe,
         uint32_t len = w->fields[1];
         if (len == 0) continue;
 
-        /* Default: whole word is root, no affixes. */
         uint32_t pre_len = 0;
         uint32_t suf_len = 0;
 
-        /* Look for a prefix. */
         if (len >= MIN_ROOT_LEN + 2) {
             for (int i = 0; PREFIXES[i].p != NULL; ++i) {
                 uint8_t pn = PREFIXES[i].n;
@@ -99,7 +89,6 @@ int spfy_fe_morph_run(const spfy_fe_t *fe,
             }
         }
 
-        /* Look for a suffix in the part AFTER any prefix. */
         uint32_t root_off = off + pre_len;
         uint32_t root_len = len - pre_len;
         if (root_len >= MIN_ROOT_LEN + 1) {
@@ -115,7 +104,6 @@ int spfy_fe_morph_run(const spfy_fe_t *fe,
         }
         root_len -= suf_len;
 
-        /* Push prefix morpheme if any. */
         if (pre_len > 0) {
             spfy_fe_token_t mt = {0};
             mt.name      = SPFY_MORPH_PRE;
@@ -125,7 +113,6 @@ int spfy_fe_morph_run(const spfy_fe_t *fe,
             mt.fields[1] = (uint16_t)pre_len;
             spfy_fe_stream_push(delta, SPFY_STREAM_MORPH, mt);
         }
-        /* Root morpheme. */
         {
             spfy_fe_token_t mt = {0};
             mt.name      = SPFY_MORPH_ROOT;
@@ -135,7 +122,6 @@ int spfy_fe_morph_run(const spfy_fe_t *fe,
             mt.fields[1] = (uint16_t)root_len;
             spfy_fe_stream_push(delta, SPFY_STREAM_MORPH, mt);
         }
-        /* Suffix morpheme if any. */
         if (suf_len > 0) {
             spfy_fe_token_t mt = {0};
             mt.name      = SPFY_MORPH_SUF;

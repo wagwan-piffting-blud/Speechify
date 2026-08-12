@@ -1,8 +1,4 @@
-/* Phone-order reconciliation between feat["name"] and ccos/labl.
- *
- * See phone_order.h for the format notes and the hp_class derivation this
- * enables. Both source lists live in the VIN, so nothing here needs a
- * Frida capture. */
+/* Phone-order reconciliation between feat["name"] and ccos/labl. */
 
 #include "phone_order.h"
 
@@ -25,7 +21,6 @@ static uint32_t le_u32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* A borrowed, non-NUL-terminated string slice into the VIN buffer. */
 typedef struct { const char *s; uint16_t n; } slice_t;
 
 static int slice_eq(slice_t a, slice_t b)
@@ -33,14 +28,9 @@ static int slice_eq(slice_t a, slice_t b)
     return a.n == b.n && memcmp(a.s, b.s, a.n) == 0;
 }
 
-/* ---------------------------------------------------------------- */
-/* feat["name"] -> ordered phone list                                */
-/* ---------------------------------------------------------------- */
 
 /* The feat chunk is a dictionary of (key -> list of (name, id)); see
- * feat_table.c. We want the "name" key, whose entries are half-phone
- * variants "aa1","aa2",... in half-phone id order. Stripping the trailing
- * digit and de-duplicating consecutively yields the phone order. */
+ * feat_table.c. */
 static int load_feat_phones(const spfy_vin_t *vin,
                             slice_t **out_names, uint32_t *out_n)
 {
@@ -67,13 +57,12 @@ static int load_feat_phones(const spfy_vin_t *vin,
                     free(phones); return SPFY_E_FORMAT;
                 }
                 slice_t nm = { (const char *)p, nlen };
-                p += nlen + 4u;   /* skip the u32 stored_id */
+                p += nlen + 4u;
 
-                /* Strip the half-phone suffix digit. */
                 if (nm.n >= 2 && (nm.s[nm.n - 1] == '1' || nm.s[nm.n - 1] == '2'))
                     nm.n = (uint16_t)(nm.n - 1);
                 else
-                    continue;     /* not a half-phone variant; ignore */
+                    continue;
 
                 if (n_ph == 0 || !slice_eq(phones[n_ph - 1], nm))
                     phones[n_ph++] = nm;
@@ -84,7 +73,6 @@ static int load_feat_phones(const spfy_vin_t *vin,
             return SPFY_OK;
         }
 
-        /* Skip this key's entries. */
         for (uint32_t i = 0; i < entry_count; ++i) {
             if ((size_t)(end - p) < 2) return SPFY_E_FORMAT;
             uint16_t nlen = le_u16(p); p += 2;
@@ -96,11 +84,7 @@ static int load_feat_phones(const spfy_vin_t *vin,
     return SPFY_E_FORMAT;
 }
 
-/* ---------------------------------------------------------------- */
-/* ccos/labl -> ordered label list                                   */
-/* ---------------------------------------------------------------- */
 
-/* labl body: u32 count, then count * { u16 len, char[len] }. */
 static int load_labl(const spfy_vin_t *vin, slice_t **out_names, uint32_t *out_n)
 {
     if (!vin->ccos || vin->ccos_n == 0) return SPFY_E_FORMAT;
@@ -136,7 +120,6 @@ static int load_labl(const spfy_vin_t *vin, slice_t **out_names, uint32_t *out_n
     return SPFY_E_FORMAT;
 }
 
-/* ---------------------------------------------------------------- */
 
 int spfy_phone_order_build(const spfy_vin_t *vin, spfy_phone_order_t *out)
 {
@@ -187,7 +170,7 @@ int spfy_phone_order_build(const spfy_vin_t *vin, spfy_phone_order_t *out)
 
     uint32_t unmatched = 0;
     for (uint32_t li = 0; li < n_lab; ++li) {
-        if (labels[li].n == 0) continue;     /* trailing empty label */
+        if (labels[li].n == 0) continue;
         for (uint32_t pi = 0; pi < n_ph; ++pi) {
             if (slice_eq(labels[li], phones[pi])) {
                 out->labl_to_feat[li] = (uint8_t)pi;

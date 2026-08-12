@@ -22,8 +22,10 @@ wav*
 **/__*__/
 **/.*/
 *.pkl
-!demos/*.wav
 !demos/
+!demos/*.wav
+!demos/**/*.wav
+!demos/manifest.json
 tom16.vdb
 en-US/tom/tom16.vdb
 diagnostics/
@@ -40,4 +42,13 @@ installer/dist/
 *.mp3
 examples/
 reveng/spfy4/
-generate_archive.bat
+generate_*archive.bat
+
+# The engine reference for the audio parity gate. Tom's set is flat; every
+# other voice nests one level down (engine_ref/<voice>/), so the gate can be
+# run for any voice on a machine without the proprietary engine.
+!spfy/test/oracle/engine_ref/
+!spfy/test/oracle/engine_ref/*.wav
+!spfy/test/oracle/engine_ref/.engine_key
+!spfy/test/oracle/engine_ref/**/*.wav
+!spfy/test/oracle/engine_ref/**/.engine_key

@@ -1,4 +1,3 @@
-/* spfy_fe vocab loader: 469-symbol vocabulary from JSON. */
 
 #include "vocab.h"
 
@@ -9,14 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Tiny JSON walker -- the vocab JSON has a well-known shape:
- *   [
- *     {"idx":0, "va":"0x...", "name":"GAP"},
- *     {"idx":1, "va":"0x...", "name":"a"},
- *     ...
- *   ]
- * We don't need full JSON parsing; just locate `"name":"..."` strings
- * by entry index. */
+/* Tiny JSON walker -- the vocab JSON has a well-known shape: [ {"idx":0,
+ * "va":"0x...", "name":"GAP"}, {"idx":1, "va":"0x...", "name":"a"}, ... */
 static int read_file(const char *path, char **out, size_t *out_n)
 {
     FILE *fp = fopen(path, "rb");
@@ -37,7 +30,7 @@ static int read_file(const char *path, char **out, size_t *out_n)
 }
 
 /* Find the next `"name":` substring after p, return ptr to first char of
- * the value (just past the colon). On `"name":null` returns ptr to "n". */
+ * the value (just past the colon). */
 static const char *next_name_field(const char *p, const char *end)
 {
     static const char needle[] = "\"name\":";
@@ -63,16 +56,12 @@ int spfy_fe_vocab_load(const char *json_path, spfy_fe_vocab_t *out)
         const char *v = next_name_field(p, end);
         if (!v) break;
         p = v;
-        /* Skip whitespace. */
         while (p < end && (*p == ' ' || *p == '\t')) ++p;
         if (p >= end) break;
 
         spfy_fe_symbol_t *e = &out->entries[idx];
         if (*p == 'n') {
-            /* "null" -- non-ASCII raw byte slot; we have no display
-             * name. The actual byte is in the va field but for
-             * Path-B we only need the printable name; raw_byte stays
-             * 0 and lookups fall through to the slot index itself. */
+            /* "null" -- non-ASCII raw byte slot; we have no display name. */
             e->name = NULL;
             e->raw_byte = 0;
             p += 4;
@@ -88,7 +77,6 @@ int spfy_fe_vocab_load(const char *json_path, spfy_fe_vocab_t *out)
             if (!copy) { rc = SPFY_E_NOMEM; goto fail; }
             memcpy(copy, str_start, len);
             copy[len] = 0;
-            /* Unescape \" and \\ inline. */
             char *r = copy, *w = copy;
             while (*r) {
                 if (r[0] == '\\' && (r[1] == '"' || r[1] == '\\')) {
@@ -100,10 +88,8 @@ int spfy_fe_vocab_load(const char *json_path, spfy_fe_vocab_t *out)
             *w = 0;
             e->name = copy;
             e->raw_byte = 0;
-            /* If single-char, treat as character ID. */
             p = str_end < end ? str_end + 1 : str_end;
         } else {
-            /* Unexpected token; skip. */
             ++p;
         }
         ++idx;
@@ -115,14 +101,7 @@ int spfy_fe_vocab_load(const char *json_path, spfy_fe_vocab_t *out)
         return SPFY_E_FORMAT;
     }
 
-    /* Build the byte -> symbol-ID reverse table. Single-char ASCII
-     * names are the primary populator; exact byte = name[0].
-     * Two cases need extra care:
-     *   - Multiple slots can map to the same byte (e.g., the apostrophe
-     *     'X' appears in ASCII range and Latin-1 range). The earliest
-     *     slot wins -- that's the "primary" representation the FE
-     *     uses for input characters.
-     *   - Slot 0 (GAP) is special; we treat it as "no input byte". */
+    /* Build the byte -> symbol-ID reverse table. */
     for (int i = 0; i < 256; ++i) out->byte_to_id[i] = 0xFFFFu;
     for (uint32_t i = 1; i < out->n; ++i) {
         const char *nm = out->entries[i].name;

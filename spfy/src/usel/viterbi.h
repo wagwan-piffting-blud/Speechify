@@ -4,65 +4,20 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Viterbi DP for unit selection.
- *
- * The engine's USel runs a forward DP across N target halfphone slots. At
- * each slot s a small candidate pool (PRSL output, typically O(10-200)
- * uids) is scored against the target via target costs (D + F0 + SP + S).
- * Adjacent slots' candidates are tied with a join cost (precomputed in the
- * VIN `hash` chunk; misses fall back to the ccos gate / a default).
- *
- * This module is a pure DP -- it does not evaluate target costs or join
- * costs itself. Callers pre-score per-slot target costs (one f32 per
- * candidate) and supply a callback for the (prev_uid, curr_uid) join
- * cost. That keeps the DP isolated from the cost-pipeline glue and easy
- * to unit-test with synthetic numbers.
- *
- * Accumulator is `long double` to preserve x87 80-bit precision (matches
- * MSVC 7.1 (2003) FP semantics; see plan: bit-exact FP strategy). Final
- * total cost is cast to f32 at return for storage parity with the engine.
- *
- * Per-slot best-cost storage is also long double; predecessors are
- * candidate indices (u32) into the previous slot's `cands` array. Backtrack
- * walks predecessors to recover the chosen-UID sequence.
- *
- * Complexity: O(sum_s n_cands[s] * n_cands[s-1]) join evaluations + same
- * number of accumulator adds. Tom's PRSL pools average ~14 candidates so
- * this is well under a millisecond per utterance.
- */
+/* Viterbi DP for unit selection. */
 
 typedef struct {
-    const uint32_t *cands;        /* candidate UIDs (caller-owned, alias) */
-    const float    *target_cost;  /* one f32 per cand; T[c] = D+F0+SP+S */
+    const uint32_t *cands;
+    const float    *target_cost;
     uint32_t        n_cands;
 } spfy_viterbi_slot_t;
 
-/* Join-cost callback. Returns the engine-equivalent join cost f32 for the
- * directed transition prev_uid -> curr_uid. The caller is responsible for
- * the lookup (typically spfy_hash_lookup; on miss, the engine's ccos gate
- * fallback or a default). Must be deterministic. May be invoked many times
- * per slot; keep it cheap.
- *
- * Returning a very large value (e.g. 1e30f) effectively forbids the
- * transition. Returning a negative value is treated as forbidden.
- */
+/* Join-cost callback. */
 typedef float (*spfy_viterbi_join_fn)(uint32_t prev_uid,
                                       uint32_t curr_uid,
                                       void    *user);
 
-/* Run the DP. On SPFY_OK:
- *   - out_path[s] is set to the chosen UID at slot s (s in [0, n_slots))
- *   - *out_total_cost is the path's total cost (f32 cast of long double)
- *
- * out_path must point to at least n_slots u32 elements; pass NULL if you
- * only want the cost.
- *
- * Errors:
- *   SPFY_E_INVAL: bad args (NULL slots, n_slots == 0, slot with no cands)
- *   SPFY_E_NOMEM: alloc failure
- *   SPFY_E_OOB:   no reachable path (e.g. every transition into slot s is
- *                 forbidden). out_path is left untouched in this case.
- */
+/* Run the DP. */
 int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
                      uint32_t                   n_slots,
                      spfy_viterbi_join_fn       join,
@@ -70,9 +25,6 @@ int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
                      uint32_t                  *out_path,
                      float                     *out_total_cost);
 
-/* --------------------------------------------------------------------- */
-/* DAG variant: per-slot predecessor list                                */
-/* --------------------------------------------------------------------- */
 /*
  * The linear `spfy_viterbi_run` above assumes slot s's predecessors are
  * exactly slot s-1's cands. The engine's actual DP (FUN_08e8b620) reads
@@ -100,19 +52,12 @@ int spfy_viterbi_run(const spfy_viterbi_slot_t *slots,
  */
 
 typedef struct {
-    const uint32_t *cands;        /* n_cands UIDs (caller-owned, alias) */
-    /* per-cand "join key" used as the prev-side argument to join_cb.
-     * For halfphone-leaf cands this is the same as `cands` (= uid).
-     * For tree-internal anchor cands representing a multi-unit run
-     * (BuildGraph collapses long same-rec runs into a single anchor),
-     * this is the run's TAIL uid -- the natural join point. The
-     * engine reads this from cand+0x10 ("join_key") whereas the
-     * "uid" used as the curr-side hash key comes from cand+0xc. If
-     * NULL, falls back to `cands` (legacy halfphone-only callers). */
+    const uint32_t *cands;
+    /* per-cand "join key" used as the prev-side argument to join_cb. */
     const uint32_t *join_keys;
-    const float    *target_cost;  /* one f32 per cand (= engine pre_dp) */
+    const float    *target_cost;
     uint32_t        n_cands;
-    const uint32_t *preds;        /* n_preds slot indices (alias) */
+    const uint32_t *preds;
     uint32_t        n_preds;
     /* Optional per-cand static state for engine-faithful join cost
      * (FUN_08e8b620 reads cand+0x68/+0x6c/+0x70/+0x78). All four are
@@ -173,6 +118,8 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
                          uint32_t                      *out_path_slot,
                          uint32_t                      *out_path_uid,
                          uint32_t                      *out_path_len,
-                         float                         *out_total_cost);
+                         float                         *out_total_cost,
+                         /* cfg+0x94 = tts.voiceCfg.GET_RID_OF_PATH_F0, read PER VOICE. */
+                         int                            path_f0_flag);
 
 #endif

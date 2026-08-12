@@ -1,26 +1,13 @@
-/* spfy_sapi.dll — SAPI 5 voice DLL that wraps the spfy synth library.
- *
- * Layout:
- *   - One COM CLSID (CLSID_SpfyTTSEngine) is registered as in-proc
- *     server. SAPI registers multiple voice tokens, all pointing at this
- *     CLSID; each token's `Name` attribute selects the voice directory.
- *   - ISpObjectWithToken::SetObjectToken is called once per Speak object;
- *     we read the token's Name and load spfy_voice_t for that voice.
- *   - ISpTTSEngine::Speak iterates SPVTEXTFRAG, concatenates UTF-16 text
- *     into UTF-8, and calls spfy_synth_to_sink with a sink callback that
- *     forwards int16 PCM to the SAPI site->Write().
- *   - ISpTTSEngine::GetOutputFormat advertises 8 kHz 16-bit mono PCM.
- *   - DllRegisterServer auto-scans %USERPROFILE%\Documents\Speechify\
- *     en-US\* for voice directories and creates one SAPI token per voice
- *     it finds. */
+/* spfy_sapi.dll — SAPI 5 voice DLL that wraps the spfy synth library. */
 
 /* INITGUID must precede objbase.h/sapi.h so DEFINE_GUID emits the symbol
- * bodies into this TU. Otherwise IID_ISpObjectWithToken / IID_ISpTTSEngine
- * / CLSID_SpfyTTSEngine remain undefined at link time. */
+ * bodies into this TU. */
 #define INITGUID 1
 #include "sapiddk_min.h"
 #include "sapi_phone_table.h"
 #include "spfy_synth_lib.h"
+#include "embedded_assets.h"
+#include "env.h"
 #include "pitch_shift.h"
 #include "time_stretch.h"
 
@@ -30,47 +17,37 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
-#include <shlobj.h>      /* SHGetFolderPathW */
+#include <shlobj.h>
 #include <objbase.h>
-#include <olectl.h>      /* SELFREG_E_CLASS */
+#include <olectl.h>
 
-/* CLSID_SpfyTTSEngine is declared in sapiddk_min.h via DEFINE_GUID;
- * because INITGUID is defined at the top of this TU the symbol body is
- * emitted here (and only here) at link time. */
+/* CLSID_SpfyTTSEngine is declared in sapiddk_min.h via DEFINE_GUID; because
+ * INITGUID is defined at the top of this TU the symbol body is emitted here
+ * (and only here) at link time. */
 
-/* Module handle (set at DllMain for the DLL build; manually by WinMain
- * for the LocalServer32 EXE build). Not static so spfy_sapi_host.c can
- * initialise it. */
+/* Module handle (set at DllMain for the DLL build; manually by WinMain for
+ * the LocalServer32 EXE build). */
 HMODULE g_hModule = NULL;
 LONG    g_dll_refs = 0;
 
-/* ----------------------------------------------------------------- */
-/* COM object                                                          */
-/* ----------------------------------------------------------------- */
 
 typedef struct {
-    /* Two interfaces — ISpTTSEngine is primary, ISpObjectWithToken
-     * surfaced via QueryInterface using offsetof. We embed both vtbl
-     * pointers so QI can return either without allocating. */
+    /* Two interfaces — ISpTTSEngine is primary, ISpObjectWithToken surfaced
+     * via QueryInterface using offsetof. */
     ISpTTSEngine       tts_iface;
     ISpObjectWithToken token_iface;
     LONG               refcount;
-    ISpObjectToken    *pToken;        /* AddRef'd at SetObjectToken */
+    ISpObjectToken    *pToken;
     spfy_voice_t       voice;
     int                voice_loaded;
 } SpfyEngineImpl;
 
-/* Get container struct from an interface pointer. */
 #define IMPL_FROM_TTS(p)   ((SpfyEngineImpl *)(((char *)(p)) - offsetof(SpfyEngineImpl, tts_iface)))
 #define IMPL_FROM_TOKEN(p) ((SpfyEngineImpl *)(((char *)(p)) - offsetof(SpfyEngineImpl, token_iface)))
 
-/* Forward decls. */
 static HRESULT load_voice_from_token(SpfyEngineImpl *impl,
                                      ISpObjectToken *pToken);
 
-/* ----------------------------------------------------------------- */
-/* IUnknown / QI shared between both interfaces                       */
-/* ----------------------------------------------------------------- */
 
 static HRESULT impl_query(SpfyEngineImpl *impl, REFIID riid, void **ppv)
 {
@@ -105,9 +82,6 @@ static ULONG impl_release(SpfyEngineImpl *impl)
     return (ULONG)r;
 }
 
-/* ----------------------------------------------------------------- */
-/* ISpTTSEngine methods                                                */
-/* ----------------------------------------------------------------- */
 
 static HRESULT STDMETHODCALLTYPE
 tts_QueryInterface(ISpTTSEngine *This, REFIID riid, void **ppv)
@@ -123,24 +97,7 @@ static ULONG STDMETHODCALLTYPE tts_Release(ISpTTSEngine *This)
     return impl_release(IMPL_FROM_TTS(This));
 }
 
-/* Sink ctx: forward int16 PCM bursts from WSOLA to SAPI site->Write.
- *
- * volume_gain — applied per-sample before forwarding to site->Write
- *   (SSML <prosody volume=...> maps to SPVSTATE.Volume in [0,100];
- *   we scale by Volume/100.0). 1.0 means pass-through.
- *
- * cum_samples — global running sample count across all fragments;
- *   bookmark/word/sentence events reference this so their audio
- *   offsets line up across the whole utterance.
- *
- * next_phoneme_evt_samples — heartbeat threshold. Some SAPI consumers
- *   (notably Balabolka) abort/cut off audio when they don't see engine
- *   events for ~1 second. Long phoneme fragments (e.g. SSML <phoneme>
- *   or SAPI XML <pron>) can produce a single word event followed by a
- *   silent multi-second stretch. To keep consumers engaged we emit a
- *   SPEI_PHONEME event roughly every 100 ms with dummy phone IDs;
- *   highlight-by-word apps ignore these but the steady stream looks
- *   like "engine still working" to the SAPI runtime. */
+/* Sink ctx: forward int16 PCM bursts from WSOLA to SAPI site->Write. */
 typedef struct {
     ISpTTSEngineSite *site;
     HRESULT           last_hr;
@@ -148,34 +105,25 @@ typedef struct {
     float             volume_gain;
     uint64_t          cum_samples;
     uint64_t          next_phoneme_evt_samples;
-    FILE             *dbg_fp;           /* nullable; SPFY_SAPI_DEBUG */
-    DWORD             last_acts;        /* tracks GetActions transitions */
-    /* PSOLA buffer for the residual portion of <prosody pitch> that
-     * exceeds the corpus selection-natural range. When psola_residual_st
-     * is non-zero OR rate_factor != 1.0, sapi_sink_write accumulates
-     * into psola_buf instead of writing through; the frag-end flush
-     * runs TD-PSOLA then WSOLA time-stretch and forwards. */
+    FILE             *dbg_fp;
+    DWORD             last_acts;
+    /* PSOLA buffer for the residual portion of <prosody pitch> that exceeds
+     * the corpus selection-natural range. */
     float             psola_residual_st;
-    float             rate_factor;       /* 1.0 = no time-stretch */
+    float             rate_factor;
     int16_t          *psola_buf;
     size_t            psola_n;
     size_t            psola_cap;
     int               psola_sr;
 } sapi_sink_ctx_t;
 
-/* Either DSP pass needs the per-frag buffer. */
 #define SAPI_NEED_BUFFER(s) ((s)->psola_residual_st != 0.0f \
                              || (s)->rate_factor   != 1.0f)
 
-#define SAPI_PHONEME_HEARTBEAT_SAMPLES  800u   /* 100 ms @ 8 kHz */
+#define SAPI_PHONEME_HEARTBEAT_SAMPLES  800u
 
 /* Word-boundary ctx — pre-scanned per-word (text_offset, text_len)
- * positions from the UTF-16 input of ONE fragment. word_offsets are
- * frag-local UTF-16 indices; we add frag_text_base (= frag's
- * SPVTEXTFRAG.ulTextSrcOffset) when emitting so events reference the
- * original SSML text. frag_audio_base is the cum sample count at the
- * start of this fragment — added to sample_offset before computing
- * ullAudioStreamOffset. */
+ * positions from the UTF-16 input of ONE fragment. */
 typedef struct {
     ISpTTSEngineSite *site;
     const ULONG      *word_offsets;
@@ -185,16 +133,11 @@ typedef struct {
     const ULONG      *sentence_starts;
     ULONG             sentence_count;
     ULONG             sentence_fired;
-    ULONG             frag_text_base;     /* added to lParam */
-    uint64_t          frag_audio_base;    /* added to sample_offset */
+    ULONG             frag_text_base;
+    uint64_t          frag_audio_base;
 } sapi_word_ctx_t;
 
-/* Append `samples` to the PSOLA accumulator. Word/sentence events have
- * already been emitted by the synth-time callback at the correct
- * sample_offset; SAPI's event delivery is byte-offset-based so events
- * sit in the consumer queue until the eventually-written audio reaches
- * their ullAudioStreamOffset (TD-PSOLA preserves duration so offsets
- * stay accurate). */
+/* Append `samples` to the PSOLA accumulator. */
 static int sapi_psola_buffer(sapi_sink_ctx_t *s, const int16_t *samples,
                              size_t n)
 {
@@ -216,8 +159,8 @@ static int sapi_sink_write(void *ctx, const int16_t *samples, size_t n)
 {
     sapi_sink_ctx_t *s = (sapi_sink_ctx_t *)ctx;
     if (s->abort) return SPFY_E_IO;
-    /* DSP path: buffer raw samples; the frag-end flush does the
-     * pitch-shift and/or time-stretch then forwards to the site. */
+    /* DSP path: buffer raw samples; the frag-end flush does the pitch-shift
+     * and/or time-stretch then forwards to the site. */
     if (SAPI_NEED_BUFFER(s)) return sapi_psola_buffer(s, samples, n);
     DWORD acts = ISpTTSEngineSite_GetActions(s->site);
     if (s->dbg_fp && acts != s->last_acts) {
@@ -238,11 +181,9 @@ static int sapi_sink_write(void *ctx, const int16_t *samples, size_t n)
     ULONG cb = (ULONG)(n * sizeof(int16_t));
     ULONG written = 0;
     HRESULT hr;
-    /* Fast path: pass through when volume_gain == 1.0 (avoid copy). */
     if (s->volume_gain >= 0.999f && s->volume_gain <= 1.001f) {
         hr = ISpTTSEngineSite_Write(s->site, samples, cb, &written);
     } else {
-        /* Scale into a stack buffer in chunks to avoid heap allocation. */
         int16_t buf[1024];
         size_t off = 0;
         hr = S_OK;
@@ -265,34 +206,29 @@ static int sapi_sink_write(void *ctx, const int16_t *samples, size_t n)
     if (FAILED(hr)) { s->last_hr = hr; s->abort = 1; return SPFY_E_IO; }
     s->cum_samples += n;
 
-    /* Heartbeat: fire a SPEI_PHONEME ~every 100 ms of output. Dummy
-     * phone IDs (silence/silence); the goal is just a steady event
-     * stream so SAPI consumers don't conclude the engine has stalled. */
+    /* Heartbeat: fire a SPEI_PHONEME ~every 100 ms of output. */
     while (s->cum_samples >= s->next_phoneme_evt_samples) {
         SPEVENT pev = {0};
         pev.eEventId            = SPEI_PHONEME;
         pev.elParamType         = SPET_LPARAM_IS_UNDEFINED;
         pev.ullAudioStreamOffset = s->next_phoneme_evt_samples * 2u;
-        pev.wParam = (WPARAM)100;        /* nominal duration in ms */
-        pev.lParam = 0;                   /* prev/next phone = silence */
+        pev.wParam = (WPARAM)100;
+        pev.lParam = 0;
         ISpTTSEngineSite_AddEvents(s->site, &pev, 1);
         s->next_phoneme_evt_samples += SAPI_PHONEME_HEARTBEAT_SAMPLES;
     }
     return SPFY_OK;
 }
 
-/* Apply pitch shift and/or time-stretch to the buffered samples and
- * stream the result to the SAPI site. Pitch first (preserves duration),
- * then rate (scales duration). Re-uses the volume/heartbeat machinery
- * by temporarily disabling the DSP gate around the recursive write. */
+/* Apply pitch shift and/or time-stretch to the buffered samples and stream
+ * the result to the SAPI site. */
 static int sapi_psola_flush(sapi_sink_ctx_t *s)
 {
     if (s->psola_n == 0) return SPFY_OK;
     int16_t *cur = s->psola_buf;
     size_t   cur_n = s->psola_n;
-    int16_t *owned = NULL;     /* tracks malloc'd buffer to free later */
+    int16_t *owned = NULL;
 
-    /* Pitch pass — same length out. */
     if (s->psola_residual_st != 0.0f) {
         int16_t *shifted = (int16_t *)malloc(cur_n * sizeof(int16_t));
         if (!shifted) return SPFY_E_NOMEM;
@@ -301,7 +237,6 @@ static int sapi_psola_flush(sapi_sink_ctx_t *s)
         if (rc != 0) { free(shifted); return SPFY_E_IO; }
         cur = shifted; owned = shifted;
     }
-    /* Rate pass — variable length out. */
     if (s->rate_factor != 1.0f) {
         int16_t *stretched = NULL;
         size_t   stretched_n = 0;
@@ -312,10 +247,8 @@ static int sapi_psola_flush(sapi_sink_ctx_t *s)
         cur = stretched; owned = stretched; cur_n = stretched_n;
     }
 
-    /* Temporarily switch DSP off so sapi_sink_write writes through to
-     * the site instead of re-buffering. Drop the pre-DSP sample count
-     * from cum_samples so the write path's bookkeeping doesn't double-
-     * count; the post-DSP write re-increments by cur_n. */
+    /* Temporarily switch DSP off so sapi_sink_write writes through to the
+     * site instead of re-buffering. */
     float saved_res  = s->psola_residual_st;
     float saved_rate = s->rate_factor;
     s->psola_residual_st = 0.0f;
@@ -348,8 +281,8 @@ static HRESULT sapi_emit_silence(sapi_sink_ctx_t *s, ULONG n)
     return S_OK;
 }
 
-/* Emit SPEI_TTS_BOOKMARK for a <mark name="..."> tag (SAPI delivers
- * the bookmark name as the fragment's pTextStart/ulTextLen). */
+/* Emit SPEI_TTS_BOOKMARK for a <mark name="..."> tag (SAPI delivers the
+ * bookmark name as the fragment's pTextStart/ulTextLen). */
 static void sapi_emit_bookmark(ISpTTSEngineSite *site,
                                uint64_t cum_samples,
                                const SPVTEXTFRAG *f)
@@ -358,24 +291,18 @@ static void sapi_emit_bookmark(ISpTTSEngineSite *site,
     ev.eEventId             = SPEI_TTS_BOOKMARK;
     ev.elParamType          = SPET_LPARAM_IS_STRING;
     ev.ullAudioStreamOffset = cum_samples * 2u;
-    /* lParam: pointer to bookmark name (UTF-16, NUL-terminated copy).
-     * SAPI ABI guarantees we can pass a transient pointer because the
-     * runtime copies the string before our return. */
+    /* lParam: pointer to bookmark name (UTF-16, NUL-terminated copy). */
     static WCHAR name_buf[256];
     ULONG nlen = f->ulTextLen;
     if (nlen >= 255) nlen = 255;
     if (f->pTextStart) memcpy(name_buf, f->pTextStart, nlen * sizeof(WCHAR));
     name_buf[nlen] = 0;
     ev.lParam = (LPARAM)name_buf;
-    /* wParam: bookmark numeric value if parseable (else 0). */
     ev.wParam = (WPARAM)_wtoi(name_buf);
     site->lpVtbl->AddEvents(site, &ev, 1);
 }
 
-/* Walk a UTF-16 buffer and record per-word + per-sentence positions.
- * A "word" is a maximal run of non-whitespace; a sentence boundary is
- * (. ! ?) followed by whitespace. Returns word count; writes
- * sentence count via out_sent_n. All output arrays are caller-freed. */
+/* Walk a UTF-16 buffer and record per-word + per-sentence positions. */
 static ULONG scan_word_positions(const WCHAR *w, int wlen,
                                  ULONG **out_off, ULONG **out_len,
                                  ULONG **out_sent_starts,
@@ -433,9 +360,7 @@ static ULONG scan_word_positions(const WCHAR *w, int wlen,
     return wi;
 }
 
-/* Called by spfy_synth_to_sink each time a new word begins. Emits a
- * SPEI_SENTENCE_BOUNDARY first (if this is the first word of a new
- * sentence), then SPEI_WORD_BOUNDARY. */
+/* Called by spfy_synth_to_sink each time a new word begins. */
 static void sapi_word_event(void *ctx, uint32_t sample_offset)
 {
     sapi_word_ctx_t *wc = (sapi_word_ctx_t *)ctx;
@@ -463,14 +388,7 @@ static void sapi_word_event(void *ctx, uint32_t sample_offset)
     wc->fired++;
 }
 
-/* Synth one fragment's text through the FE+USel+WSOLA pipeline. Returns
- * SPFY_OK or SPFY_E_*. Fires per-word boundary events through `wc`.
- *
- * For SPVA_Pronounce fragments that carry pPhoneIds (SSML <phoneme>
- * tags), we convert SAPI phone IDs to an SPR string wrapped in
- * `\![...]` and pass it as the synth text — the hosted FE recognises
- * the inline phoneme syntax and emits the exact phonemes verbatim
- * (same code path as `spfy_dumpwav --pron`). */
+/* Synth one fragment's text through the FE+USel+WSOLA pipeline. */
 static int speak_one_frag_text(SpfyEngineImpl *impl,
                                const SPVTEXTFRAG *f,
                                sapi_sink_ctx_t   *sink_ctx,
@@ -480,10 +398,8 @@ static int speak_one_frag_text(SpfyEngineImpl *impl,
         && (f->State.eAction != SPVA_Pronounce
             || f->State.pPhoneIds == NULL)) return SPFY_OK;
 
-    /* Word-boundary scan uses the SOURCE text (not the phoneme stream)
-     * so SAPI events reference the user's original SSML chars. Both
-     * Pronounce and Speak frags carry pTextStart pointing at the inner
-     * word(s) being pronounced. */
+    /* Word-boundary scan uses the SOURCE text (not the phoneme stream) so
+     * SAPI events reference the user's original SSML chars. */
     WCHAR *w = (WCHAR *)malloc((size_t)(f->ulTextLen + 1) * sizeof(WCHAR));
     if (!w) return SPFY_E_NOMEM;
     if (f->ulTextLen > 0 && f->pTextStart)
@@ -499,7 +415,7 @@ static int speak_one_frag_text(SpfyEngineImpl *impl,
         size_t spr_n = sapi_phones_to_spr(f->State.pPhoneIds,
                                           spr, sizeof spr);
         if (spr_n == 0) { free(w); return SPFY_OK; }
-        u8n = (int)spr_n + 3;          /* "\![" + spr + "]" */
+        u8n = (int)spr_n + 3;
         u8 = (char *)malloc((size_t)u8n + 1);
         if (!u8) { free(w); return SPFY_E_NOMEM; }
         _snprintf(u8, (size_t)u8n + 1, "\\![%s]", spr);
@@ -514,7 +430,6 @@ static int speak_one_frag_text(SpfyEngineImpl *impl,
         u8[u8n] = 0;
     }
 
-    /* Per-frag word/sentence scan (local UTF-16 indices). */
     ULONG *off = NULL, *len = NULL, *ss = NULL, sn = 0;
     ULONG wn = scan_word_positions(w, (int)f->ulTextLen, &off, &len, &ss, &sn);
     free(w);
@@ -542,8 +457,7 @@ static int speak_one_frag_text(SpfyEngineImpl *impl,
     }
     spfy_wav_close(&sink);
     /* If this frag was synthesised with any DSP pass active, drain the
-     * accumulator now. Done per-frag so each frag's pitch/rate is
-     * honoured independently. */
+     * accumulator now. */
     if (SAPI_NEED_BUFFER(sink_ctx) && sink_ctx->psola_n > 0) {
         sapi_psola_flush(sink_ctx);
     }
@@ -570,23 +484,20 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     sink_ctx.next_phoneme_evt_samples = SAPI_PHONEME_HEARTBEAT_SAMPLES;
     sink_ctx.rate_factor              = 1.0f;
 
-    /* Pull the SAPI-level baseline rate set via ISpVoice::SetRate(). The
-     * per-fragment SPVSTATE.RateAdj is only the SSML <rate> adjustment
-     * ON TOP of this baseline, so a host like Balabolka that uses its
-     * rate slider (-> SetRate) would otherwise pass us frags with
-     * RateAdj=0 and the slider would silently no-op. Range is the same
-     * as RateAdj ([-10, +10]); we sum the two below. */
+    /* Pull the SAPI-level baseline rate set via ISpVoice::SetRate(). */
     long site_base_rate = 0;
     ISpTTSEngineSite_GetRate(pOutputSite, &site_base_rate);
 
-    /* Diagnostic: when SPFY_SAPI_DEBUG is set, log Speak entry context
-     * + GetEventInterest bitmask + each fragment we receive to
-     * C:/tmp/_sapi_dbg.log. Useful when a SAPI consumer (Balabolka,
-     * NVDA, etc.) cuts speech off and we need to see what events it
-     * subscribes to and what frag list SAPI handed us. */
+    /* Diagnostic: when SPFY_SAPI_DEBUG is set, log Speak entry context +
+     * GetEventInterest bitmask + each fragment we receive to
+     * _sapi_dbg.log in the TEMP directory. */
     FILE *dbg = NULL;
-    if (getenv("SPFY_SAPI_DEBUG")) {
-        dbg = fopen("C:/tmp/_sapi_dbg.log", "a");
+    /* spfy_env(), not getenv(): this is the one diagnostic a SAPI host has,
+     * and getenv() could not see a variable the host set after starting --
+     * so the switch that exists specifically for debugging hosts like
+     * Balabolka was... */
+    if (spfy_env("SPFY_SAPI_DEBUG")) {
+        dbg = spfy_sapi_debug_fopen("_sapi_dbg.log");
         if (dbg) {
             ULONGLONG interest = 0;
             HRESULT ihr = pOutputSite->lpVtbl->GetEventInterest(
@@ -596,7 +507,6 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
             fprintf(dbg, "GetEventInterest: hr=0x%08lX mask=0x%016llX\n",
                     (unsigned long)ihr,
                     (unsigned long long)interest);
-            /* Decode well-known bits (SPEI_X = 1 << X). */
             static const struct { int bit; const char *name; } NAMES[] = {
                 { 1, "START_INPUT_STREAM" },
                 { 2, "END_INPUT_STREAM" },
@@ -645,10 +555,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     sink_ctx.dbg_fp = dbg;
     HRESULT hr = S_OK;
 
-    /* Walk the fragment list. Each fragment carries its own SPVSTATE
-     * (rate / pitch / volume / silence / phoneme IDs / bookmark name).
-     * SSML elements roll up into these SPVSTATE fields via SAPI's XML
-     * parser before we get here. */
+    /* Walk the fragment list. */
     int frag_idx = 0;
     for (const SPVTEXTFRAG *f = pTextFragList;
          f && !sink_ctx.abort; f = f->pNext, ++frag_idx) {
@@ -659,16 +566,13 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
             fflush(dbg);
         }
 
-        /* Per-fragment volume (SPVSTATE.Volume in [0,100]; 100=default). */
         ULONG vol = f->State.Volume;
         if (vol > 100u) vol = 100u;
         sink_ctx.volume_gain = (float)vol / 100.0f;
 
         /* Per-fragment pitch — SPVSTATE.PitchAdj.MiddleAdj is the SAPI
          * convention "approximately one semitone per unit", range [-10,
-         * +10]. Split into a corpus-natural selection portion
-         * (spfy_synth_set_pitch_semitones) and a residual that goes
-         * through TD-PSOLA at sink flush. */
+         * +10]. */
         {
             float target_st = (float)f->State.PitchAdj.MiddleAdj;
             float sel_st = 0.0f, psola_st = 0.0f;
@@ -677,11 +581,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
             sink_ctx.psola_residual_st = psola_st;
             sink_ctx.psola_sr = (int)sr;
         }
-        /* Per-fragment rate — SPVSTATE.RateAdj in [-10, +10]. Common
-         * SAPI mapping: factor = pow(1.2, RateAdj/2), which gives a
-         * roughly 2.5x range at the extremes. Applied as a post-process
-         * WSOLA time-stretch in the same sink flush pass that handles
-         * the PSOLA residual. */
+        /* Per-fragment rate — SPVSTATE.RateAdj in [-10, +10]. */
         {
             long ra = f->State.RateAdj + site_base_rate;
             if (ra > 10) ra = 10;
@@ -700,14 +600,9 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
 
         switch (f->State.eAction) {
         case SPVA_Speak:
-        case SPVA_Pronounce:    /* <phoneme> / <pron> — handled inside */
+        case SPVA_Pronounce:
         case SPVA_SpellOut: {
-            /* Pronounce frags with no inner text (e.g. SAPI XML's
-             * self-closing `<pron sym="..."/>`) produce no natural word
-             * events. Some consumers (Balabolka) treat that as
-             * end-of-utterance and cut off the audio. Fire a synthetic
-             * SPEI_WORD_BOUNDARY at the frag's source position so the
-             * consumer sees activity before the phoneme synth starts. */
+            /* Pronounce frags with no inner text (e.g. */
             if (f->State.eAction == SPVA_Pronounce
                 && (f->ulTextLen == 0 || !f->pTextStart)) {
                 SPEVENT wev = {0};
@@ -738,19 +633,14 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         case SPVA_Section:
         case SPVA_ParseUnknownTag:
         default:
-            /* No-op: structural / unknown tags don't produce audio. */
             break;
         }
     }
 
     if (sink_ctx.abort && FAILED(sink_ctx.last_hr)) hr = sink_ctx.last_hr;
     else if (sink_ctx.abort) hr = S_OK;
-    /* Never propagate per-frag failure to the SAPI consumer if we
-     * already wrote audio in this utterance. Some SAPI consumers
-     * (Balabolka) abort the entire audio playback queue when Speak
-     * returns a failure HRESULT, dropping previously-queued audio from
-     * earlier in the same logical utterance. As long as at least some
-     * audio reached the site, report success. */
+    /* Never propagate per-frag failure to the SAPI consumer if we already
+     * wrote audio in this utterance. */
     if (FAILED(hr) && sink_ctx.cum_samples > 0 && !sink_ctx.abort) {
         hr = S_OK;
     }
@@ -765,8 +655,8 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         fclose(dbg);
     }
     free(sink_ctx.psola_buf);
-    /* Reset pitch on the voice handle so the next Speak with no
-     * <prosody pitch> doesn't inherit this Speak's bias. */
+    /* Reset pitch on the voice handle so the next Speak with no <prosody
+     * pitch> doesn't inherit this Speak's bias. */
     spfy_synth_set_pitch_semitones(&impl->voice, 0.0f);
     return hr;
 }
@@ -800,9 +690,6 @@ static const ISpTTSEngineVtbl g_tts_vtbl = {
     tts_Speak, tts_GetOutputFormat,
 };
 
-/* ----------------------------------------------------------------- */
-/* ISpObjectWithToken methods                                          */
-/* ----------------------------------------------------------------- */
 
 static HRESULT STDMETHODCALLTYPE
 tok_QueryInterface(ISpObjectWithToken *This, REFIID riid, void **ppv)
@@ -844,13 +731,8 @@ static const ISpObjectWithTokenVtbl g_tok_vtbl = {
     tok_SetObjectToken, tok_GetObjectToken,
 };
 
-/* ----------------------------------------------------------------- */
-/* Path resolution + voice load                                        */
-/* ----------------------------------------------------------------- */
 
-/* %USERPROFILE%\Documents\Speechify\ — the project root in dev. After
- * Inno install we'll likely move global tables out of here, but for the
- * v1 SAPI build this is where everything lives. */
+/* %USERPROFILE%\Documents\Speechify\ — the project root in dev. */
 static int get_project_root(char *buf, size_t buf_n)
 {
     WCHAR docs[MAX_PATH] = {0};
@@ -864,14 +746,12 @@ static int get_project_root(char *buf, size_t buf_n)
     return n > 0;
 }
 
-/* Read voice name from the SAPI token. The token's `Name` registry value
- * (or our private "VoiceName" attribute) is the en-US/<voice>/ dirname. */
+/* Read voice name from the SAPI token. */
 static int read_voice_name(ISpObjectToken *pToken, char *out, size_t out_n)
 {
     LPWSTR pwName = NULL;
     HRESULT hr = ISpObjectToken_GetStringValue(pToken, L"VoiceName", &pwName);
     if (FAILED(hr) || !pwName) {
-        /* Fall back to default Name attribute. */
         if (pwName) CoTaskMemFree(pwName);
         hr = ISpObjectToken_GetStringValue(pToken, NULL, &pwName);
         if (FAILED(hr) || !pwName) return 0;
@@ -880,6 +760,46 @@ static int read_voice_name(ISpObjectToken *pToken, char *out, size_t out_n)
                                 (int)out_n, NULL, NULL);
     CoTaskMemFree(pwName);
     return n > 0;
+}
+
+/* Tempdir for the embedded FE assets, mirroring the CLI's
+ * resolve_asset_tempdir(): %TEMP%\spfy_assets_<key>, where the key is the
+ * mtime of the binary CARRYING the blob. */
+/* DURABLE asset dir: <dll dir>\fe_assets, i.e. */
+static const char *sapi_asset_dir(void)
+{
+    static char dir[MAX_PATH];
+    char self[MAX_PATH];
+    DWORD n = GetModuleFileNameA(g_hModule, self, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return NULL;
+    char *slash = strrchr(self, '\\');
+    if (!slash) return NULL;
+    *slash = '\0';
+    /* spfy_assets_dir() appends fe_assets_<content-digest>, the same name
+     * spfy_synth.exe uses — so when both are installed to {app} they share
+     * ONE extracted copy rather than keeping two. */
+    return spfy_assets_dir(self, dir, sizeof dir) == 0 ? dir : NULL;
+}
+
+static const char *sapi_asset_tempdir(void)
+{
+    static char dir[MAX_PATH];
+    char base[MAX_PATH];
+    char self[MAX_PATH];
+    DWORD n = GetEnvironmentVariableA("TEMP", base, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        n = GetEnvironmentVariableA("TMP", base, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH)
+            _snprintf(base, MAX_PATH - 1, "%s", "C:\\Windows\\Temp");
+    }
+    /* GetFileAttributesEx, not stat(): this file never includes
+     * <sys/stat.h>, and MinGW's `_stat` resolves to _stat32/_stat64
+     * depending on flags. */
+    /* Keyed on the CONTENT digest, not this DLL's mtime: replacing the DLL
+     * without changing the FE tables must not orphan the extracted copy and
+     * force every user to re-write 728 files. */
+    (void)self;
+    return spfy_assets_dir(base, dir, sizeof dir) == 0 ? dir : NULL;
 }
 
 static HRESULT load_voice_from_token(SpfyEngineImpl *impl,
@@ -896,12 +816,27 @@ static HRESULT load_voice_from_token(SpfyEngineImpl *impl,
     _snprintf(vin,   MAX_PATH - 1, "%s\\en-US\\%s\\%s.vin",  root, voice_name, voice_name);
     _snprintf(vdb,   MAX_PATH - 1, "%s\\en-US\\%s\\%s8.vdb", root, voice_name, voice_name);
     _snprintf(vcf,   MAX_PATH - 1, "%s\\en-US\\%s\\%s.vcf",  root, voice_name, voice_name);
-    _snprintf(vocab, MAX_PATH - 1, "%s\\spfy\\build\\fe_symbol_table.json", root);
-    _snprintf(tab_a, MAX_PATH - 1, "%s\\spfy\\data\\fe_tables_a", root);
-    _snprintf(tab_b, MAX_PATH - 1, "%s\\spfy\\data\\fe_tables",   root);
 
-    /* hpclass NULL -> derived from this voice's VIN. Previously pinned to
-     * data/tom_hpclass.bin, which made every non-Tom token fail to load. */
+    /* FE assets come from the blob linked into this DLL, extracted once per
+     * DLL build to %TEMP%. */
+    /* Durable dir first. */
+    spfy_asset_paths_t assets;
+    const char *durable = sapi_asset_dir();
+    if (durable && spfy_assets_extract(durable, &assets) == 0) {
+        _snprintf(vocab, MAX_PATH - 1, "%s", assets.vocab);
+        _snprintf(tab_a, MAX_PATH - 1, "%s", assets.tables_a);
+        _snprintf(tab_b, MAX_PATH - 1, "%s", assets.tables_b);
+    } else if (spfy_assets_extract(sapi_asset_tempdir(), &assets) == 0) {
+        _snprintf(vocab, MAX_PATH - 1, "%s", assets.vocab);
+        _snprintf(tab_a, MAX_PATH - 1, "%s", assets.tables_a);
+        _snprintf(tab_b, MAX_PATH - 1, "%s", assets.tables_b);
+    } else {
+        _snprintf(vocab, MAX_PATH - 1, "%s\\spfy\\build\\fe_symbol_table.json", root);
+        _snprintf(tab_a, MAX_PATH - 1, "%s\\spfy\\data\\fe_tables_a", root);
+        _snprintf(tab_b, MAX_PATH - 1, "%s\\spfy\\data\\fe_tables",   root);
+    }
+
+    /* hpclass NULL -> derived from this voice's VIN. */
     spfy_voice_paths_t paths = {
         .vin = vin, .vdb = vdb, .vcf = vcf,
         .hpclass = NULL, .vocab = vocab,
@@ -914,12 +849,12 @@ static HRESULT load_voice_from_token(SpfyEngineImpl *impl,
     int rc = spfy_voice_load(&paths, &impl->voice);
     if (rc != SPFY_OK) return E_FAIL;
     impl->voice_loaded = 1;
+    /* So a `\s4m` tag in spoken text can derive this voice's pitch-mark
+     * stem. */
+    spfy4_note_vdb_path(vdb);
     return S_OK;
 }
 
-/* ----------------------------------------------------------------- */
-/* Class factory                                                       */
-/* ----------------------------------------------------------------- */
 
 typedef struct {
     IClassFactory iface;
@@ -963,7 +898,7 @@ factory_CreateInstance(IClassFactory *This, IUnknown *pUnkOuter,
     impl->refcount = 1;
     InterlockedIncrement(&g_dll_refs);
     HRESULT hr = impl_query(impl, riid, ppv);
-    impl_release(impl);     /* QI added a ref; balance our initial 1 */
+    impl_release(impl);
     return hr;
 }
 
@@ -983,16 +918,12 @@ static const IClassFactoryVtbl g_factory_vtbl = {
 
 static SpfyFactory g_factory = { { (CONST_VTBL IClassFactoryVtbl *)&g_factory_vtbl }, 1 };
 
-/* Accessor used by spfy_sapi_host.c to share the singleton factory. */
 IClassFactory *spfy_sapi_get_factory(void);
 IClassFactory *spfy_sapi_get_factory(void)
 {
     return (IClassFactory *)&g_factory;
 }
 
-/* ----------------------------------------------------------------- */
-/* DLL entry points                                                    */
-/* ----------------------------------------------------------------- */
 
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID rsrv);
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID rsrv)
@@ -1020,9 +951,6 @@ HRESULT WINAPI DllCanUnloadNow(void)
     return g_dll_refs == 0 ? S_OK : S_FALSE;
 }
 
-/* ----------------------------------------------------------------- */
-/* DllRegisterServer / DllUnregisterServer                             */
-/* ----------------------------------------------------------------- */
 
 static int write_reg_str(HKEY root, const WCHAR *path, const WCHAR *name,
                          const WCHAR *value)
@@ -1037,8 +965,7 @@ static int write_reg_str(HKEY root, const WCHAR *path, const WCHAR *name,
 }
 
 /* Same as write_reg_str but opens the 64-bit registry view explicitly
- * (KEY_WOW64_64KEY). Lets a 32-bit process write into the 64-bit hives
- * so 64-bit SAPI clients can see our voice + LocalServer32 entries. */
+ * (KEY_WOW64_64KEY). */
 static int write_reg_str_64(HKEY root, const WCHAR *path, const WCHAR *name,
                             const WCHAR *value)
 {
@@ -1057,23 +984,12 @@ static int delete_reg_tree(HKEY root, const WCHAR *path)
     return RegDeleteTreeW(root, path) == ERROR_SUCCESS;
 }
 
-/* Register the CLSID in both 32- and 64-bit registry views.
- *
- * 32-bit view (the natural one we run under): full classic InprocServer32
- * pointing at this DLL — fast in-proc path for 32-bit SAPI clients.
- *
- * 64-bit view: LocalServer32 pointing at spfy_sapi_host.exe. 64-bit
- * clients can't load a 32-bit DLL in-proc, but COM cross-bitness lets a
- * 64-bit client launch our 32-bit EXE and marshal calls. The EXE shares
- * the same class factory as the DLL.
- *
- * The DLL writes both views. The EXE is expected to sit next to the DLL. */
+/* Register the CLSID in both 32- and 64-bit registry views. */
 static HRESULT register_clsid(void)
 {
     WCHAR mod[MAX_PATH] = {0};
     if (!GetModuleFileNameW(g_hModule, mod, MAX_PATH)) return SELFREG_E_CLASS;
     WCHAR sapi64_path[MAX_PATH] = {0};
-    /* Sibling spfy_sapi64.dll path (next to this 32-bit DLL). */
     {
         wcsncpy(sapi64_path, mod, MAX_PATH);
         WCHAR *slash = wcsrchr(sapi64_path, L'\\');
@@ -1089,8 +1005,7 @@ static HRESULT register_clsid(void)
     static const WCHAR INPROC_PATH[] =
         L"CLSID\\{9C3A7D1E-4F5A-4B6C-8EA2-5C71D08F1234}\\InprocServer32";
 
-    /* 32-bit view: this DLL as InprocServer32. 32-bit SAPI clients load
-     * us in-proc and synth runs against our 32-bit spfy stack directly. */
+    /* 32-bit view: this DLL as InprocServer32. */
     if (!write_reg_str(HKEY_CLASSES_ROOT, CLSID_PATH, NULL,
                        L"Speechify TTS Engine"))
         return SELFREG_E_CLASS;
@@ -1100,11 +1015,7 @@ static HRESULT register_clsid(void)
                        L"Both"))
         return SELFREG_E_CLASS;
 
-    /* 64-bit view: spfy_sapi64.dll as InprocServer32. The 64-bit shim
-     * loads in-proc to 64-bit clients and spawns 32-bit spfy_synth.exe
-     * for the actual synthesis. (Cross-bitness LocalServer32 doesn't
-     * work for ISpTTSEngine because SAPI doesn't register proxy/stub
-     * for it — verified empirically). */
+    /* 64-bit view: spfy_sapi64.dll as InprocServer32. */
     if (GetFileAttributesW(sapi64_path) != INVALID_FILE_ATTRIBUTES) {
         write_reg_str_64(HKEY_LOCAL_MACHINE,
             L"SOFTWARE\\Classes\\CLSID\\{9C3A7D1E-4F5A-4B6C-8EA2-5C71D08F1234}",
@@ -1119,12 +1030,8 @@ static HRESULT register_clsid(void)
     return S_OK;
 }
 
-/* Create a SAPI voice token for one voice in BOTH the 32-bit (current)
- * and 64-bit registry views. 32-bit SAPI clients see the 32-bit view
- * (which our 32-bit process writes naturally); 64-bit clients see the
- * 64-bit view (we explicitly use KEY_WOW64_64KEY for those writes).
- * Tokens in both views share the same CLSID — COM routes activation to
- * either InprocServer32 (32-bit caller) or LocalServer32 (64-bit). */
+/* Create a SAPI voice token for one voice in BOTH the 32-bit (current) and
+ * 64-bit registry views. */
 static HRESULT register_voice_token(HKEY base, const WCHAR *voice_name)
 {
     WCHAR base_path[256], attr_path[256];
@@ -1136,7 +1043,6 @@ static HRESULT register_voice_token(HKEY base, const WCHAR *voice_name)
     WCHAR display[128];
     _snwprintf(display, 128, L"Speechify - %ls", voice_name);
 
-    /* 32-bit view (natural for our 32-bit DLL). */
     if (!write_reg_str(base, base_path, NULL, display)) return E_FAIL;
     write_reg_str(base, base_path, L"CLSID", clsid);
     write_reg_str(base, base_path, L"VoiceName", voice_name);
@@ -1146,8 +1052,8 @@ static HRESULT register_voice_token(HKEY base, const WCHAR *voice_name)
     write_reg_str(base, attr_path, L"Gender",   L"Male");
     write_reg_str(base, attr_path, L"Age",      L"Adult");
 
-    /* 64-bit view — only meaningful for HKEY_LOCAL_MACHINE writes (HKCU
-     * has no separate 32/64 split). */
+    /* 64-bit view — only meaningful for HKEY_LOCAL_MACHINE writes (HKCU has
+     * no separate 32/64 split). */
     if (base == HKEY_LOCAL_MACHINE) {
         write_reg_str_64(base, base_path, NULL,      display);
         write_reg_str_64(base, base_path, L"CLSID",  clsid);
@@ -1176,7 +1082,7 @@ static HRESULT scan_and_register_voices(void)
 
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(scan_pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) return S_OK;   /* nothing to scan */
+    if (h == INVALID_HANDLE_VALUE) return S_OK;
 
     HKEY base = HKEY_LOCAL_MACHINE;
     HKEY probe;
@@ -1212,12 +1118,18 @@ HRESULT WINAPI DllRegisterServer(void)
 {
     HRESULT hr = register_clsid();
     if (FAILED(hr)) return hr;
+    /* Populate the durable FE-asset dir next to this DLL while we still
+     * have the rights to. */
+    {
+        const char *dir = sapi_asset_dir();
+        if (dir) (void)spfy_assets_extract(dir, NULL);
+    }
     return scan_and_register_voices();
 }
 
-/* Sweep tokens prefixed Speechify_ from one specific hive opened with
- * the caller-supplied access flags (so we can hit both 32-bit and
- * 64-bit views of HKLM by passing KEY_WOW64_64KEY where needed). */
+/* Sweep tokens prefixed Speechify_ from one specific hive opened with the
+ * caller-supplied access flags (so we can hit both 32-bit and 64-bit views
+ * of HKLM by passing KEY_WOW64_64KEY where needed). */
 static void clean_voice_tokens(HKEY hive, REGSAM extra_sam)
 {
     HKEY tokens;
@@ -1248,12 +1160,10 @@ static void clean_voice_tokens(HKEY hive, REGSAM extra_sam)
 
 HRESULT WINAPI DllUnregisterServer(void)
 {
-    /* 32-bit HKLM + HKCU + 64-bit HKLM. */
     clean_voice_tokens(HKEY_LOCAL_MACHINE, 0);
     clean_voice_tokens(HKEY_CURRENT_USER,  0);
     clean_voice_tokens(HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY);
 
-    /* CLSID in both views. */
     delete_reg_tree(HKEY_CLASSES_ROOT,
         L"CLSID\\{9C3A7D1E-4F5A-4B6C-8EA2-5C71D08F1234}");
     {

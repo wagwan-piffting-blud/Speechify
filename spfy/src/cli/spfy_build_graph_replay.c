@@ -1,16 +1,4 @@
-/* spfy_build_graph_replay -- M3.4r Phase B2 validation harness.
- *
- * Loads a captured fe_tree JSONL (from fe_tree_hook.js, one event per
- * utterance), constructs our C-side BuildGraph slot tree from it, and
- * compares to the captured viterbi_dp slot count from the same text.
- * 100% match across the corpus validates that Phase B2's slot-shape
- * algorithm reproduces the engine's BuildGraph output.
- *
- * Usage:
- *   spfy_build_graph_replay <fe_tree_dir> <viterbi_dp_dir> [--verbose]
- *
- * Drives over the corpus by listing text_*.jsonl in fe_tree_dir.
- */
+/* spfy_build_graph_replay -- M3.4r Phase B2 validation harness. */
 
 #include <spfy/spfy.h>
 
@@ -24,10 +12,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ------------------------------------------------------------------ */
-/* JSONL helpers (the format is produced by our own hook so the parse */
-/* is intentionally narrow).                                           */
-/* ------------------------------------------------------------------ */
 
 static const char *find_lit(const char *p, const char *end, const char *lit)
 {
@@ -60,19 +44,14 @@ static int read_key_u32(const char *s, const char *e, const char *key,
     return parse_u32_at(p, out, NULL);
 }
 
-/* ------------------------------------------------------------------ */
-/* Parse one fe_tree event into a parsed-IR list, then build the FE   */
-/* utterance struct that BuildGraph consumes.                         */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     char     rel[16];
     uint32_t ir;
     uint32_t shared;
     uint32_t next, prev, parent, daughter;
-    /* Optional features extracted from feat block (B1.5). */
-    char     name_str[32];   /* segment/word name; "" if absent */
-    int      stress;         /* syllable stress; -1 if absent */
+    char     name_str[32];
+    int      stress;
 } parsed_ir_t;
 
 static int parse_fe_event(const char *line, size_t n,
@@ -96,7 +75,6 @@ static int parse_fe_event(const char *line, size_t n,
         while (p < end && (*p == ' ' || *p == ',' || *p == '\t')) ++p;
         if (p >= end || *p == ']') break;
         if (*p != '{') break;
-        /* find the closing brace at the same depth */
         const char *cur = p;
         int depth = 0;
         const char *cend = end;
@@ -117,7 +95,6 @@ static int parse_fe_event(const char *line, size_t n,
         memset(e, 0, sizeof *e);
         e->stress = -1;
 
-        /* relation name */
         const char *rp = find_lit(cur, cend, "\"rel\":\"");
         if (rp) {
             rp += strlen("\"rel\":\"");
@@ -135,7 +112,6 @@ static int parse_fe_event(const char *line, size_t n,
         (void)read_key_u32(cur, cend, "parent",   &e->parent);
         (void)read_key_u32(cur, cend, "daughter", &e->daughter);
 
-        /* Features (B1.5) */
         const char *np = find_lit(cur, cend, "\"name\":{");
         if (np) {
             const char *sp = find_lit(np, cend, "\"str\":\"");
@@ -167,8 +143,7 @@ static int parse_fe_event(const char *line, size_t n,
     return 0;
 }
 
-/* Find an IR by relation + ir-ptr lookup. Linear scan; the corpus
- * utterance trees are small enough (a few hundred IRs at most). */
+/* Find an IR by relation + ir-ptr lookup. */
 static const parsed_ir_t *find_ir(const parsed_ir_t *irs, uint32_t n,
                                   const char *rel, uint32_t ir)
 {
@@ -181,7 +156,6 @@ static const parsed_ir_t *find_ir(const parsed_ir_t *irs, uint32_t n,
     return NULL;
 }
 
-/* Find the SylStructure IR that has the same shared item as `shared`. */
 static const parsed_ir_t *find_ss_by_shared(const parsed_ir_t *irs,
                                             uint32_t n,
                                             uint32_t shared,
@@ -196,12 +170,8 @@ static const parsed_ir_t *find_ss_by_shared(const parsed_ir_t *irs,
     return NULL;
 }
 
-/* From a starting IR, walk its `next`-chain in the SylStructure
- * relation, collecting both (shared) ids AND the IR pointers
- * themselves. Caller-allocated dynamic arrays. The IR-ptr array lets
- * the caller directly access daughter pointers for each entry without
- * a follow-up shared->IR lookup (which is ambiguous for non-first
- * siblings where parent=0 on every entry). */
+/* From a starting IR, walk its `next`-chain in the SylStructure relation,
+ * collecting both (shared) ids AND the IR pointers themselves. */
 static int walk_ss_chain(const parsed_ir_t *irs, uint32_t n,
                          const parsed_ir_t *start,
                          uint32_t **out_shared,
@@ -236,13 +206,11 @@ static int walk_ss_chain(const parsed_ir_t *irs, uint32_t n,
     return 0;
 }
 
-/* Build the FE utterance struct from a parsed fe_tree event. */
 static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
                         spfy_fe_utt_t *out)
 {
     memset(out, 0, sizeof *out);
 
-    /* 1. Word relation -> word_shareds in order. */
     uint32_t word_cap = 0;
     for (uint32_t i = 0; i < n_irs; ++i)
         if (strcmp(irs[i].rel, "Word") == 0) ++word_cap;
@@ -251,7 +219,6 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
     out->word_names   = (char    **)calloc(word_cap, sizeof *out->word_names);
     if (!out->word_shareds || !out->word_names) goto oom;
 
-    /* Find the head of Word relation: prev == 0. Then walk via next. */
     const parsed_ir_t *w_head = NULL;
     for (uint32_t i = 0; i < n_irs; ++i) {
         if (strcmp(irs[i].rel, "Word") == 0 && irs[i].prev == 0) {
@@ -267,8 +234,8 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
         const parsed_ir_t *cur = w_head;
         while (cur != NULL && out->n_words < word_cap) {
             out->word_shareds[out->n_words] = cur->shared;
-            /* Word IRs carry a "name" feature whose `str` is the word
-             * text (or "_NULL_" for boundary silence wrappers). */
+            /* Word IRs carry a "name" feature whose `str` is the word text
+             * (or "_NULL_" for boundary silence wrappers). */
             if (cur->name_str[0] != 0) {
                 out->word_names[out->n_words] = strdup(cur->name_str);
                 if (!out->word_names[out->n_words]) goto oom;
@@ -281,12 +248,7 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
         }
     }
 
-    /* 2. For each word, navigate to SylStructure (same shared) and
-     *    walk its daughter chain to collect syllables. We track the
-     *    in-tree IR ptrs alongside shared ids -- a non-first daughter
-     *    has both parent=0 and an entry-by-shared lookup is ambiguous,
-     *    so direct IR ptrs are required to walk the segment subchain
-     *    in step 3. */
+    /* 2. */
     out->word_syls    = (uint32_t **)calloc(out->n_words, sizeof *out->word_syls);
     out->word_n_syls  = (uint32_t  *)calloc(out->n_words, sizeof *out->word_n_syls);
     uint32_t **word_syl_irs   = (uint32_t **)calloc(out->n_words,
@@ -299,7 +261,7 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
     for (uint32_t w = 0; w < out->n_words; ++w) {
         const parsed_ir_t *word_ss = find_ss_by_shared(irs, n_irs,
                                                        out->word_shareds[w],
-                                                       /*require_prev_zero=*/0);
+                                                       0);
         if (!word_ss) {
             if (getenv("SPFY_BG_DEBUG"))
                 fprintf(stderr, "  badf: no word_ss for w=%u shared=%u\n",
@@ -334,9 +296,7 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
         out->n_syls += out->word_n_syls[w];
     }
 
-    /* 3. For each global syllable, walk its daughter chain via the
-     *    stored IR pointer (so we don't need shared->IR lookups for
-     *    non-first daughter siblings). */
+    /* 3. */
     out->syl_segs   = (uint32_t **)calloc(out->n_syls, sizeof *out->syl_segs);
     out->syl_n_segs = (uint32_t  *)calloc(out->n_syls, sizeof *out->syl_n_segs);
     if (!out->syl_segs || !out->syl_n_segs) {
@@ -386,23 +346,20 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
                 free(word_syl_irs);
                 goto oom;
             }
-            free(seg_ir_unused);   /* segment IRs not needed yet */
+            free(seg_ir_unused);
             out->n_segs += out->syl_n_segs[g];
         }
     }
 
-    /* Free the temporary IR-ptr storage. */
     for (uint32_t k = 0; k < out->n_words; ++k) free(word_syl_irs[k]);
     free(word_syl_irs);
 
-    /* B4.3h: populate per-syllable stress + accent and phrase terminator. */
     out->syl_stress = (int32_t *)calloc(out->n_syls, sizeof *out->syl_stress);
     out->syl_accent = (uint32_t *)calloc(out->n_syls, sizeof *out->syl_accent);
     if (!out->syl_stress || !out->syl_accent) goto oom;
     for (uint32_t k = 0; k < out->n_syls; ++k) out->syl_stress[k] = -1;
 
-    /* Phrase terminator: first char of FE Phrase relation's name. */
-    out->phrase_term = '?';   /* default if not found */
+    out->phrase_term = '?';
     for (uint32_t i = 0; i < n_irs; ++i) {
         if (strcmp(irs[i].rel, "Phrase") == 0 && irs[i].name_str[0]) {
             out->phrase_term = irs[i].name_str[0];
@@ -410,14 +367,13 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
         }
     }
 
-    /* For each global syllable index, find its Syllable IR (by walking
-     * the SylStructure chain) and copy its stress feature. */
+    /* For each global syllable index, find its Syllable IR (by walking the
+     * SylStructure chain) and copy its stress feature. */
     {
         uint32_t gsyl = 0;
         for (uint32_t w = 0; w < out->n_words; ++w) {
             for (uint32_t s = 0; s < out->word_n_syls[w]; ++s, ++gsyl) {
                 uint32_t syl_shared = out->word_syls[w][s];
-                /* Find Syllable-rel IR with this shared. */
                 for (uint32_t i = 0; i < n_irs; ++i) {
                     if (strcmp(irs[i].rel, "Syllable") == 0 &&
                         irs[i].shared == syl_shared) {
@@ -430,11 +386,9 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
     }
 
     /* Build syl_accent: for each syllable, find Intonation root with
-     * matching shared, get its daughter (Intonation tree-leaf, shared
-     * with IntEvent), look up IntEvent.name and map to accent code. */
+     * matching shared, get its daughter (Intonation tree-leaf, shared with
+     * IntEvent), look up IntEvent.name and map to accent code. */
     {
-        /* Map IR ptr -> parsed_ir_t* for fast lookup. */
-        /* Linear scans suffice for our small corpus. */
         static const struct { const char *s; uint32_t code; } accent_map[] = {
             { "H*",   1 }, { "H+L*", 2 }, { "L*",   3 },
             { "L+H*", 4 }, { "H*+L", 5 }, { "L*+H", 6 },
@@ -444,8 +398,8 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
         for (uint32_t w = 0; w < out->n_words; ++w) {
             for (uint32_t s = 0; s < out->word_n_syls[w]; ++s, ++gsyl) {
                 uint32_t syl_shared = out->word_syls[w][s];
-                /* Find Intonation root IR (rel=Intonation, shared=syl_shared,
-                 * has daughter). */
+                /* Find Intonation root IR (rel=Intonation,
+                 * shared=syl_shared, has daughter). */
                 const parsed_ir_t *intonation_root = NULL;
                 for (uint32_t i = 0; i < n_irs; ++i) {
                     if (strcmp(irs[i].rel, "Intonation") == 0 &&
@@ -459,14 +413,12 @@ static int build_fe_utt(const parsed_ir_t *irs, uint32_t n_irs,
                     out->syl_accent[gsyl] = 0;
                     continue;
                 }
-                /* Get daughter IR and read its shared. */
                 const parsed_ir_t *daughter =
                     find_ir(irs, n_irs, "Intonation", intonation_root->daughter);
                 if (!daughter) {
                     out->syl_accent[gsyl] = 0;
                     continue;
                 }
-                /* Find IntEvent IR with daughter->shared, get its name. */
                 const char *acc_name = NULL;
                 for (uint32_t i = 0; i < n_irs; ++i) {
                     if (strcmp(irs[i].rel, "IntEvent") == 0 &&
@@ -505,14 +457,11 @@ badf:
     return SPFY_E_FORMAT;
 }
 
-/* ------------------------------------------------------------------ */
-/* Engine slot graph from viterbi_dp (n_slots + per-slot pred lists)   */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     uint32_t  n_slots;
-    /* per_slot_preds[s] = malloced array of pred slot indices
-     * (already mapped from raw slice ptrs to slot indices). */
+    /* per_slot_preds[s] = malloced array of pred slot indices (already
+     * mapped from raw slice ptrs to slot indices). */
     uint32_t **per_slot_preds;
     uint32_t  *per_slot_n_preds;
 } engine_slot_graph_t;
@@ -537,9 +486,7 @@ static void engine_slot_graphs_free(engine_slot_graphs_t *g)
     memset(g, 0, sizeof *g);
 }
 
-/* Parse one viterbi_enter line into (n_slots, per-slot pred slot indices).
- * The trace stores raw slice ptrs in `preds`; we build a slice_ptr ->
- * slot_idx map then translate. */
+/* Parse one viterbi_enter line into (n_slots, per-slot pred slot indices). */
 static int parse_viterbi_enter(const char *buf, size_t n,
                                engine_slot_graph_t *out)
 {
@@ -553,14 +500,12 @@ static int parse_viterbi_enter(const char *buf, size_t n,
     out->per_slot_n_preds = (uint32_t  *)calloc(v, sizeof *out->per_slot_n_preds);
     if (!out->per_slot_preds || !out->per_slot_n_preds) return -1;
 
-    /* Walk slots[]. Build slice_ptr -> slot_idx map first. */
     const char *p = find_lit(buf, end, "\"slots\":[");
     if (!p) return -1;
     p += strlen("\"slots\":[");
 
-    /* Two-pass: pass 1 builds slice_ptr -> slot_idx by scanning
-     * "slot":N and "slice_ptr":M pairs. We allocate a hash-free
-     * linear list (small N). */
+    /* Two-pass: pass 1 builds slice_ptr -> slot_idx by scanning "slot":N
+     * and "slice_ptr":M pairs. */
     uint32_t  *sl_idx = (uint32_t *)calloc(v, sizeof *sl_idx);
     uint32_t  *sl_ptr = (uint32_t *)calloc(v, sizeof *sl_ptr);
     uint32_t **sl_raw_preds = (uint32_t **)calloc(v, sizeof *sl_raw_preds);
@@ -576,7 +521,6 @@ static int parse_viterbi_enter(const char *buf, size_t n,
         while (q < end && (*q == ' ' || *q == ',' || *q == '\t')) ++q;
         if (q >= end || *q == ']') break;
         if (*q != '{') break;
-        /* find balanced } */
         const char *qend = end;
         int depth = 0;
         for (const char *r = q; r < end; ++r) {
@@ -617,8 +561,7 @@ static int parse_viterbi_enter(const char *buf, size_t n,
         q = qend;
     }
 
-    /* Map raw slice_ptrs to slot indices using sl_ptr. Then store in
-     * out->per_slot_preds indexed by slot_idx. */
+    /* Map raw slice_ptrs to slot indices using sl_ptr. */
     for (uint32_t i = 0; i < k; ++i) {
         uint32_t si = sl_idx[i];
         if (si >= v) continue;
@@ -627,12 +570,10 @@ static int parse_viterbi_enter(const char *buf, size_t n,
             out->per_slot_preds[si] = (uint32_t *)
                 calloc(sl_n_preds[i], sizeof **out->per_slot_preds);
             if (!out->per_slot_preds[si]) {
-                /* nominal */
                 continue;
             }
             for (uint32_t j = 0; j < sl_n_preds[i]; ++j) {
                 uint32_t raw = sl_raw_preds[i][j];
-                /* find slot whose slice_ptr matches raw */
                 uint32_t mapped = UINT32_MAX;
                 for (uint32_t z = 0; z < k; ++z) {
                     if (sl_ptr[z] == raw) { mapped = sl_idx[z]; break; }
@@ -675,15 +616,11 @@ static int load_engine_slot_graphs(const char *path,
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* prsl_slot ctx loader                                                */
-/* ------------------------------------------------------------------ */
-/* Each line: {"type":"prsl_slot","n":N,"slot":S,...,"ctx":[a,b,c,d,e],...} */
 
 typedef struct {
-    uint32_t (*ctx_per_hp)[5];   /* heap, n_halfphones in utt order */
-    uint32_t **uids_per_hp;      /* heap, n_halfphones arrays */
-    uint32_t  *n_uids_per_hp;    /* heap, n_halfphones */
+    uint32_t (*ctx_per_hp)[5];
+    uint32_t **uids_per_hp;
+    uint32_t  *n_uids_per_hp;
     uint32_t  n_halfphones;
 } engine_prsl_utt_t;
 
@@ -714,9 +651,7 @@ static int load_engine_prsl(const char *path, engine_prsl_t *out)
     FILE *fp = fopen(path, "rb");
     if (!fp) return -1;
     char buf[4096];
-    /* Two-pass: pass 1 sizes utts/halfphones; pass 2 fills ctx. We
-     * use a simpler one-pass with realloc. Slot resets to 0 mark utt
-     * boundaries. */
+    /* Two-pass: pass 1 sizes utts/halfphones; pass 2 fills ctx. */
     uint32_t utt_cap = 4, utt_n = 0;
     out->utts = calloc(utt_cap, sizeof *out->utts);
     if (!out->utts) { fclose(fp); return -1; }
@@ -730,7 +665,6 @@ static int load_engine_prsl(const char *path, engine_prsl_t *out)
         uint32_t slot = 0;
         if (read_key_u32(buf, end, "slot", &slot) != 0) continue;
         if ((int)slot == 0 && prev_slot > 0) {
-            /* New utterance. */
             if (utt_n == utt_cap) {
                 utt_cap *= 2;
                 engine_prsl_utt_t *na = realloc(out->utts, utt_cap * sizeof *na);
@@ -777,7 +711,6 @@ static int load_engine_prsl(const char *path, engine_prsl_t *out)
                 cur->ctx_per_hp[slot][k] = v;
             }
         }
-        /* Parse uids[]. */
         uint32_t n_cands = 0;
         if (read_key_u32(buf, end, "n_cands", &n_cands) == 0 && n_cands > 0) {
             uint32_t *arr = calloc(n_cands, sizeof *arr);
@@ -805,9 +738,6 @@ static int load_engine_prsl(const char *path, engine_prsl_t *out)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Per-text validation                                                 */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     int      utts_run;
@@ -815,24 +745,19 @@ typedef struct {
     int      utts_pred_match;
     int      slots_pred_total;
     int      slots_pred_match;
-    /* Phase B4 step 1 metrics: slice ctx derivation. */
     int      utts_ctx_match;
     int      slots_ctx_total;
     int      slots_ctx_match;
     int      utts_prsl_match;
     int      slots_prsl_total;
     int      slots_prsl_match;
-    /* Phase B4 step 3h metrics: SP_target populator validation. */
     int      slots_sp_total;
     int      slots_sp_match;
-    /* Per-field counters (sp[0..4]). */
     int      sp_field_match[5];
 } stats_t;
 
-/* Per-utterance SP target capture from inner_scorer JSONL. */
 typedef struct {
-    /* per_slot_sp[s][k] = SP_target[k] for slot s. NULL if not captured. */
-    uint32_t (**per_slot_sp)[5];   /* malloc'd ptr per utt to per-slot 5-tuple */
+    uint32_t (**per_slot_sp)[5];
     uint32_t  *per_utt_n_slots;
     uint32_t   n_utts;
 } inner_scorer_caps_t;
@@ -852,7 +777,6 @@ static int load_inner_scorer(const char *path, inner_scorer_caps_t *out)
     FILE *fp = fopen(path, "r");
     if (!fp) return -1;
 
-    /* First pass: count utts (slot=0 boundaries) and per-utt slot counts. */
     uint32_t cap_utts = 8;
     uint32_t (**utts)[5] = calloc(cap_utts, sizeof *utts);
     uint32_t *utt_n     = calloc(cap_utts, sizeof *utt_n);
@@ -865,7 +789,6 @@ static int load_inner_scorer(const char *path, inner_scorer_caps_t *out)
     char *buf = NULL;
     size_t bufcap = 0;
     ssize_t nl;
-    /* getline is POSIX; on Windows we read in chunks. */
     char tmp[8192];
     (void)bufcap; (void)nl;
     (void)buf;
@@ -877,7 +800,6 @@ static int load_inner_scorer(const char *path, inner_scorer_caps_t *out)
         uint32_t slot = UINT32_MAX;
         if (read_key_u32(line, end, "slot", &slot) != 0) continue;
 
-        /* New utt boundary: slot=0 starts a new utt. */
         if (slot == 0 && cur_n > 0) {
             if (n_utts == cap_utts) {
                 cap_utts *= 2;
@@ -891,7 +813,6 @@ static int load_inner_scorer(const char *path, inner_scorer_caps_t *out)
             cur_slots = NULL; cur_cap = 0; cur_n = 0;
         }
 
-        /* Parse sp_target [a,b,c,d,e] */
         const char *sp_p = find_lit(line, end, "\"sp_target\":[");
         if (!sp_p) continue;
         sp_p += strlen("\"sp_target\":[");
@@ -950,41 +871,35 @@ static void process_entry(const char *fe_path, const char *vit_path,
                           const spfy_prsl_t *prsl_voice,
                           stats_t *st, int verbose)
 {
-    /* Extract entry id for nice printing. */
     const char *base = fe_path;
     for (const char *q = fe_path; *q; ++q)
         if (*q == '/' || *q == '\\') base = q + 1;
     char eid[64] = {0};
     /* Display id only — a pathologically long basename is deliberately
-     * truncated. The result is inspected so GCC doesn't flag the
-     * truncation as unintended (-Wformat-truncation warns on unused). */
+     * truncated. */
     if (snprintf(eid, sizeof eid, "%s", base) < 0) eid[0] = '\0';
     char *dot = strrchr(eid, '.');
     if (dot) *dot = 0;
 
-    /* Read engine slot graphs (n_slots + per-slot pred lists). */
     engine_slot_graphs_t eng = {0};
     if (load_engine_slot_graphs(vit_path, &eng) != 0) {
         fprintf(stderr, "warn: cannot read viterbi_dp at %s\n", vit_path);
         return;
     }
 
-    /* Optional: prsl_slot ctx for ctx derivation comparison. */
     engine_prsl_t prsl = {0};
     int have_prsl = (prsl_path && load_engine_prsl(prsl_path, &prsl) == 0);
 
-    /* Optional: inner_scorer captures for SP_target validation. */
     inner_scorer_caps_t is_caps = {0};
     int have_is = (is_path && load_inner_scorer(is_path, &is_caps) == 0);
 
-    /* Open fe_tree and parse one event at a time. */
     FILE *fp = fopen(fe_path, "rb");
     if (!fp) {
         fprintf(stderr, "could not open %s\n", fe_path);
         if (have_is) inner_scorer_caps_free(&is_caps);
         return;
     }
-    char *buf = malloc(1 << 22);   /* 4 MiB scratch -- fe_tree lines can be big */
+    char *buf = malloc(1 << 22);
     if (!buf) { fclose(fp); if (have_is) inner_scorer_caps_free(&is_caps); return; }
     uint32_t utt_idx = 0;
     while (fgets(buf, 1 << 22, fp)) {
@@ -1046,7 +961,6 @@ static void process_entry(const char *fe_path, const char *vit_path,
         uint32_t eng_n = e ? e->n_slots : 0;
         int count_match = (eng_n == tree.n_slots);
 
-        /* Compute LinkGraph predecs and compare to engine's. */
         spfy_slot_preds_table_t preds = {0};
         int pred_match_full = 0;
         int slots_match = 0, slots_total = 0;
@@ -1074,16 +988,14 @@ static void process_entry(const char *fe_path, const char *vit_path,
                 }
             }
         }
-        /* Phase B4 steps 1-2: derive ctx[5] + PRSL pool per halfphone-
-         * leaf and compare to captured prsl_slot.ctx + uids. Need a
-         * flat array of segment names in utterance order. */
+        /* Phase B4 steps 1-2: derive ctx[5] + PRSL pool per halfphone- leaf
+         * and compare to captured prsl_slot.ctx + uids. */
         int ctx_match_full = 0;
         int ctx_match_n = 0, ctx_total_n = 0;
         int prsl_match_full = 0;
         int prsl_match_n = 0, prsl_total_n = 0;
         if (have_prsl && utt_idx < prsl.n_utts) {
             const engine_prsl_utt_t *p = &prsl.utts[utt_idx];
-            /* Build segment-name array in utterance order from fe. */
             const char **seg_names = (const char **)
                 calloc(fe.n_segs ? fe.n_segs : 1, sizeof *seg_names);
             if (seg_names) {
@@ -1108,8 +1020,7 @@ static void process_entry(const char *fe_path, const char *vit_path,
                     }
                 }
                 spfy_slice_ctx_table_t ctx_table = {0};
-                /* NULL inventory -> Tom's hardcoded table. This harness
-                 * replays captured Tom traces only. */
+                /* NULL inventory -> Tom's hardcoded table. */
                 int rc3 = spfy_derive_slice_ctx(&tree, seg_names,
                                                 fe.n_segs, NULL, 0,
                                                 &ctx_table);
@@ -1129,7 +1040,6 @@ static void process_entry(const char *fe_path, const char *vit_path,
                             ++hp_idx;
                             continue;
                         }
-                        /* ctx comparison */
                         int ok = 1;
                         for (int k = 0; k < 5; ++k) {
                             if (ctx_table.ctx[s][k] !=
@@ -1137,7 +1047,6 @@ static void process_entry(const char *fe_path, const char *vit_path,
                         }
                         if (ok) ctx_match_n++;
                         else ctx_match_full = 0;
-                        /* PRSL pool comparison */
                         if (prsl_voice) {
                             prsl_total_n++;
                             uint32_t left  = ctx_table.ctx[s][1];
@@ -1202,12 +1111,11 @@ static void process_entry(const char *fe_path, const char *vit_path,
                 printf("]\n");
             }
         }
-        /* Phase B4 step 3h: SP_target derivation + validation. */
         if (have_is && utt_idx < is_caps.n_utts && count_match) {
             spfy_sp_target_table_t spt = {0};
             int rc4 = spfy_derive_sp_targets(&tree, &fe,
-                                             utt_idx, /* sentence_idx */
-                                             0,       /* voice_d4_flag */
+                                             utt_idx,
+                                             0,
                                              &spt);
             if (rc4 == SPFY_OK) {
                 uint32_t (*cap)[5] = is_caps.per_slot_sp[utt_idx];
@@ -1227,8 +1135,7 @@ static void process_entry(const char *fe_path, const char *vit_path,
                     fprintf(stderr, "\n");
                 }
                 /* Engine InnerScorer indexes halfphones contiguously
-                 * (0..n_halfphone-1), not by post-order tree slot. Map
-                 * by iterating tree halfphone leaves in post-order. */
+                 * (0..n_halfphone-1), not by post-order tree slot. */
                 uint32_t hp_idx = 0;
                 for (uint32_t s = 0; s < tree.n_slots; ++s) {
                     if (tree.slots[s].kind != SPFY_SK_HALFPHONE) continue;
@@ -1318,7 +1225,6 @@ int main(int argc, char **argv)
     const char *vit_dir  = argv[positional[1]];
     const char *prsl_dir = (pos_n >= 3) ? argv[positional[2]] : NULL;
 
-    /* Optional: load voice's PRSL chunk for pool comparison. */
     spfy_vin_t vin = {0};
     spfy_prsl_t prsl_voice = {0};
     int have_voice_prsl = 0;
@@ -1333,10 +1239,7 @@ int main(int argc, char **argv)
     }
 
     stats_t st = {0};
-    /* Drive over text_*.jsonl in fe_dir. We don't have a portable
-     * directory iterator; rely on the runner script to enumerate. For
-     * now we accept individual files via the wrapper -- if a directory
-     * is given we look for text_001..text_030 and any spr_*. */
+    /* Drive over text_*.jsonl in fe_dir. */
     static const char *known_ids[] = {
         "text_001","text_002","text_003","text_004","text_005",
         "text_006","text_007","text_008","text_009","text_010",

@@ -1,9 +1,4 @@
-/* Language lookup over the build-time FE DLL registry.
- *
- * The table (`spfy_fe_dlls`) is generated into the build dir by
- * fe_host/CMakeLists.txt; only the lookup lives here.
- *
- * SPDX-License-Identifier: GPL-3.0-or-later */
+/* Language lookup over the build-time FE DLL registry. */
 
 #include "swittsfe_registry.h"
 

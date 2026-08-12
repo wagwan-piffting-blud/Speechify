@@ -1,22 +1,4 @@
-/* VDB loader.
- *
- * Container: standard RIFF/WAVE obfuscated against 0xCE.
- *   <RIFF u32_size WAVE> [LIST? fmt indx data]
- *
- * NB: the fmt header advertises wFormatTag=0x0007 (WAVE_FORMAT_MULAW) and
- * nBitsPerSample=16, but the audio bytes themselves are 1-byte u-law
- * (engine converts u-law->s16 at decode time). Audio is always 8 kHz mono.
- *
- * indx layout (post-XOR):
- *   u32 count
- *   repeated count entries:
- *       u32 data_byte_offset
- *       u16 name_len
- *       char[name_len] name        (NOT NUL-terminated)
- *   final entry is a sentinel (offset = data_size, name_len = 0)
- *
- * indx ordering does NOT match VIN feat[].filename ordering -- callers
- * must look up by name, not by positional index. */
+/* VDB loader. */
 
 #include "voice.h"
 
@@ -62,7 +44,7 @@ static int parse_indx(spfy_vdb_t *v)
     }
 
     /* Sanity cap: indx with > 1M entries would mean ~6 MB of name overhead
-     * and is implausible for the format. Defensive bound only. */
+     * and is implausible for the format. */
     if (count > 1024u * 1024u) return SPFY_E_FORMAT;
 
     struct spfy_indx_entry *arr = (struct spfy_indx_entry *)
@@ -76,7 +58,7 @@ static int parse_indx(spfy_vdb_t *v)
         if ((size_t)(end - p) < arr[i].name_len) {
             free(arr); return SPFY_E_FORMAT;
         }
-        arr[i].name = (const char *)p;     /* not NUL-terminated */
+        arr[i].name = (const char *)p;
         p += arr[i].name_len;
     }
 
@@ -139,39 +121,97 @@ int spfy_vdb_load(const char *path, spfy_vdb_t *out)
         return SPFY_E_FORMAT;
     }
 
-    /* Parse fmt: standard 16-byte WAVE fmt header. We only need the
-     * sample rate; the format tag is 0x0007 (MULAW) but actual codec
-     * use is u-law 1 byte/sample at runtime. */
+    /* Parse fmt: standard 16-byte WAVE fmt header. */
     if (out->fmt_n < 16) {
         spfy_vdb_free(out); return SPFY_E_FORMAT;
     }
     out->sample_rate = le_u32(out->fmt + 4);
+    out->fmt_tag = (uint16_t)(out->fmt[0] | (out->fmt[1] << 8));
+    /* ⚠ Derive from the TAG, never from blockAlign/bitsPerSample: tom8.vdb
+     * advertises blockAlign 2 / 16-bit while storing 1-byte µ-law. */
+    out->bytes_per_sample = (out->fmt_tag == 0x0007u) ? 1u : 2u;
 
-    /* Parse indx into typed entries. */
     rc = parse_indx(out);
     if (rc != SPFY_OK) { spfy_vdb_free(out); return rc; }
 
     return SPFY_OK;
 }
 
-/* Format guard. The spfy CLI decode path (spfy_synth, spfy_synth_replay,
- * spfy_concat, …) assumes 8 kHz µ-law: 1 byte / sample, 8 bytes / ms,
- * decoded by spfy_ulaw_decode. A 16 kHz VDB (e.g. tom16.vdb) is
- * 16-bit PCM and produces 100% noise when fed through that path —
- * silently, because the unit-selection scores still look plausible.
- * Refuse loudly instead of letting users waste a minute synthesising
- * garbage. */
-int spfy_vdb_require_8k_mulaw(const spfy_vdb_t *vdb, const char *path)
+/* Format guard. */
+int spfy_vdb_require_supported(const spfy_vdb_t *vdb, const char *path)
 {
     if (!vdb) return SPFY_E_INVAL;
-    if (vdb->sample_rate != 8000) {
+    /* SpeechWorks shipped each voice at both rates -- the User's Guide
+     * gives `Speechify-Vox-en-US-tom-8kHz-3.0-0.i386.rpm` and the -16kHz
+     * sibling -- and they install side by side in one voice directory. */
+    int ok = (vdb->fmt_tag == 0x0007u && vdb->bytes_per_sample == 1u)
+          || (vdb->fmt_tag == 0x0001u && vdb->bytes_per_sample == 2u);
+    if (!ok) {
         fprintf(stderr,
-                "spfy: error: vdb: '%s' has sample_rate=%u; spfy CLIs "
-                "only support the 8 kHz mu-law VDB (try *8.vdb instead "
-                "of *16.vdb)\n",
-                path ? path : "?", vdb->sample_rate);
+                "spfy: error: vdb: '%s' has wFormatTag=%u at %u Hz; spfy "
+                "supports u-law (tag 7) and 16-bit PCM (tag 1) only\n",
+                path ? path : "?", (unsigned)vdb->fmt_tag,
+                (unsigned)vdb->sample_rate);
+        fflush(stderr);
+        return SPFY_E_FORMAT;
+    }
+    if (vdb->sample_rate != 8000u && vdb->sample_rate != 16000u) {
+        fprintf(stderr,
+                "spfy: error: vdb: '%s' has sample_rate=%u; spfy supports "
+                "8000 and 16000\n", path ? path : "?",
+                (unsigned)vdb->sample_rate);
         fflush(stderr);
         return SPFY_E_FORMAT;
     }
     return SPFY_OK;
+}
+
+/* G.711 µ-law expansion, ITU-T G.711 Table 2a -- the same formula as
+ * spfy_ulaw_decode in src/wsola.
+ *
+ * ⚠ NOT a call into that one, deliberately: spfy_wsola already links
+ * spfy_voice, so depending on it here would close a cycle. Decoding VDB
+ * storage is a voice concern anyway; WSOLA only happens to have owned the
+ * table first. If these ever diverge, parity breaks loudly and immediately. */
+static void vdb_ulaw_expand(const uint8_t *src, size_t n, int16_t *dst)
+{
+    static int16_t lut[256];
+    static int ready = 0;
+    if (!ready) {
+        for (int i = 0; i < 256; ++i) {
+            uint8_t b = (uint8_t)~(uint8_t)i;
+            int sign = (b & 0x80) ? -1 : 1;
+            int exponent = (b >> 4) & 0x07;
+            int mantissa = b & 0x0F;
+            int magnitude = ((mantissa << 3) + 0x84) << exponent;
+            magnitude -= 0x84;
+            lut[i] = (int16_t)(sign * magnitude);
+        }
+        ready = 1;
+    }
+    for (size_t i = 0; i < n; ++i) dst[i] = lut[src[i]];
+}
+
+size_t spfy_vdb_decode(const spfy_vdb_t *vdb, size_t rec_off,
+                       size_t sample_off, size_t n_samples, int16_t *dst)
+{
+    if (!vdb || !dst || n_samples == 0) return 0;
+    size_t bps = vdb->bytes_per_sample ? vdb->bytes_per_sample : 1u;
+    size_t byte_off = rec_off + sample_off * bps;
+    size_t avail = 0;
+    if (byte_off < vdb->data_n) avail = (vdb->data_n - byte_off) / bps;
+    size_t got = (n_samples < avail) ? n_samples : avail;
+    if (got) {
+        const uint8_t *src = vdb->data + byte_off;
+        if (bps == 1u) {
+            vdb_ulaw_expand(src, got, dst);
+        } else {
+            for (size_t i = 0; i < got; ++i)
+                dst[i] = (int16_t)((uint16_t)src[2 * i]
+                                   | ((uint16_t)src[2 * i + 1] << 8));
+        }
+    }
+    if (got < n_samples)
+        memset(dst + got, 0, (n_samples - got) * sizeof *dst);
+    return got;
 }

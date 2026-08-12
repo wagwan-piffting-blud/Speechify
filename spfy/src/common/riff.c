@@ -32,7 +32,6 @@ int spfy_riff_iter_next(spfy_riff_iter *it, spfy_chunk *out)
     out->size   = size;
     out->data   = payload;
 
-    /* Advance past payload + RIFF pad-to-even byte. */
     size_t step = (size_t)size + ((size & 1u) ? 1u : 0u);
     it->cur = payload + step;
     if (it->cur > it->end) it->cur = it->end;

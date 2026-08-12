@@ -9,6 +9,21 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(SPFY_TRACE        "Emit JSONL stage traces from synth core" OFF)
 option(SPFY_BUILD_TESTS  "Build unit tests"                         ON)
 option(SPFY_STRICT_FP    "Enforce x87 long-double FP discipline"    ON)
+# OFF by default — measured, not assumed. -ffloat-store forces every float
+# expression through memory; with LTO on, removing it is -13.2% on a bulletin
+# (15/15 paired rounds) with parity still BYTE-IDENTICAL 235/235, and the
+# REMAINING strict-FP flags then add nothing measurable (+1.1%, 6/15 = noise).
+# So the determinism that matters — -fexcess-precision=standard, -mno-fma,
+# -fno-fast-math — is free, and this one flag was the whole cost.
+#
+# Turning it ON is still the more conservative choice across UNKNOWN compilers,
+# which is why it remains a switch rather than being deleted.
+option(SPFY_FLOAT_STORE  "Add -ffloat-store under SPFY_STRICT_FP (costly)" OFF)
+# LTO. The engine is ~10 static libs with hot calls crossing them
+# (anchor_score -> cart -> voice), so there is real cross-TU inlining to win.
+# Guarded by CMake's own support probe, so a toolchain that cannot do it just
+# builds without. Costs ~2.5x build time; set OFF if a CI leg ever chokes.
+option(SPFY_LTO          "Link-time optimisation where supported"    ON)
 option(SPFY_FE_HOSTED    "Use in-process SWIttsFe-en-US.dll host instead of hand-written src/fe/"
                                                                     ON)
 
@@ -34,12 +49,24 @@ if(SPFY_STRICT_FP AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"
                   AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86|i.86|amd64|AMD64|X86|i686")
     include(CheckCCompilerFlag)
 
+    # -ffloat-store is separable, and it is the expensive one. It forces EVERY
+    # float expression through memory; -fexcess-precision=standard already
+    # gives C99-defined x87 semantics without that cost. Measured on this
+    # toolchain: with LTO on, dropping -ffloat-store is -8.9% (15/15 paired
+    # rounds) while parity stays BYTE-IDENTICAL 235/235 — the two flags
+    # interact, because LTO exposes more cross-TU FP that then gets spilled.
+    #
+    # Kept ON by default anyway: it is reproducibility insurance ACROSS
+    # compilers, not a correctness requirement on any one of them, and this
+    # project's whole claim is byte-exactness. Turn it off knowingly.
     set(_spfy_fp_want
         -fno-fast-math
         -fexcess-precision=standard
-        -ffloat-store
         -mno-fma
     )
+    if(SPFY_FLOAT_STORE)
+        list(APPEND _spfy_fp_want -ffloat-store)
+    endif()
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
         list(APPEND _spfy_fp_want -mfpmath=387 -mlong-double-80)
     endif()
@@ -74,6 +101,22 @@ endif()
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wconversion
                         -Wstrict-prototypes -Wmissing-prototypes)
+endif()
+
+# LTO, probed rather than assumed: CheckIPOSupported reports per-toolchain, so
+# an emulated armv7 leg or an odd Clang simply builds without it instead of
+# failing to configure. Release-only — a Debug build wants fast iteration and
+# readable backtraces far more than it wants cross-TU inlining.
+if(SPFY_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _spfy_ipo_ok OUTPUT _spfy_ipo_why)
+    if(_spfy_ipo_ok)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE        ON)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+        message(STATUS "spfy: LTO enabled for Release")
+    else()
+        message(STATUS "spfy: LTO unavailable — ${_spfy_ipo_why}")
+    endif()
 endif()
 
 # Apple's linker (Xcode 15+) warns "ignoring duplicate libraries" on nearly
@@ -131,6 +174,7 @@ add_subdirectory(src/cart)
 add_subdirectory(src/usel)
 add_subdirectory(src/wsola)
 add_subdirectory(src/dsp)
+add_subdirectory(src/prosody)
 add_subdirectory(src/g2p)
 add_subdirectory(src/text_norm)
 # Baked POS dictionary lives in src/fe/ but is needed by src/fe_internal/

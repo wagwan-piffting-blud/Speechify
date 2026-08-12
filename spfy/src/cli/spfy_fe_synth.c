@@ -1,20 +1,5 @@
-/* spfy_fe_synth -- run the full Path-B FE pipeline on text/SSML input,
- * dump the per-slot output for inspection.
- *
- * This is the M8 capstone for the FE. It exercises every stage of the
- * pipeline (M1..M7) and shows what would be fed to USel.
- *
- * NOTE on actual WAV output: producing engine-compatible audio requires
- * the Tom-voice-specific SAMPA-symbol -> phone-ID mapping, which is a
- * separate RE task (the voice's phone table). The current
- * stage_spr.c uses an approximate placeholder mapping. Once the
- * voice-side mapping is extracted, this CLI can be extended to feed
- * the FE slots into spfy_synth_replay's scoring + Viterbi + WSOLA
- * pipeline to produce WAV directly. For now, it dumps a JSON-shaped
- * report of each pipeline stage so you can verify the FE end-to-end.
- *
- *   spfy_fe_synth <vocab.json> <tables_a_dir> <tables_b_dir> [--ssml] "<text>"
- */
+/* spfy_fe_synth -- run the full Path-B FE pipeline on text/SSML input, dump
+ * the per-slot output for inspection. */
 
 #include "../fe/fe.h"
 #include "../fe/stage_morph.h"
@@ -82,7 +67,6 @@ int main(int argc, char **argv)
                 ps->n_phones, (unsigned)ps->silence_phone_id);
     }
 
-    /* Step 1: optionally parse SSML to (plain text, hints). */
     char *plain = NULL;
     spfy_prosody_hints_t hints;
     if (ssml_mode) {
@@ -97,7 +81,6 @@ int main(int argc, char **argv)
         spfy_prosody_hints_init(&hints);
     }
 
-    /* Step 2: run all FE stages. */
     spfy_fe_delta_t delta;
     rc = spfy_fe_textnorm_only(fe, text, &hints, &delta);
     if (rc == SPFY_OK) rc = spfy_fe_morph_run   (fe, text, &delta);
@@ -109,7 +92,6 @@ int main(int argc, char **argv)
         goto fail;
     }
 
-    /* Step 3a: ESPR text emission (Path B integration with engine). */
     if (espr_only) {
         char espr_buf[8192];
         size_t espr_n = 0;
@@ -122,10 +104,9 @@ int main(int argc, char **argv)
         fwrite(espr_buf, 1, espr_n, stdout);
         fputc('\n', stdout);
         rc = SPFY_OK;
-        goto fail_delta;        /* normal path; cleanup */
+        goto fail_delta;
     }
 
-    /* Step 3b: build the per-slot utterance struct. */
     spfy_fe_utterance_t utt = {0};
     rc = spfy_fe_spr_run(fe, &delta, &utt);
     if (rc != SPFY_OK) {
@@ -133,7 +114,6 @@ int main(int argc, char **argv)
         goto fail_delta;
     }
 
-    /* Step 4: report. */
     fprintf(stdout, "{\n");
     fprintf(stdout, "  \"input\": \"%s\",\n", text);
     fprintf(stdout, "  \"ssml\": %s,\n", ssml_mode ? "true" : "false");
@@ -146,7 +126,6 @@ int main(int argc, char **argv)
     }
     fprintf(stdout, "%s],\n", hints.n_hints ? "\n  " : "");
 
-    /* Per-stream counts. */
     uint32_t n_text = 0, n_word = 0, n_syl = 0, n_phon = 0, n_phrase = 0;
     spfy_fe_stream_tokens(&delta, SPFY_STREAM_TEXT,    &n_text);
     spfy_fe_stream_tokens(&delta, SPFY_STREAM_WORD,    &n_word);
@@ -159,7 +138,6 @@ int main(int argc, char **argv)
                     "  },\n",
             n_text, n_word, n_syl, n_phon, n_phrase);
 
-    /* Phoneme summary by word. */
     fprintf(stdout, "  \"phonemes_by_word\": [\n");
     const spfy_fe_token_t *xph =
         spfy_fe_stream_tokens(&delta, SPFY_STREAM_PHONEME, &n_phon);
@@ -184,10 +162,9 @@ int main(int argc, char **argv)
     }
     fprintf(stdout, "  ],\n");
 
-    /* Slot summary. */
     fprintf(stdout, "  \"slots\": {\"count\": %u, \"first\": [\n",
             utt.n_slots);
-    uint32_t show = utt.n_slots;   /* dump every slot for full-coverage diff */
+    uint32_t show = utt.n_slots;
     for (uint32_t i = 0; i < show; ++i) {
         const spfy_fe_slot_t *s = &utt.slots[i];
         fprintf(stdout,

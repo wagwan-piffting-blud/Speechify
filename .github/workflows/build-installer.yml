@@ -154,6 +154,13 @@ jobs:
       # Build the 32-bit project (CMake + Ninja, mingw32 toolchain)
       # --------------------------------------------------------------
 
+      # SPFY_STRICT_FP is no longer forced OFF here. It used to be, which meant
+      # the SHIPPED Windows binary had less FP pinning than any local build
+      # (build32.bat leaves it ON) — a real divergence for a project whose
+      # claim is byte-exactness. The costly part of that flag set was only
+      # -ffloat-store, and SPFY_FLOAT_STORE now defaults OFF on its own, so
+      # this leg keeps -fexcess-precision=standard / -mno-fma / -fno-fast-math
+      # AND is faster than the old configuration.
       - name: Configure 32-bit
         shell: msys2 {0}
         run: |
@@ -166,7 +173,6 @@ jobs:
             -DCMAKE_MAKE_PROGRAM=/mingw64/bin/ninja.exe \
             -DCMAKE_C_COMPILER=/mingw32/bin/gcc.exe \
             -DCMAKE_BUILD_TYPE=Release \
-            -DSPFY_STRICT_FP=OFF \
             -DSPFY_BUILD_TESTS=OFF \
             -DSPFY_FE_HOSTED=ON
 
@@ -424,13 +430,27 @@ jobs:
           VERSION="${{ needs.setup.outputs.version }}"
           PKG="spfy-${{ matrix.id }}-${VERSION}"
           STAGE="${RUNNER_TEMP}/spfy-stage/${PKG}"
-          mkdir -p "${STAGE}/bin" "${STAGE}/spfy/data" "${STAGE}/spfy/build"
+          mkdir -p "${STAGE}/bin" "${STAGE}/en-US/tom"
           cp build-out/src/cli/spfy_synth          "${STAGE}/bin/"
-          cp spfy/data/tom_hpclass.bin             "${STAGE}/spfy/data/"
-          cp -r spfy/data/fe_tables                "${STAGE}/spfy/data/"
-          cp -r spfy/data/fe_tables_a              "${STAGE}/spfy/data/"
-          cp spfy/build/fe_symbol_table.json       "${STAGE}/spfy/build/"
-          cp spfy/README.md                        "${STAGE}/" || true
+          # No spfy/data or spfy/build in the tarball any more. spfy_synth
+          # carries fe_symbol_table.json + fe_tables_a + fe_tables embedded
+          # (src/cli/CMakeLists.txt) and extracts them to a tempdir on first
+          # run, so the loose copies were ~1.7 MB of duplication in every one
+          # of six tarballs. tom_hpclass.bin is gone for a different reason:
+          # hpclass is passed NULL and derived per-voice from the VIN.
+          # ⚠ This makes the 9-positional legacy CLI form unusable from the
+          # tarball alone; the short form is the documented one.
+          cp SPFY_README.md                        "${STAGE}/" || true
+          cp SPEECHIFY_4_FINDINGS.md               "${STAGE}/" || true
+          # Pitch marks for Speechify 4 mode (spfy_synth --s4). Analysis
+          # metadata measured from the audio, not voice data, so these ship
+          # while the VIN/VDB/VCF do not. They go in the voice folder because
+          # the stem is derived from the VDB path (tom8.vdb -> tom8): the user
+          # drops tom's trio in beside them and --s4 works with no further
+          # setup. No `|| true` — `set -eu` is in force above and a tarball
+          # whose --s4 silently does nothing is worse than a failed leg.
+          cp en-US/tom/tom8.pmindex                "${STAGE}/en-US/tom/"
+          cp en-US/tom/tom8.pmdata                 "${STAGE}/en-US/tom/"
           # Path layout inside the tarball mirrors the args spfy_synth
           # expects, so users can extract and run from the package root.
           mkdir -p installer/dist

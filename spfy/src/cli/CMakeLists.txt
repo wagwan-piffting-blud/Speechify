@@ -107,6 +107,27 @@ target_link_libraries(spfy_hp_score_test PRIVATE spfy_usel spfy_voice spfy_commo
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(EMBED_OUT_C "${CMAKE_CURRENT_BINARY_DIR}/embedded_assets.c")
 set(EMBED_OUT_H "${CMAKE_CURRENT_BINARY_DIR}/embedded_assets.h")
+
+# ⚠ The .bin files themselves MUST be dependencies. They were not, and the
+# generated blob is what the whole FE runs on: with only embed_assets.py and
+# fe_symbol_table.json listed, restoring 728 deleted table files left ninja
+# convinced the blob was current and it happily linked an EMPTY one. The
+# failure was loud here (zero-size array), but a partial change would have
+# been silent and would have altered every render.
+#
+# CONFIGURE_DEPENDS re-globs when the directory contents change, so adding or
+# removing a table is picked up without a manual re-configure.
+file(GLOB SPFY_FE_TABLE_FILES CONFIGURE_DEPENDS
+     "${CMAKE_SOURCE_DIR}/data/fe_tables/*.bin"
+     "${CMAKE_SOURCE_DIR}/data/fe_tables_a/*.bin")
+list(LENGTH SPFY_FE_TABLE_FILES _spfy_n_fe_tables)
+if(_spfy_n_fe_tables LESS 700)
+    message(FATAL_ERROR
+        "spfy: only ${_spfy_n_fe_tables} FE table .bin files found under "
+        "data/fe_tables{,_a} — expected ~728. The embedded blob would be "
+        "built from an incomplete set and every render would be wrong. "
+        "Restore them (they are tracked in git) before building.")
+endif()
 add_custom_command(
     OUTPUT  "${EMBED_OUT_C}" "${EMBED_OUT_H}"
     COMMAND "${Python3_EXECUTABLE}"
@@ -118,7 +139,17 @@ add_custom_command(
             --out-h    "${EMBED_OUT_H}"
     DEPENDS "${CMAKE_SOURCE_DIR}/tools/embed_assets.py"
             "${CMAKE_SOURCE_DIR}/build/fe_symbol_table.json"
+            ${SPFY_FE_TABLE_FILES}
     COMMENT "Embedding fe_symbol_table + fe_tables into spfy_synth")
+
+# Wrapped in a library rather than compiled into each consumer, because
+# src/sapi needs it too: a CMake add_custom_command OUTPUT can only be
+# consumed by targets in the SAME directory, so spfy_sapi cannot name
+# ${EMBED_OUT_C} directly. PUBLIC include dir so consumers get the generated
+# embedded_assets.h without repeating the path.
+add_library(spfy_embedded_assets STATIC "${EMBED_OUT_C}")
+target_include_directories(spfy_embedded_assets
+    PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 
 add_executable(spfy_synth spfy_synth.c "${EMBED_OUT_C}")
 target_include_directories(spfy_synth
@@ -130,10 +161,11 @@ target_include_directories(spfy_synth
             ${CMAKE_SOURCE_DIR}/src/fe_host
             ${CMAKE_SOURCE_DIR}/src/fe_internal
             ${CMAKE_SOURCE_DIR}/src/cart
+            ${CMAKE_SOURCE_DIR}/src/dsp      # SPFY_SPFY4_F0_FLATTEN post-process
             ${CMAKE_CURRENT_BINARY_DIR}      # for generated embedded_assets.h
 )
 target_link_libraries(spfy_synth
-    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_common)
+    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common)
 
 # Live-trace fork of spfy_synth: the SAME engine source compiled with
 # -DSPFY_TRACE=1, so the spfy_trace_eventf() instrumentation in spfy_synth.c
@@ -153,10 +185,11 @@ target_include_directories(spfy_synth_trace
             ${CMAKE_SOURCE_DIR}/src/fe_host
             ${CMAKE_SOURCE_DIR}/src/fe_internal
             ${CMAKE_SOURCE_DIR}/src/cart
+            ${CMAKE_SOURCE_DIR}/src/dsp
             ${CMAKE_CURRENT_BINARY_DIR}      # for generated embedded_assets.h
 )
 target_link_libraries(spfy_synth_trace
-    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_common)
+    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common)
 
 # A/B test tool for the TD-PSOLA pitch shifter (used to tune quality
 # before wiring into the SAPI shim's <prosody pitch=...> path).
@@ -169,6 +202,13 @@ add_executable(spfy_time_stretch spfy_time_stretch.c)
 target_include_directories(spfy_time_stretch
     PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
 target_link_libraries(spfy_time_stretch PRIVATE spfy_dsp)
+
+# A/B tester for the TD-PSOLA F0 retarget (Speechify-4 contour flattening;
+# see reveng/spfy4/15_psola_probe.md). Post-processes rendered PCM.
+add_executable(spfy_f0_flatten spfy_f0_flatten.c)
+target_include_directories(spfy_f0_flatten
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
+target_link_libraries(spfy_f0_flatten PRIVATE spfy_dsp)
 
 # G2P module smoke test — CMU dict ARPAbet lookup. Foundation of the
 # in-house FE that replaces SWIttsFe-en-US.dll on ARM targets.
@@ -242,3 +282,8 @@ target_include_directories(spfy_fe_synth
 )
 target_link_libraries(spfy_fe_synth PRIVATE spfy_fe_handwritten spfy_voice spfy_common)
 endif()
+
+# Gate tests for the prosody stage (reveng/spfy4/PLAN_PROSODY_STAGE.md).
+# The identity check here is what the whole stage rests on.
+add_executable(spfy_prosody_test spfy_prosody_test.c)
+target_link_libraries(spfy_prosody_test PRIVATE spfy_prosody spfy_common)

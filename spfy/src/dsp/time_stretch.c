@@ -1,14 +1,4 @@
-/* WSOLA time-stretch. See time_stretch.h for the high-level contract.
- *
- * Constants tuned for the engine's native 8 kHz 16-bit mono output:
- *
- *   frame_len = 256 samples (32 ms)  — long enough for one period of
- *                                       even the deepest male voiced
- *                                       speech (~50 Hz F0).
- *   hop_len   = 64 samples (8 ms)    — gives Hann COLA at OLA factor 4.
- *   search_n  = 50 samples           — +-6 ms window for NCC alignment.
- *
- * For other sample rates we proportionally scale. */
+/* WSOLA time-stretch. */
 
 #include "time_stretch.h"
 
@@ -23,7 +13,7 @@
 #define TS_FRAME_LEN   256
 #define TS_HOP         64
 #define TS_SEARCH      50
-#define TS_HOP_OUT     TS_HOP    /* output advance per frame is fixed */
+#define TS_HOP_OUT     TS_HOP
 
 static float *hann_window(int n)
 {
@@ -36,9 +26,7 @@ static float *hann_window(int n)
     return w;
 }
 
-/* Normalised cross-correlation between two short windows. Used to find
- * the input offset (within +- search) whose first `tail_n` samples
- * align best with the previous output frame's tail. */
+/* Normalised cross-correlation between two short windows. */
 static int best_align(const int16_t *in, int n_in, int center,
                       const int16_t *tail, int tail_n, int search)
 {
@@ -70,7 +58,6 @@ int spfy_time_stretch_block(const int16_t *in, size_t n_in,
     if (factor < 0.25f) factor = 0.25f;
     if (factor > 4.0f)  factor = 4.0f;
 
-    /* Pass-through fast path. */
     if (fabsf(factor - 1.0f) < 0.001f) {
         int16_t *cp = (int16_t *)malloc(n_in * sizeof(int16_t));
         if (!cp) return -1;
@@ -84,7 +71,6 @@ int spfy_time_stretch_block(const int16_t *in, size_t n_in,
     int search    = TS_SEARCH;
     if (hop_in < 1) hop_in = 1;
 
-    /* Scale to non-8 kHz rates. */
     float sr_scale = (float)sample_rate / 8000.0f;
     frame_len = (int)((float)frame_len * sr_scale + 0.5f);
     hop_in    = (int)((float)hop_in    * sr_scale + 0.5f);
@@ -106,7 +92,6 @@ int spfy_time_stretch_block(const int16_t *in, size_t n_in,
         return -1;
     }
 
-    /* First frame: copy from start without alignment search. */
     int in_pos = 0;
     int out_pos = 0;
     for (int i = 0; i < frame_len; ++i) {
@@ -116,9 +101,9 @@ int spfy_time_stretch_block(const int16_t *in, size_t n_in,
         acc[out_pos + i] += (double)in[in_pos + i] * w;
         wgt[out_pos + i] += w;
     }
-    /* Tail of previous synthesis frame, used to align the next input
-     * frame: last (frame_len - hop_out) samples of the output frame
-     * we just laid down. */
+    /* Tail of previous synthesis frame, used to align the next input frame:
+     * last (frame_len - hop_out) samples of the output frame we just laid
+     * down. */
     int tail_n = frame_len - hop_out;
     for (int i = 0; i < tail_n; ++i) {
         tail[i] = in[in_pos + hop_out + i];
@@ -128,7 +113,6 @@ int spfy_time_stretch_block(const int16_t *in, size_t n_in,
 
     while (in_pos + frame_len < (int)n_in
            && (size_t)(out_pos + frame_len) < out_cap) {
-        /* Search around `in_pos` for the best alignment with `tail`. */
         int aligned = best_align(in, (int)n_in, in_pos, tail, tail_n, search);
         for (int i = 0; i < frame_len; ++i) {
             double w = (double)win[i];
@@ -142,7 +126,6 @@ int spfy_time_stretch_block(const int16_t *in, size_t n_in,
         in_pos  += hop_in;
     }
 
-    /* Normalize. */
     size_t real_out_n = (size_t)out_pos;
     int16_t *o = (int16_t *)malloc(real_out_n * sizeof(int16_t));
     if (!o) {

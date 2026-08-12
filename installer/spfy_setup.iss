@@ -20,6 +20,10 @@
 ; auto-scan picks them up at registration time (re-run regsvr32 after
 ; adding a voice to refresh the token list).
 ;
+; Tom's PITCH MARKS (tom8.pmindex / tom8.pmdata) ARE bundled — see the
+; [Files] note. They are measured metadata, not voice data, and Speechify 4
+; mode does not start without them.
+;
 ; Build:  iscc spfy_setup.iss
 ; Override paths: iscc /DBuildDir=C:\tmp\spfy_build32 /DSourceRoot=..  spfy_setup.iss
 
@@ -40,17 +44,17 @@
 ; is the strict X.X.X.X numeric form required by VersionInfoVersion
 ; (PE VersionInfo resource); CI passes YYYY.MM.DD.<run_number>.
 #ifndef SpfyVersion
-#define SpfyVersion "0.0.0"
+#define SpfyVersion "1.0.0"
 #endif
 
 #ifndef SpfyVersionInfo
-#define SpfyVersionInfo "0.0.0.0"
+#define SpfyVersionInfo "1.0.0.0"
 #endif
 
 #define MyAppName       "Speechify (spfy)"
 #define MyAppShortName  "spfy"
 #define MyAppPublisher  "Speechify Open-Source Reimplementation"
-#define MyAppURL        "https://github.com/wagwan-piffting-blud/Speechify_EAS_Listener"
+#define MyAppURL        "https://github.com/wagwan-piffting-blud/Speechify"
 #define MyAppExeName    "spfy_synth.exe"
 
 ; ---------------------------------------------------------------------
@@ -92,6 +96,18 @@ PrivilegesRequired=admin
 ; spfy_sapi.dll's get_project_root() uses the same call at runtime,
 ; so the user-time and install-time paths match. Silence Inno's
 ; preflight warning about this mix.
+;
+; ⚠ {userdocs}\Speechify MAY BE A SOURCE CHECKOUT. It is on the maintainer's
+; machine, where the repository root and the installer's per-user data
+; directory are literally the same path. An uninstall has already destroyed
+; tracked files there once, because Inno removes everything it installed and
+; an earlier revision of this script installed fe_symbol_table.json and 728
+; fe_tables\*.bin into that tree.
+;
+; So the standing rule for this script: {app} is ours to manage, {userdocs}
+; is not. Every [Files] entry targeting {userdocs} carries
+; `onlyifdoesntexist uninsneveruninstall`, and [UninstallDelete] must never
+; name a path under {userdocs}.
 UsedUserAreasWarning=no
 
 OutputBaseFilename=spfy-setup-{#SpfyVersion}
@@ -173,17 +189,71 @@ Source: "refresh_voices.bat"; DestDir: "{app}"; Flags: ignoreversion
 ; compile time, this entry ships it for runtime references.
 Source: "spfy.ico"; DestDir: "{app}"; Flags: ignoreversion
 
-; --- Shared FE data → %USERPROFILE%\Documents\Speechify\spfy\ ---
-; This layout matches what spfy_sapi.c::get_project_root expects.
-; Per-user (not per-machine) so each Windows user gets their own copy;
-; matches the en-US\<voice>\ layout that's also per-user.
-Source: "{#SourceRoot}\spfy\data\tom_hpclass.bin"; DestDir: "{userdocs}\Speechify\spfy\data"; Flags: ignoreversion
-Source: "{#SourceRoot}\spfy\data\fe_tables_a\*";   DestDir: "{userdocs}\Speechify\spfy\data\fe_tables_a"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceRoot}\spfy\data\fe_tables\*";     DestDir: "{userdocs}\Speechify\spfy\data\fe_tables";   Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceRoot}\spfy\build\fe_symbol_table.json"; DestDir: "{userdocs}\Speechify\spfy\build"; Flags: ignoreversion
+; --- NO shared FE data any more ---
+;
+; This installer used to lay out %USERPROFILE%\Documents\Speechify\spfy\
+; with fe_symbol_table.json + fe_tables_a + fe_tables, because
+; spfy_sapi.dll built literal paths to them. It no longer does: the DLL
+; links spfy_embedded_assets (the same blob spfy_synth.exe has carried all
+; along) and extracts to %TEMP%\spfy_assets_<dll-mtime> on first voice load.
+;
+; That removes a whole class of breakage — a relocated Documents folder, a
+; second Windows account, or a partial uninstall used to kill every SAPI
+; voice while the CLI carried on working, because only the DLL depended on
+; the on-disk copy.
+;
+; Verified before this was deleted, not after: with all three RENAMED AWAY on
+; disk, a 32-bit SAPI client selected "Speechify - tom" and produced a
+; 72,918-byte WAV, and 728 files appeared under %TEMP%\spfy_assets_*. The DLL
+; keeps an on-disk fallback for existing installs, so the rename is what
+; proved the embedded path was the one being used.
+;
+; tom_hpclass.bin is gone too: hpclass is passed NULL on both the SAPI path
+; and the CLI short form, so it is derived per-voice from the VIN. Its only
+; readers are spfy_dump_voice --hpclass, spfy_anchor_replay and
+; spfy_hp_score_test — none of which this installer ships.
+
+; --- Pitch marks → the voice folder ---
+; Needed only by Speechify 4 mode (spfy_synth --s4 / SPFY_4_MODE=1), which
+; retargets F0 by TD-PSOLA and cannot start without them. They are ANALYSIS
+; METADATA measured from the audio — periods in samples, one run per unit —
+; not voice data, which is why they ship here while the VIN/VDB/VCF do not.
+;
+; They land in the voice folder because the pitch-mark stem is derived from
+; the VDB path (tom8.vdb -> tom8), so they must sit beside it. Installing
+; them before the user has dropped the voice in is fine and deliberate: the
+; folder is created either way, and the marks are simply waiting when the
+; voice arrives. CountVoiceDirs still needs the .vin/8.vdb/.vcf trio, so a
+; folder holding only marks is correctly NOT counted as a voice.
+;
+; NO skipifsourcedoesntexist, deliberately: if these are missing the compile
+; must fail loudly. Shipping an installer whose --s4 silently does nothing is
+; worse than not shipping one.
+; ⚠ FLAGS ARE LOAD-BEARING. Read before changing either line.
+;
+; onlyifdoesntexist  — never overwrite a file already sitting there. These
+;   land in the USER'S OWN data folder, which may be a working copy of this
+;   repository (it is on the maintainer's machine: {userdocs}\Speechify IS
+;   the checkout). Clobbering a newer, locally regenerated set of pitch marks
+;   with the ones frozen into the installer would be silent and unrecoverable
+;   without a backup.
+;
+; uninsneveruninstall — never DELETE them on uninstall. Inno removes whatever
+;   it installed, and that is exactly how an uninstall wiped tracked files out
+;   of the working tree: an earlier build of this script also installed
+;   fe_symbol_table.json and 728 fe_tables\*.bin under {userdocs}, so removing
+;   the program removed source files too. The build then linked an EMPTY asset
+;   blob.
+;
+; RULE FOR ANYTHING ADDED HERE LATER: inside {app} the installer owns the
+; files and may delete them freely. Inside {userdocs} it is a GUEST — install
+; only what is missing, and never take anything away.
+Source: "{#SourceRoot}\en-US\tom\tom8.pmindex"; DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceRoot}\en-US\tom\tom8.pmdata";  DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
 
 ; --- Documentation (best-effort, not all repos will have these) ---
-Source: "{#SourceRoot}\spfy\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SourceRoot}\SPFY_README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#SourceRoot}\SPEECHIFY_4_FINDINGS.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; ---------------------------------------------------------------------
 ; [Icons] — Start Menu group
@@ -198,7 +268,7 @@ Name: "{group}\Refresh SAPI Voices"; Filename: "{app}\refresh_voices.bat"; \
   WorkingDir: "{app}"; IconFilename: "{sys}\shell32.dll"; IconIndex: 238
 Name: "{group}\Open Voices Folder"; Filename: "{userdocs}\Speechify\en-US"; \
   IconFilename: "{sys}\shell32.dll"; IconIndex: 4
-Name: "{group}\Documentation"; Filename: "{app}\README.md"
+Name: "{group}\Documentation"; Filename: "{app}\SPFY_README.md"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 ; ---------------------------------------------------------------------
@@ -214,6 +284,18 @@ Filename: "{syswow64}\regsvr32.exe"; \
   Parameters: "/s ""{app}\spfy_sapi.dll"""; \
   StatusMsg: "Registering SAPI voice DLL..."; \
   Flags: runascurrentuser waituntilterminated
+
+; ---------------------------------------------------------------------
+; [UninstallRun] — pre-uninstall actions
+; ---------------------------------------------------------------------
+
+[UninstallDelete]
+; DllRegisterServer extracts the FE tables to {app}\fe_assets during the
+; elevated post-install regsvr32. Inno only removes what it installed, so
+; without this the directory (~730 files) is orphaned on uninstall.
+; Wildcard: the directory name carries a content digest (fe_assets_<hex>), so
+; an upgrade that changes the FE tables leaves the previous one behind too.
+Type: filesandordirs; Name: "{app}\fe_assets_*"
 
 ; ---------------------------------------------------------------------
 ; [UninstallRun] — pre-uninstall actions
@@ -297,7 +379,7 @@ begin
         and offer to open the folder. }
       Msg :=
         'Speechify is installed, but no SAPI voices have been registered yet.' + #13#10 + #13#10 +
-        'SAPI voices need the raw SpeechWorks voice data (VIN/VDB/VCF), which is NOT bundled. You can find the voices in the GitHub repo or at https://archive.org/details/SpeechifyTom.' + #13#10 + #13#10 +
+        'SAPI voices need the raw SpeechWorks voice data (VIN/VDB/VCF), which is NOT bundled. You can find the voices in the GitHub repo (https://github.com/wagwan-piffting-blud/Speechify) or at Internet Archive (https://archive.org/details/SpeechifyTom).' + #13#10 + #13#10 +
         'To finish setup:' + #13#10 +
         '  1. Drop each voice folder into:' + #13#10 +
         '       ' + VoicesDir + #13#10 +

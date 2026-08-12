@@ -1,12 +1,4 @@
-/* spfy_pitch_shift — standalone A/B tester for the TD-PSOLA pitch
- * shifter. Reads a minimal RIFF/WAVE int16 mono file, applies a
- * `semitones` shift, writes the result back as the same format.
- *
- *   spfy_pitch_shift <in.wav> <semitones> <out.wav>
- *
- * Used to listen-test pitch shift quality before wiring the DSP into
- * the SAPI shim. Does NOT touch the synth pipeline — operates purely
- * on rendered PCM. */
+/* spfy_pitch_shift — standalone A/B tester for the TD-PSOLA pitch shifter. */
 
 #include "pitch_shift.h"
 
@@ -15,8 +7,7 @@
 #include <string.h>
 #include <stdint.h>
 
-/* Minimal RIFF/WAVE reader for the format we ship (int16 mono PCM).
- * Returns 0 on success. *out is malloc'd PCM samples; caller free()s. */
+/* Minimal RIFF/WAVE reader for the format we ship (int16 mono PCM). */
 static int read_wav(const char *path, int16_t **out, size_t *n_samples,
                     uint32_t *sample_rate)
 {
@@ -32,7 +23,6 @@ static int read_wav(const char *path, int16_t **out, size_t *n_samples,
                  | ((uint32_t)hdr[25] << 8)
                  | ((uint32_t)hdr[26] << 16)
                  | ((uint32_t)hdr[27] << 24);
-    /* Find 'data' chunk — naive linear scan from offset 36. */
     long data_off = -1;
     uint32_t data_sz = 0;
     fseek(f, 12, SEEK_SET);
@@ -61,7 +51,6 @@ static int read_wav(const char *path, int16_t **out, size_t *n_samples,
     return 0;
 }
 
-/* Tiny RIFF/WAVE int16 mono writer mirroring spfy_wav.c's header format. */
 static int write_wav(const char *path, const int16_t *samples,
                      size_t n_samples, uint32_t sample_rate)
 {
@@ -77,8 +66,8 @@ static int write_wav(const char *path, const int16_t *samples,
     hdr[7]  = (uint8_t)((riff_sz >> 24) & 0xFF);
     memcpy(hdr + 8, "WAVEfmt ", 8);
     hdr[16] = 16; hdr[17] = hdr[18] = hdr[19] = 0;
-    hdr[20] = 1; hdr[21] = 0;       /* PCM */
-    hdr[22] = 1; hdr[23] = 0;       /* mono */
+    hdr[20] = 1; hdr[21] = 0;
+    hdr[22] = 1; hdr[23] = 0;
     hdr[24] = (uint8_t)(sample_rate & 0xFF);
     hdr[25] = (uint8_t)((sample_rate >> 8) & 0xFF);
     hdr[26] = (uint8_t)((sample_rate >> 16) & 0xFF);

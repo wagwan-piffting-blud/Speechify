@@ -1,4 +1,3 @@
-/* Public API surface for voice loading + introspection. */
 
 #include "voice.h"
 #include "unit_table.h"

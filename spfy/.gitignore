@@ -11,3 +11,4 @@ t*.bin
 !data/**
 !build/**
 needs_implementing/
+data/fe_tables_dir/**

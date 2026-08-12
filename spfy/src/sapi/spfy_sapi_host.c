@@ -1,16 +1,5 @@
 /* spfy_sapi_host.exe — 32-bit out-of-process COM server for the Speechify
- * SAPI engine. Exposes the same CLSID_SpfyTTSEngine class factory as
- * spfy_sapi.dll, but as a LocalServer32 so 64-bit SAPI clients can talk
- * to it via cross-bitness COM marshaling.
- *
- * Lifecycle: COM launches us when a client calls CoCreateInstance with
- * CLSCTX_LOCAL_SERVER. We register the factory via CoRegisterClassObject
- * (REGCLS_MULTIPLEUSE | REGCLS_SUSPENDED), pump messages until all
- * outstanding refcounts drop, then exit.
- *
- * The class-factory implementation, COM object, and SpfyEngineImpl live
- * in spfy_sapi.c — we link against the same .obj so there's exactly one
- * place where the synth logic is defined. */
+ * SAPI engine. */
 
 #define INITGUID 1
 #include "sapiddk_min.h"
@@ -19,19 +8,13 @@
 
 extern IClassFactory *spfy_sapi_get_factory(void);
 
-/* Symbol forwarding hooks defined in spfy_sapi.c. They're identical to
- * the file-internal ones — we just need an extern accessor so the EXE
- * can grab the same singleton without re-declaring it. */
-extern HMODULE g_hModule;       /* spfy_sapi.c globals reused */
+/* Symbol forwarding hooks defined in spfy_sapi.c. */
+extern HMODULE g_hModule;
 
 static volatile LONG g_keep_alive = 1;
 
-/* Watchdog: periodically check whether any clients still hold refs. If
- * the factory's lock count has dropped to zero AND no engine instances
- * remain, post WM_QUIT so the message loop exits. COM normally drives
- * this via CoSuspendClassObjects + revoke when DllCanUnloadNow is true,
- * but for a local server we do it ourselves. */
-extern LONG g_dll_refs;         /* live count of factory+engine refs */
+/* Watchdog: periodically check whether any clients still hold refs. */
+extern LONG g_dll_refs;
 
 static DWORD WINAPI watchdog_thread(LPVOID p)
 {
@@ -72,9 +55,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show)
         return 1;
     }
 
-    /* Reference-counting message loop. Cross-bitness clients keep the
-     * factory locked via LockServer + AddRef on the engine; when both
-     * hit zero we exit. The watchdog posts WM_QUIT. */
+    /* Reference-counting message loop. */
     DWORD tid = GetCurrentThreadId();
     HANDLE wd = CreateThread(NULL, 0, watchdog_thread, NULL, 0, NULL);
     (void)tid; (void)wd;

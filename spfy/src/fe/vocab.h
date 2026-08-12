@@ -26,44 +26,31 @@
 #define SPFY_FE_VOCAB_MAX_LEN  64
 
 typedef struct {
-    /* Display name (NUL-terminated). May be NULL for non-ASCII raw
-     * byte slots that don't have a printable representation; in that
-     * case the caller can fall back to the raw byte stored at .raw_byte
-     * (used for accented Latin-1 chars). */
+    /* Display name (NUL-terminated). */
     const char *name;
 
     /* For symbol IDs whose vocabulary entry is a single non-ASCII byte
      * (Latin-1 accented chars, Western symbols), this holds the raw
-     * code-point so we can convert input bytes back to symbol IDs. 0
-     * for entries where the name is the canonical form. */
+     * code-point so we can convert input bytes back to symbol IDs. */
     uint8_t     raw_byte;
 } spfy_fe_symbol_t;
 
 typedef struct {
     spfy_fe_symbol_t entries[SPFY_FE_VOCAB_N];
-    uint32_t         n;             /* always 469 after load */
-    /* Reverse lookup: input byte -> symbol ID. For each byte value
-     * 0..255, holds the vocab index whose .name is exactly that 1-char
-     * string. UINT16_MAX = no mapping. Built at load time so the
-     * text-norm stage can convert raw input bytes to symbol IDs in
-     * O(1). Latin-1 / extended bytes (97-209 in vocab) need a
-     * separate population path -- those names are NULL in the JSON
-     * dump, so for now they fall through to UINT16_MAX and are
-     * treated as unrecognised by the text stage. */
+    uint32_t         n;
+    /* Reverse lookup: input byte -> symbol ID. */
     uint16_t         byte_to_id[256];
 } spfy_fe_vocab_t;
 
-/* Load 469-entry vocabulary from the JSON file produced by
- * fe_symbol_table extraction. */
+/* Load 469-entry vocabulary from the JSON file produced by fe_symbol_table
+ * extraction. */
 int  spfy_fe_vocab_load(const char *json_path, spfy_fe_vocab_t *out);
 
 void spfy_fe_vocab_free(spfy_fe_vocab_t *v);
 
-/* O(1) lookup: id -> name (NULL if id is OOR). */
 const char *spfy_fe_vocab_name(const spfy_fe_vocab_t *v, uint32_t id);
 
-/* Linear lookup: name -> id, or 0xFFFFFFFF if not found. Cache the
- * result in callers; this is not a hot path. */
+/* Linear lookup: name -> id, or 0xFFFFFFFF if not found. */
 uint32_t    spfy_fe_vocab_id(const spfy_fe_vocab_t *v, const char *name);
 
 /* Predefined symbol-ID constants for stable references (a few of the

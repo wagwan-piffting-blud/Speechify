@@ -1,9 +1,5 @@
 /* spfy_fe_text2tagged — dump the in-house FE's tagged-text output for
- * arbitrary input text. Compares against the SpeechWorks DLL's
- * spfy_fe_synth_text() format and feeds parse_fe_output_into_slots().
- *
- *   spfy_fe_text2tagged "Hello world."
- *   echo "Hello world." | spfy_fe_text2tagged --pipe */
+ * arbitrary input text. */
 
 #include "fe_internal.h"
 
@@ -13,8 +9,8 @@
 
 static void dump_one(const char *text)
 {
-    /* Long-passage safe (the sioux pangram in the audit corpus runs
-     * ~30 KB tagged). Match the buffer size spfy_synth.c uses. */
+    /* Long-passage safe (the sioux pangram in the audit corpus runs ~30 KB
+     * tagged). */
     static char buf[65536];
     int rc = spfy_fe_internal_text_to_tagged(text, buf, sizeof buf);
     if (rc < 0) { fprintf(stderr, "rc=%d\n", rc); return; }

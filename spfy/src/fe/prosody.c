@@ -1,4 +1,3 @@
-/* Prosody hints + minimal SSML parser stub. */
 
 #include "prosody.h"
 
@@ -81,24 +80,7 @@ int spfy_prosody_break(spfy_prosody_hints_t *h,
     return spfy_prosody_hints_add(h, hint);
 }
 
-/* SSML parsing.
- *
- * Single-pass walk over the input, copying non-tag chars to the output
- * buffer and tracking byte offsets within OUTPUT (not source). When we
- * hit `<`, parse the tag:
- *
- *   <emphasis level="strong|moderate|reduced|none">..</emphasis>
- *   <prosody pitch="+5st|x-low|low|medium|high" rate="+10%|slow|fast">..</prosody>
- *   <break time="500ms"/>     (self-closing, point-event)
- *   <phoneme ph="..." alphabet="SPR">..</phoneme>     (overrides pronunciation)
- *
- * Container tags push an "open record" onto a small stack; the
- * matching `</tag>` pops and emits the final hint with byte_end =
- * current output offset.
- *
- * Unknown tags are stripped silently (text inside them is kept).
- * Quoted attribute values support both `"..."` and `'...'`.
- */
+/* SSML parsing. */
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -106,10 +88,10 @@ int spfy_prosody_break(spfy_prosody_hints_t *h,
 #define SSML_STACK_MAX 16
 
 typedef struct {
-    const char *tag_name;       /* "emphasis"/"prosody"/etc */
+    const char *tag_name;
     uint8_t     tag_len;
-    uint32_t    byte_start;     /* output byte offset when tag opened */
-    spfy_prosody_hint_t pending; /* fields filled when </tag> is hit */
+    uint32_t    byte_start;
+    spfy_prosody_hint_t pending;
 } ssml_open_t;
 
 static int sn_streq_ci(const char *a, const char *b, size_t n)
@@ -122,9 +104,7 @@ static int sn_streq_ci(const char *a, const char *b, size_t n)
     return 1;
 }
 
-/* Parse `attr="value"` form starting at *p (just past '<tag '). On
- * success, *p advances past the closing quote. Returns 1 on found,
- * 0 if no attribute at this position. */
+/* Parse `attr="value"` form starting at *p (just past '<tag '). */
 static int parse_attr(const char **p, const char *end,
                        char *name_out, size_t name_cap,
                        char *val_out,  size_t val_cap)
@@ -133,14 +113,12 @@ static int parse_attr(const char **p, const char *end,
     while (q < end && (*q == ' ' || *q == '\t')) ++q;
     if (q >= end || *q == '>' || *q == '/') return 0;
 
-    /* Read name. */
     const char *name_s = q;
     while (q < end && *q != '=' && *q != ' ' && *q != '/' && *q != '>') ++q;
     size_t nl = (size_t)(q - name_s);
     if (nl == 0 || nl + 1 >= name_cap) return 0;
     memcpy(name_out, name_s, nl); name_out[nl] = 0;
 
-    /* Optional `=value`. */
     if (q < end && *q == '=') {
         ++q;
         char quote = (q < end) ? *q : 0;
@@ -151,9 +129,8 @@ static int parse_attr(const char **p, const char *end,
             size_t vl = (size_t)(q - val_s);
             if (vl + 1 >= val_cap) return 0;
             memcpy(val_out, val_s, vl); val_out[vl] = 0;
-            if (q < end) ++q;     /* skip closing quote */
+            if (q < end) ++q;
         } else {
-            /* Unquoted value -- read until space/>. */
             const char *val_s = q;
             while (q < end && *q != ' ' && *q != '/' && *q != '>') ++q;
             size_t vl = (size_t)(q - val_s);
@@ -167,8 +144,7 @@ static int parse_attr(const char **p, const char *end,
     return 1;
 }
 
-/* Map emphasis level word to enum. Returns SPFY_EMPH_NONE for empty/
- * unknown. */
+/* Map emphasis level word to enum. */
 static spfy_emphasis_t emph_from_str(const char *s)
 {
     if (sn_streq_ci(s, "strong",   strlen("strong"))   && strlen(s) == 6)
@@ -180,7 +156,6 @@ static spfy_emphasis_t emph_from_str(const char *s)
     return SPFY_EMPH_NONE;
 }
 
-/* Parse a pitch expression like "+5st" / "-3st" / "high" / "low". */
 static int8_t pitch_from_str(const char *s)
 {
     if (!s || !*s) return 0;
@@ -189,7 +164,6 @@ static int8_t pitch_from_str(const char *s)
     if (sn_streq_ci(s, "medium", 6) && strlen(s) == 6) return  0;
     if (sn_streq_ci(s, "high",   4) && strlen(s) == 4) return  4;
     if (sn_streq_ci(s, "x-high", 6) && strlen(s) == 6) return  8;
-    /* Numeric "+Nst" / "-Nst" / "Nst" */
     int sign = 1; int idx = 0;
     if (s[0] == '+') ++idx;
     else if (s[0] == '-') { sign = -1; ++idx; }
@@ -198,7 +172,6 @@ static int8_t pitch_from_str(const char *s)
     return (int8_t)(sign * v);
 }
 
-/* Parse a rate expression like "+10%" / "slow" / "fast" / "0.8". */
 static int16_t rate_from_str(const char *s)
 {
     if (!s || !*s) return 0;
@@ -215,7 +188,6 @@ static int16_t rate_from_str(const char *s)
     return (int16_t)(sign * v);
 }
 
-/* Parse "500ms" -> 500. Plain numbers also accepted. */
 static uint16_t break_ms_from_str(const char *s)
 {
     if (!s) return 0;
@@ -233,7 +205,7 @@ int spfy_prosody_parse_ssml(const char            *ssml,
     if (!ssml) return SPFY_OK;
 
     size_t in_n  = strlen(ssml);
-    char  *out   = (char *)malloc(in_n + 1);   /* output is <= input */
+    char  *out   = (char *)malloc(in_n + 1);
     if (!out) return SPFY_E_NOMEM;
     size_t out_n = 0;
 
@@ -248,7 +220,6 @@ int spfy_prosody_parse_ssml(const char            *ssml,
             out[out_n++] = *p++;
             continue;
         }
-        /* Tag start. */
         const char *tag_p = p + 1;
         int closing = 0;
         if (tag_p < end && *tag_p == '/') { closing = 1; ++tag_p; }
@@ -256,35 +227,30 @@ int spfy_prosody_parse_ssml(const char            *ssml,
         while (tag_p < end && *tag_p != ' ' && *tag_p != '>' && *tag_p != '/')
             ++tag_p;
         size_t name_l = (size_t)(tag_p - name_s);
-        if (name_l == 0) { out[out_n++] = *p++; continue; }   /* not a tag */
+        if (name_l == 0) { out[out_n++] = *p++; continue; }
 
-        /* Skip to end of tag. */
         const char *attrs_s = tag_p;
         const char *gt = tag_p;
         while (gt < end && *gt != '>') ++gt;
-        if (gt >= end) { out[out_n++] = *p++; continue; }     /* malformed */
+        if (gt >= end) { out[out_n++] = *p++; continue; }
         int self_closing = (gt > p && gt[-1] == '/');
 
         if (closing) {
-            /* Find matching open tag on stack. */
             for (int i = top - 1; i >= 0; --i) {
                 if (stack[i].tag_len == name_l &&
                     sn_streq_ci(stack[i].tag_name, name_s, name_l)) {
-                    /* Emit hint. */
                     spfy_prosody_hint_t h = stack[i].pending;
                     h.byte_end = (uint32_t)out_n;
                     if (h.kind != (spfy_hint_kind_t)0xFFFF) {
                         spfy_prosody_hints_add(out_hints, h);
                     }
-                    /* Pop everything from i upward (handles bad nesting). */
                     top = i;
                     break;
                 }
             }
         } else {
-            /* Opening or self-closing tag. Parse known names. */
             spfy_prosody_hint_t h = {0};
-            h.kind = (spfy_hint_kind_t)0xFFFF;     /* "no hint" */
+            h.kind = (spfy_hint_kind_t)0xFFFF;
             h.byte_start = (uint32_t)out_n;
 
             const char *ap = attrs_s;
@@ -298,7 +264,6 @@ int spfy_prosody_parse_ssml(const char            *ssml,
                         h.v.emphasis = emph_from_str(av);
                 }
             } else if (sn_streq_ci(name_s, "prosody", name_l) && name_l == 7) {
-                /* Prosody is one tag carrying potentially MULTIPLE hints. */
                 int8_t  pitch = 0; int8_t pitch_set = 0;
                 int16_t rate  = 0; int8_t rate_set  = 0;
                 while (ap < gt && parse_attr(&ap, gt, an, sizeof an,
@@ -309,17 +274,14 @@ int spfy_prosody_parse_ssml(const char            *ssml,
                         rate = rate_from_str(av); rate_set = 1;
                     }
                 }
-                /* For container <prosody>, defer pitch/rate emission
-                 * until close. We split into 2 separate hints if both
-                 * are set. */
+                /* For container <prosody>, defer pitch/rate emission until close. */
                 if (pitch_set || rate_set) {
                     h.kind = pitch_set ? SPFY_HINT_PITCH : SPFY_HINT_RATE;
                     if (pitch_set) h.v.pitch_st = pitch;
                     if (rate_set && !pitch_set) h.v.rate_pct = rate;
                     /* If both set, push pitch hint here and additionally
-                     * stash the rate as a second simultaneous hint at
-                     * close time. We use a side-stack (one extra hint
-                     * when pitch+rate both present). */
+                     * stash the rate as a second simultaneous hint at close
+                     * time. */
                     if (pitch_set && rate_set) {
                         spfy_prosody_hint_t hr = {0};
                         hr.kind = SPFY_HINT_RATE;
@@ -335,7 +297,6 @@ int spfy_prosody_parse_ssml(const char            *ssml,
                     }
                 }
             } else if (sn_streq_ci(name_s, "break", name_l) && name_l == 5) {
-                /* Self-closing point-event regardless of /> form. */
                 h.kind = SPFY_HINT_BREAK;
                 h.v.break_ms = 0;
                 while (ap < gt && parse_attr(&ap, gt, an, sizeof an,
@@ -345,7 +306,7 @@ int spfy_prosody_parse_ssml(const char            *ssml,
                 }
                 h.byte_end = h.byte_start;
                 spfy_prosody_hints_add(out_hints, h);
-                h.kind = (spfy_hint_kind_t)0xFFFF;     /* don't push */
+                h.kind = (spfy_hint_kind_t)0xFFFF;
                 self_closing = 1;
             }
 

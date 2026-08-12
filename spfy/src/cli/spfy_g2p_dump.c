@@ -1,9 +1,5 @@
-/* spfy_g2p_dump — print ARPAbet phonemes for words via the multi-stage
- * G2P pipeline (CMU dict → suffix strip → letter-to-sound).
- *
- *   spfy_g2p_dump hello                       single word
- *   spfy_g2p_dump --batch foo bar baz         many words
- *   spfy_g2p_dump --verbose word              also show which stage hit */
+/* spfy_g2p_dump — print ARPAbet phonemes for words via the multi-stage G2P
+ * pipeline (CMU dict → suffix strip → letter-to-sound). */
 
 #include "g2p.h"
 

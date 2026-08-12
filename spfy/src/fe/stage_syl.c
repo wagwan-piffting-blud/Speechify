@@ -1,8 +1,4 @@
-/* Stage 3: Syllabification + lexical stress.
- *
- * Walks each %word, identifies vowel-nucleus syllables, and assigns
- * stress to one of them. Emits %syl tokens.
- */
+/* Stage 3: Syllabification + lexical stress. */
 
 #include "stage_syl.h"
 #include "baked_dict.h"
@@ -19,16 +15,14 @@
 #define MAX_SYL_PER_WORD 16
 
 /* Vowel + syllabic-consonant SAMPA vocab IDs (from
- * spfy/build/fe_symbol_table.json + stage_espr.c::SAMPA_TO_ARPA). Each
- * forms a syllable nucleus. Used to cap text-based syl count when
- * baked_dict gives the authoritative phoneme sequence. */
+ * spfy/build/fe_symbol_table.json + stage_espr.c::SAMPA_TO_ARPA). */
 static int is_vowel_vocab(uint16_t id)
 {
     switch (id) {
-    case 255: case 256: case 257: case 258: case 259:   /* iy ih ey eh aa */
-    case 260: case 261: case 263: case 264: case 265:   /* ah ix en er el */
-    case 266: case 271: case 272: case 273: case 274:   /* ax ae uw uh ow */
-    case 276: case 277: case 278:                        /* ay aw ao       */
+    case 255: case 256: case 257: case 258: case 259:
+    case 260: case 261: case 263: case 264: case 265:
+    case 266: case 271: case 272: case 273: case 274:
+    case 276: case 277: case 278:
         return 1;
     default:
         return 0;
@@ -44,7 +38,6 @@ static int is_vowel(char c, int allow_y)
     return (allow_y && lc == 'y');
 }
 
-/* Return 1 if word ends with `lit` case-insensitively. */
 static int ends_with_ci(const char *t, uint32_t off, uint32_t len,
                          const char *lit, uint32_t n)
 {
@@ -57,36 +50,29 @@ static int ends_with_ci(const char *t, uint32_t off, uint32_t len,
 }
 
 typedef struct {
-    uint32_t nucleus_start;     /* byte offset of vowel cluster start */
-    uint32_t nucleus_end;       /* byte offset just past vowel cluster */
-    uint32_t syl_start;         /* byte offset of syllable start */
-    uint32_t syl_end;           /* byte offset just past syllable end */
+    uint32_t nucleus_start;
+    uint32_t nucleus_end;
+    uint32_t syl_start;
+    uint32_t syl_end;
 } syl_t;
 
-/* Word-level silent-e detection. English orthography: trailing 'e' is
- * silent when preceded by a consonant which is itself preceded by a
- * vowel within the same word ("bike", "hose", "seashore", "create" — but
- * "create" has another vowel BEFORE the consonant cluster, distinguishing
- * it from cases where the 'e' would be the only vowel). Returns the
- * effective word length for nucleus search. */
+/* Word-level silent-e detection. */
 static uint32_t silent_e_trim(const char *t, uint32_t off, uint32_t len)
 {
     if (len < 3) return len;
     if ((char)tolower((unsigned char)t[off + len - 1]) != 'e') return len;
-    /* Char before 'e' must be a consonant. */
     if (is_vowel(t[off + len - 2], 1)) return len;
-    /* And there must be at least one earlier vowel in the word (else
-     * 'e' is the only vowel and must surface, e.g. "the"). */
+    /* And there must be at least one earlier vowel in the word (else 'e' is
+     * the only vowel and must surface, e.g. */
     for (uint32_t i = 0; i + 1 < len - 1; ++i) {
         if (is_vowel(t[off + i], i > 0)) {
-            return len - 1;     /* trim trailing 'e' */
+            return len - 1;
         }
     }
     return len;
 }
 
-/* Find vowel-cluster nuclei in a word [off..off+len). Returns count.
- * Treats orthographic word-final silent-e as not-a-nucleus. */
+/* Find vowel-cluster nuclei in a word [off..off+len). */
 static int find_nuclei(const char *t, uint32_t off, uint32_t len,
                         syl_t *out, int max)
 {
@@ -95,7 +81,7 @@ static int find_nuclei(const char *t, uint32_t off, uint32_t len,
     int in_nuc = 0;
     uint32_t nuc_start = 0;
     for (uint32_t i = 0; i < scan_len && n < max; ++i) {
-        int allow_y = (i > 0);  /* word-initial y is consonant */
+        int allow_y = (i > 0);
         int v = is_vowel(t[off + i], allow_y);
         if (v && !in_nuc) {
             in_nuc = 1;
@@ -115,86 +101,67 @@ static int find_nuclei(const char *t, uint32_t off, uint32_t len,
     return n;
 }
 
-/* Two-letter consonant digraphs that act as a single onset unit. The
- * orthographic "sh", "ch", "th", "ph", "ng", "ck", "wh" map to one
- * phoneme each in stage_lts; treating them as 2 separate consonants
- * during max-onset splitting causes "seashells" -> "seas|hells"
- * (wrong) instead of "sea|shells". */
+/* Two-letter consonant digraphs that act as a single onset unit. */
 static int is_consonant_digraph(char a, char b)
 {
     a = (char)tolower((unsigned char)a);
     b = (char)tolower((unsigned char)b);
     if (b != 'h' && !(a == 'n' && b == 'g') && !(a == 'c' && b == 'k'))
         return 0;
-    if (a == 's' && b == 'h') return 1;     /* sh */
-    if (a == 'c' && b == 'h') return 1;     /* ch */
-    if (a == 't' && b == 'h') return 1;     /* th */
-    if (a == 'p' && b == 'h') return 1;     /* ph */
-    if (a == 'w' && b == 'h') return 1;     /* wh */
-    if (a == 'n' && b == 'g') return 1;     /* ng */
-    if (a == 'c' && b == 'k') return 1;     /* ck */
+    if (a == 's' && b == 'h') return 1;
+    if (a == 'c' && b == 'h') return 1;
+    if (a == 't' && b == 'h') return 1;
+    if (a == 'p' && b == 'h') return 1;
+    if (a == 'w' && b == 'h') return 1;
+    if (a == 'n' && b == 'g') return 1;
+    if (a == 'c' && b == 'k') return 1;
     return 0;
 }
 
 /* Two-letter onset clusters licensed in English (max-onset principle):
- * stop+liquid, s+stop, s+nasal, s+fricative, fricative+liquid, etc.
- * When the cluster between two nuclei matches, the WHOLE cluster goes
- * to the onset of the next syllable ("a.gree", "co.bra", "ne.gro"). */
+ * stop+liquid, s+stop, s+nasal, s+fricative, fricative+liquid, etc. */
 static int is_onset_cluster(char a, char b)
 {
     a = (char)tolower((unsigned char)a);
     b = (char)tolower((unsigned char)b);
-    /* stop + liquid: pl, pr, bl, br, tr, dr, kl, kr (and cl), gl, gr */
     if ((a=='p' || a=='b' || a=='t' || a=='d' || a=='k' || a=='c' || a=='g')
         && (b=='l' || b=='r')) {
-        if ((a=='t' || a=='d') && b=='l') return 0;     /* tl/dl illegal */
+        if ((a=='t' || a=='d') && b=='l') return 0;
         return 1;
     }
-    /* fricative + liquid: fl, fr */
     if ((a=='f' || a=='v') && (b=='l' || b=='r')) return 1;
     /* s + voiceless stop / nasal / liquid / fricative: sp, st, sk/sc, sm,
      * sn, sl, sw */
     if (a=='s' && (b=='p' || b=='t' || b=='k' || b=='c'
                    || b=='m' || b=='n' || b=='l' || b=='w')) return 1;
-    /* th + r: "three" */
-    if (a=='t' && b=='r') return 1;     /* already covered above */
+    if (a=='t' && b=='r') return 1;
     return 0;
 }
 
-/* Distribute consonant clusters around nuclei to produce full syllables. */
 static void assign_boundaries(const char *t, uint32_t off,
                               syl_t *s, int n, uint32_t word_len)
 {
     if (n == 0) return;
     s[0].syl_start = 0;
-    /* Walk pairs of adjacent nuclei. */
     for (int i = 0; i < n - 1; ++i) {
         uint32_t between_lo = s[i].nucleus_end;
         uint32_t between_hi = s[i + 1].nucleus_start;
         uint32_t cluster    = between_hi - between_lo;
         uint32_t split;
         if (cluster <= 1) {
-            /* CV.CV: single consonant goes with second syllable. */
             split = between_lo;
         } else if (cluster == 2) {
-            /* CVC.CV vs CV.CCV. Max-onset principle: digraphs (sh, ch,
-             * th, ph, ng, ck, wh) and licensed onset clusters (pl, pr,
-             * tr, dr, kl, kr, str-initial pieces, sp, st, sk, sm, sn,
-             * sl, sw, fl, fr) go to syl 2's onset. Other CC clusters
-             * split CV.CV (one to coda, one to onset). */
+            /* CVC.CV vs CV.CCV. */
             char a = t[off + between_lo];
             char b = t[off + between_lo + 1];
             if (is_consonant_digraph(a, b) || is_onset_cluster(a, b)) {
-                split = between_lo;        /* CV.CCV */
+                split = between_lo;
             } else {
-                split = between_lo + 1;    /* CVC.CV */
+                split = between_lo + 1;
             }
         } else {
             /* 3+ cluster: place first consonant in coda, the maximal
-             * licensed onset to syl 2. For "extra" -> ex.tra,
-             * "control" -> con.trol, "obstruct" -> ob.struct.
-             * Heuristic: if last 2 are an onset cluster (e.g. "tr"),
-             * give last 2 to onset; otherwise give last 1. */
+             * licensed onset to syl 2. */
             char b1 = t[off + between_hi - 2];
             char b2 = t[off + between_hi - 1];
             if (is_consonant_digraph(b1, b2) || is_onset_cluster(b1, b2)) {
@@ -209,14 +176,12 @@ static void assign_boundaries(const char *t, uint32_t off,
     s[n - 1].syl_end = word_len;
 }
 
-/* Pick stress placement. Returns the index of the primary-stress syllable
- * (0-based), or 0 if no rule fires. */
+/* Pick stress placement. */
 static int pick_stress(const char *t, uint32_t off, uint32_t len,
                         int n_syls)
 {
     if (n_syls <= 1) return 0;
 
-    /* -tion / -sion / -ical / -ity / -ic: stress on syllable BEFORE suffix. */
     if (ends_with_ci(t, off, len, "tion", 4) ||
         ends_with_ci(t, off, len, "sion", 4) ||
         ends_with_ci(t, off, len, "ical", 4) ||
@@ -224,16 +189,13 @@ static int pick_stress(const char *t, uint32_t off, uint32_t len,
         ends_with_ci(t, off, len, "ic",   2)) {
         return n_syls >= 2 ? n_syls - 2 : 0;
     }
-    /* -ate (3+ syl): antepenultimate. */
     if (ends_with_ci(t, off, len, "ate", 3) && n_syls >= 3) {
         return n_syls - 3;
     }
-    /* -ize / -ify (3+ syl): antepenultimate. */
     if ((ends_with_ci(t, off, len, "ize", 3) ||
          ends_with_ci(t, off, len, "ify", 3)) && n_syls >= 3) {
         return n_syls - 3;
     }
-    /* Default: first syllable. */
     return 0;
 }
 
@@ -258,21 +220,7 @@ int spfy_fe_syl_run(const spfy_fe_t *fe,
         int n = find_nuclei(original_text, off, len,
                              syls, MAX_SYL_PER_WORD);
 
-        /* Phoneme-derived syllable count via baked dict.
-         *
-         * Text-based find_nuclei treats every vowel cluster as a nucleus,
-         * including silent letters: "one"=2 (o,e), "bike"=2 (i,e),
-         * "queue"=2 (u,e). The engine's actual pronunciation has fewer
-         * syllables because the trailing 'e' is silent. Cap n to the
-         * phoneme-vowel count when the dict has the word: "one"
-         * /w ah n/ -> 1 vowel, drops 2->1; "create" /k r iy ey t/ -> 2,
-         * stays at 2.
-         *
-         * Without this cap, slot_ctx.c assigns the trailing fake syl
-         * its own syl_idx; pass_a's mismatch_fwd walk treats it as a
-         * "later accented syl with diff syl_idx" and flips the FIRST
-         * accented syl from sp[1]=7 (LastPAInSent) to sp[1]=4 (FirstPA),
-         * which mismatches engine for single-content-word phrases. */
+        /* Phoneme-derived syllable count via baked dict. */
         if (n > 0 && len < 64 && !getenv("SPFY_NO_DICT_SYL_CAP")) {
             char lcbuf[64];
             for (uint32_t i = 0; i < len; ++i) {
@@ -293,8 +241,8 @@ int spfy_fe_syl_run(const spfy_fe_t *fe,
         }
 
         if (n == 0) {
-            /* Word has no vowels (e.g., "tt") -- treat the whole word
-             * as one zero-stress syllable. */
+            /* Word has no vowels (e.g., "tt") -- treat the whole word as
+             * one zero-stress syllable. */
             spfy_fe_token_t st = {0};
             st.name      = SPFY_STRESS_NONE;
             st.word_id   = w->word_id;
@@ -307,12 +255,7 @@ int spfy_fe_syl_run(const spfy_fe_t *fe,
             continue;
         }
         assign_boundaries(original_text, off, syls, n, len);
-        /* Pick one stressed syllable per word. The slot-tree-based sp[1]
-         * derivation in slot_ctx.c uses syl_accent != 0 to fire the PA
-         * (pitch-accent) refinement that produces sp[1] in {4,5,6,7}
-         * (FirstPA / FirstPAInPhrase / LastPAInPhrase / LastPAInSent);
-         * without it, every syllable falls through to sp[1]=1 (Unstressed)
-         * regardless of recording. Disable by setting SPFY_NO_PICK_STRESS=1. */
+        /* Pick one stressed syllable per word. */
         int stress_pos = -1;
         if (!getenv("SPFY_NO_PICK_STRESS")) {
             stress_pos = pick_stress(original_text, off, len, n);

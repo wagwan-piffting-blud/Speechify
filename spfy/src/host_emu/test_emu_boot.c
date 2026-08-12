@@ -59,7 +59,6 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "[test] DllMain returned cleanly.\n");
 
-    /* Resolve the single export the spfy host already uses. */
     uint32_t getObject_va = spfy_dll_emu_get_export("getObject");
     if (!getObject_va) {
         fprintf(stderr, "[test] WARN: getObject export not found — the FE host won't work\n");
@@ -68,15 +67,12 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[test] getObject -> guest VA %#x\n", getObject_va);
 
     /* Phase 2 validation: drive the engine through getObject + initStage1
-     * via the emulator. This proves the full call path (export →
-     * guest C function → vtable → vtable method → ret) works. */
+     * via the emulator. */
 
-    /* Allocate guest space for the out parameter. */
     uint32_t out_va = spfy_dll_emu_alloc(4, 1);
     if (!out_va) { fprintf(stderr, "[test] guest_alloc failed\n"); return 4; }
 
-    /* Call getObject(kind=2, &raw) — cdecl, 2 args. Returns nonzero on
-     * success, with *out filled in with the FE iobj pointer. */
+    /* Call getObject(kind=2, &raw) — cdecl, 2 args. */
     uint32_t args[2] = { 2, out_va };
     uint32_t rc = spfy_dll_emu_call(getObject_va, args, 2);
     uint32_t iobj_va;
@@ -90,21 +86,15 @@ int main(int argc, char **argv) {
     spfy_dll_emu_read(iobj_va + 0, &vtable_va, 4);
     fprintf(stderr, "[test] iobj.vtable -> %#x\n", vtable_va);
 
-    /* Vtable slot 3 = initStage1. Read the function pointer at vtable+12. */
     uint32_t initStage1_va;
     spfy_dll_emu_read(vtable_va + 3 * 4, &initStage1_va, 4);
     fprintf(stderr, "[test] vtable[3] (initStage1) -> %#x\n", initStage1_va);
 
-    /* Call initStage1(self). __stdcall(this, ...) — but the call wrapper
-     * pushes args in cdecl order; for thiscall under MSVC, `this` is in
-     * ECX. Per the donor's ABI conventions, for now we approximate by
-     * passing `this` as the first stack arg (Windows __stdcall thiscall
-     * on x86 vtables) — the DLL was compiled this way in 2003. */
+    /* Call initStage1(self). */
     uint32_t this_args[1] = { iobj_va };
     uint32_t r3 = spfy_dll_emu_call(initStage1_va, this_args, 1);
     fprintf(stderr, "[test] initStage1(self) -> %#x\n", r3);
 
-    /* Read err_flag back from the iobj to see if init succeeded. */
     uint8_t err_flag;
     spfy_dll_emu_read(iobj_va + 0xd, &err_flag, 1);
     fprintf(stderr, "[test] iobj.err_flag = %u  (0 = OK)\n", err_flag);
@@ -114,8 +104,7 @@ int main(int argc, char **argv) {
         return 6;
     }
 
-    /* feedConfigA(text) — slot 5. Send a short input string. The
-     * text must live in guest memory; spfy_dll_emu_alloc + write. */
+    /* feedConfigA(text) — slot 5. */
     const char *input = "Hello world.";
     uint32_t input_len = (uint32_t)strlen(input) + 1;
     uint32_t input_va = spfy_dll_emu_alloc(input_len, 0);
@@ -131,19 +120,16 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[test] feedConfigA(self, \"%s\") -> %#x  err_flag=%u\n",
             input, r5, err_flag);
 
-    /* feedConfigB(self, &empty_cfg) — slot 6. The native fe_host.c passes
-     * a pointer to a single NUL byte; we replicate. */
+    /* feedConfigB(self, &empty_cfg) — slot 6. */
     uint32_t feedConfigB_va;
     spfy_dll_emu_read(vtable_va + 6 * 4, &feedConfigB_va, 4);
-    uint32_t empty_va = spfy_dll_emu_alloc(1, 1);   /* 1 byte zero */
+    uint32_t empty_va = spfy_dll_emu_alloc(1, 1);
     uint32_t fcB_args[2] = { iobj_va, empty_va };
     uint32_t r6 = spfy_dll_emu_call(feedConfigB_va, fcB_args, 2);
     spfy_dll_emu_read(iobj_va + 0xd, &err_flag, 1);
     fprintf(stderr, "[test] feedConfigB(self, &empty) -> %#x  err_flag=%u\n", r6, err_flag);
 
-    /* Drain delegateB (slot 42). The native code calls fn42 in a loop
-     * until *out_len <= 1. Each call writes up to 256 bytes into buf
-     * and sets out_len to bytes_copied+1. */
+    /* Drain delegateB (slot 42). */
     uint32_t delegateB_va;
     spfy_dll_emu_read(vtable_va + 42 * 4, &delegateB_va, 4);
 
@@ -155,7 +141,7 @@ int main(int argc, char **argv) {
     if (!tagged) { fprintf(stderr, "[test] OOM\n"); return 7; }
 
     for (int safety = 0; safety < 4096; safety++) {
-        spfy_dll_emu_write(outlen_va, "\0\0\0\0", 4);   /* clear */
+        spfy_dll_emu_write(outlen_va, "\0\0\0\0", 4);
         uint32_t dB_args[4] = { iobj_va, buf_va, 256, outlen_va };
         spfy_dll_emu_call(delegateB_va, dB_args, 4);
         uint32_t out_len;
@@ -180,7 +166,6 @@ int main(int argc, char **argv) {
     }
     free(tagged);
 
-    /* runOrAbort(self, 0) — slot 11. Commits any remaining work. */
     uint32_t runOrAbort_va;
     spfy_dll_emu_read(vtable_va + 11 * 4, &runOrAbort_va, 4);
     uint32_t roa_args[2] = { iobj_va, 0 };

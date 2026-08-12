@@ -173,36 +173,25 @@
 {"id": "nat_041", "mode": "text", "text": "All employees must complete the mandatory training course before the end of the calendar quarter.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_042", "mode": "text", "text": "The quick brown fox jumps over the lazy dog while the cat watches with mild interest.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_043", "mode": "text", "text": "Due to the heavy snowfall overnight, all schools in the district will be closed today.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
-{"id": "nat_044", "mode": "text", "text": "Now is the time for all good men to come to the aid of their country.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_045", "mode": "text", "text": "Thank you for calling, your business is important to us and we will be with you shortly.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_046", "mode": "text", "text": "If this is a medical emergency, please hang up and dial nine one one immediately.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_047", "mode": "text", "text": "She walked along the seashore at sunset, listening to the gentle sound of waves on the sand.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_048", "mode": "text", "text": "Once upon a time, in a land far far away, there lived a clever little fox.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_049", "mode": "text", "text": "Please make sure all electronic devices are switched to airplane mode for the duration of the flight.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
 {"id": "nat_050", "mode": "text", "text": "Today's forecast calls for sunny skies in the morning followed by scattered thunderstorms in the afternoon.", "tags": ["nat", "stratum=natural", "length_bucket=long", "seed=42"]}
-{"id": "edge_001", "mode": "text", "text": "She sells seashells by the seashore.", "tags": ["edge", "seed", "compound", "regression"]}
-{"id": "edge_002", "mode": "text", "text": "Now is the time for all good men to come to the aid of their country.", "tags": ["edge", "seed", "long-no-punct", "regression"]}
-{"id": "edge_003", "mode": "text", "text": "Sssss.", "tags": ["edge", "seed", "fricative-only", "regression"]}
 {"id": "edge_004", "mode": "text", "text": "syn-", "tags": ["edge", "seed", "prefix", "regression"]}
 {"id": "edge_005", "mode": "text", "text": "important", "tags": ["edge", "seed", "stress-edge", "regression"]}
 {"id": "edge_006", "mode": "text", "text": "seashore", "tags": ["edge", "seed", "compound", "regression"]}
 {"id": "edge_007", "mode": "text", "text": "lighthouse", "tags": ["edge", "seed", "compound", "regression"]}
 {"id": "edge_008", "mode": "text", "text": "synthesizing", "tags": ["edge", "seed", "long-monomorph", "regression"]}
-{"id": "edge_009", "mode": "text", "text": "Hello, world.", "tags": ["edge", "comma", "pause-density"]}
 {"id": "edge_010", "mode": "text", "text": "Hello; world.", "tags": ["edge", "semicolon", "pause-density"]}
 {"id": "edge_011", "mode": "text", "text": "Hello... world.", "tags": ["edge", "ellipsis", "pause-density"]}
 {"id": "edge_012", "mode": "text", "text": "Wait, listen, then speak.", "tags": ["edge", "multi-comma", "pause-density"]}
 {"id": "edge_013", "mode": "text", "text": "Stop -- and look.", "tags": ["edge", "em-dash", "pause-density"]}
-{"id": "edge_014", "mode": "text", "text": "Aye.", "tags": ["edge", "all-vowel"]}
 {"id": "edge_015", "mode": "text", "text": "Ooh.", "tags": ["edge", "all-vowel"]}
 {"id": "edge_016", "mode": "text", "text": "Eee.", "tags": ["edge", "all-vowel"]}
-{"id": "edge_017", "mode": "text", "text": "Strengths.", "tags": ["edge", "consonant-cluster"]}
 {"id": "edge_018", "mode": "text", "text": "Sixths.", "tags": ["edge", "consonant-cluster"]}
 {"id": "edge_019", "mode": "text", "text": "Stretched twelfths.", "tags": ["edge", "consonant-cluster"]}
-{"id": "edge_020", "mode": "text", "text": "I.", "tags": ["edge", "very-short", "vowel-only"]}
-{"id": "edge_021", "mode": "text", "text": "A.", "tags": ["edge", "very-short", "vowel-only"]}
-{"id": "edge_022", "mode": "text", "text": "Hi.", "tags": ["edge", "very-short"]}
-{"id": "edge_023", "mode": "text", "text": "O.", "tags": ["edge", "very-short", "vowel-only"]}
 {"id": "edge_024", "mode": "text", "text": "It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity.", "tags": ["edge", "very-long"]}
 {"id": "edge_025", "mode": "text", "text": "If you would like to speak with a representative, please stay on the line, otherwise press one for English, two for Spanish, three for French, or remain on the line for our next available agent.", "tags": ["edge", "very-long"]}
 {"id": "edge_026", "mode": "text", "text": "One two three.", "tags": ["edge", "digits-as-words"]}
@@ -222,14 +211,11 @@
 {"id": "edge_040", "mode": "text", "text": "Dr. Smith called.", "tags": ["edge", "abbreviation"]}
 {"id": "edge_041", "mode": "text", "text": "Mr. Jones is here.", "tags": ["edge", "abbreviation"]}
 {"id": "edge_042", "mode": "text", "text": "Apples, oranges, etc.", "tags": ["edge", "abbreviation"]}
-{"id": "edge_043", "mode": "text", "text": "Why?", "tags": ["edge", "question"]}
 {"id": "edge_044", "mode": "text", "text": "Are you ready?", "tags": ["edge", "question"]}
 {"id": "edge_045", "mode": "text", "text": "It's working, isn't it?", "tags": ["edge", "question"]}
 {"id": "edge_046", "mode": "text", "text": "Wow!", "tags": ["edge", "exclamation"]}
 {"id": "edge_047", "mode": "text", "text": "Watch out!", "tags": ["edge", "exclamation"]}
 {"id": "edge_048", "mode": "text", "text": "Stop!!", "tags": ["edge", "exclamation"]}
-{"id": "edge_049", "mode": "text", "text": "Mmm.", "tags": ["edge", "nasal-only"]}
-{"id": "edge_050", "mode": "spr", "text": "\\![.1Sa.0kIG]", "tags": ["edge", "spr", "lts-bypass"]}
 {"id": "edge_051", "mode": "text", "text": "NASA confirmed it.", "tags": ["edge", "acronym"]}
 {"id": "edge_052", "mode": "text", "text": "Five dollars exactly.", "tags": ["edge", "currency-words"]}
 {"id": "longtext_sioux_001", "mode": "text", "text": "The following message is transmitted at the request of the South Dakota emergency management agency sioux falls South Dakota. Sioux falls residents west of Interstate 29 must stop water usage immediately. Please stop flushing toilets, washing clothes, and using showers. Only use water for drinking purposes. Water does not need to be boiled. Discontinue all other uses of water. There is an issue with the sanitary sewer system, which may cause sewer backups in the affected area. Potential sewer backups will occur from an area bounded to the north, from the north Minnesota avenue water plant, to the south by 26th street. The eastern boundary is along Minnesota avenue and the western boundary along western avenue. Residents in the affected area should work to move critical items from their basements, to higher elevations until public works can fix the problem. In addition, sanitary sewage is being discharged into the big sioux river south of west 12th street. Residents should stay out of the big sioux river and parks adjacent to the river, including bike trails. Discharges into covell lake and overland north of falls park are also occurring. Residents are advised to stay out of these areas.", "tags": ["long", "stress", "multi-utt"]}

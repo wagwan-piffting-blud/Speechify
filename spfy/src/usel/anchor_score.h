@@ -40,13 +40,12 @@
  * (units with identical disk fields can have different mem+0x13).
  */
 
-/* Engine's slice ctx[5] encoding -- a 5-tuple of hp_class values
- * (label*2 + side, interleaved) for left2/left1/self/right1/right2. */
+/* Engine's slice ctx[5] encoding -- a 5-tuple of hp_class values (label*2 +
+ * side, interleaved) for left2/left1/self/right1/right2. */
 typedef struct {
     int32_t  ctx[5];
 } spfy_anchor_ctx_t;
 
-/* Per-HP CART leaf prediction (durt + f0tr). */
 typedef struct {
     float  durt_mean, durt_var;
     int    durt_valid;
@@ -54,9 +53,7 @@ typedef struct {
     int    f0tr_valid;
 } spfy_anchor_cart_t;
 
-/* Per-HP target SP indices (5 matrix row indices, one per matrix).
- * Same order as the cost formula: [sp[0], sp[1], sp[2], sp[3], sp[4]]
- * = matrix-0-row, matrix-1-row, ..., matrix-4-row. */
+/* Per-HP target SP indices (5 matrix row indices, one per matrix). */
 typedef struct {
     uint32_t  sp[5];
 } spfy_anchor_sp_target_t;
@@ -70,106 +67,86 @@ typedef struct {
  * pre-cached lookup to per-unit walk. NULL durt_cart falls back to
  * cart_per_hp[u_idx] preselect-cached values (the 2026-05-13 fix). */
 typedef struct {
-    int32_t  ctx[5];      /* 5-tuple HP-class context (left2/L/self/R/right2) */
-    uint32_t sp[5];       /* 5-tuple SP indices (same q-type mapping as
-                           * spfy_synth.c::cart_feat) */
-    uint32_t q5;          /* halfphones-in-current-syllable */
-    uint8_t  phone_label; /* tom_swap'd phone label -- the durt tree_idx */
-    uint8_t  durt_valid;  /* 0 = skip this HP (out of durt range, e.g. silence-pad) */
+    int32_t  ctx[5];
+    uint32_t sp[5];       /* 5-tuple SP indices (same q-type mapping as spfy_synth.c::cart_feat) */
+    uint32_t q5;
+    uint8_t  phone_label;
+    uint8_t  durt_valid;
 } spfy_anchor_hp_feat_t;
 
-/* All inputs needed per anchor slot. */
 typedef struct {
-    /* span: HPs first_hp..last_hp (engine IS-slot indices). */
     int32_t                          first_hp;
     int32_t                          last_hp;
-    /* ctx[5] for first_hp and last_hp (from prsl_slot capture / FE). */
     spfy_anchor_ctx_t                first_ctx;
     spfy_anchor_ctx_t                last_ctx;
-    /* anchor_type: 2 = Syl, 4 = Word. Selects norm/norm2 weights. */
     int                              anchor_type;
-    /* Per-HP arrays indexed [first_hp..last_hp]. n = last_hp-first_hp+1. */
-    const spfy_anchor_cart_t        *cart_per_hp;     /* n entries */
-    const spfy_anchor_sp_target_t   *sp_per_hp;       /* n entries */
-    /* Optional syl_idx array per HP (workspace+0x18) for advance-on-dup.
-     * Same n entries indexed [first_hp..last_hp]. NULL = 1:1 unit:hp. */
+    const spfy_anchor_cart_t        *cart_per_hp;
+    const spfy_anchor_sp_target_t   *sp_per_hp;
+    /* Optional syl_idx array per HP (workspace+0x18) for advance-on-dup. */
     const int32_t                   *syl_idx_per_hp;
-    /* Optional plumbing for anchor-time per-unit durt walks. If durt_cart
-     * is non-NULL AND hp_feat is non-NULL, the D-cost branch walks durt
-     * per unit at scoring time using hp_feat[u_idx] with anchor_type
-     * substituted for q_type=8. Otherwise falls back to pre-cached
-     * cart_per_hp[u_idx]. */
+    /* UTTERANCE-WIDE SP targets, indexed by absolute half-phone -- not by
+     * anchor-relative position like sp_per_hp. */
+    const spfy_anchor_sp_target_t   *sp_all_hp;
+    int32_t                          n_all_hp;
+    /* UTTERANCE-WIDE durt forest index (phone label) per absolute
+     * half-phone. */
+    const uint8_t                   *phone_all_hp;
+    /* Optional plumbing for anchor-time per-unit durt walks. */
     const spfy_cart_t               *durt_cart;
-    const spfy_anchor_hp_feat_t     *hp_feat;        /* n entries */
+    const spfy_anchor_hp_feat_t     *hp_feat;
 } spfy_anchor_slot_input_t;
 
-/* Voice-level static data (loaded once). */
 typedef struct {
     const spfy_unit_table_t         *units;
     const spfy_ccos_t               *ccos;
     const spfy_voice_maps_t         *maps;
-    const spfy_proscost_matrix_t    *proscost; /* 5 matrices */
-    /* Per-uid mem+0x13 hp_class (engine-truth from Frida dump).
-     * 169579 bytes for Tom; one byte per unit. */
+    const spfy_proscost_matrix_t    *proscost;
+    /* Per-uid mem+0x13 hp_class (engine-truth from Frida dump). */
     const uint8_t                   *hpclass_table;
     uint32_t                         hpclass_n;
     /* feat-order phone index -> ccos labl index (the engine's voice+0x608
-     * permutation, minus the side term). NULL means identity, which is
-     * correct for Jill/Felix/Javier but NOT for Tom or Paulina. Owned by
-     * the caller's spfy_phone_order_t; see voice/phone_order.h. */
+     * permutation, minus the side term). */
     const uint8_t                   *feat_to_labl;
     uint32_t                         n_feat_phones;
     /* Derived per-unit ccos context columns for v100005 voices (Paulina),
-     * which ship no on-disk phone_ctx. 4 bytes per unit, already remapped
-     * to ccos-labl space so the column code consumes them exactly like a
-     * v100006 unit's raw on-disk phone_ctx. NULL for every other version
-     * (v100006/8 keep their on-disk bytes). Built by spfy_anchor_build_ctx4;
-     * owned by the caller. See anchor_score.c for the derivation. */
+     * which ship no on-disk phone_ctx. */
     const uint8_t                   *ctx4;
-    /* Per-hp_class voicing flag (voice+0x5fc). 2*n_labels entries.
-     * 0 = voiceless (skip f0tr), nonzero = walk f0tr. */
+    /* Per-hp_class voicing flag (voice+0x5fc). */
     const uint32_t                  *voicing;
     uint32_t                         voicing_n;
-    /* Cost weights, captured via Frida anchor_score_hook. */
-    float    w_sp[5];        /* [0.05, 0.05, 0.05, 0.05, 0.0] */
-    float    w_3c;           /* anchor FLAG scaler: 0.25 */
+    float    w_sp[5];
+    float    w_3c;
     float    w_flag_scale;   /* DAT_98580: 0.01 */
-    float    w_ccos;         /* w_44: 1.0 */
-    float    w_dur;          /* w_34: 0.30 */
-    float    w_f0;           /* w_24: 0.20 */
-    float    w_f0_miss;      /* w_80: 5.0 */
-    float    anchor_norm;    /* 0.7 (w_54 syl, w_5c word) */
-    float    anchor_norm2;   /* 0.005 (w_58 / w_60) */
-    float    dat_971d8;      /* 0.1 (histogram bin width) */
-    float    dat_98a24;      /* 50.0 (histogram norm scaler) */
-    float    dat_98528;      /* 10000.0 (initial threshold seed) */
-    float    dat_8e9857c;    /* 1.0 (emphasis const, used in inv_var calc) */
+    float    w_ccos;
+    float    w_dur;
+    float    w_f0;
+    float    w_f0_miss;
+    float    anchor_norm;
+    float    anchor_norm2;
+    float    dat_971d8;
+    float    dat_98a24;
+    float    dat_98528;
+    float    dat_8e9857c;
+    /* --- SPFY_POW_TGT_W: per-phone-normalised ENERGY target cost ---------
+     * NOT engine behaviour. */
+    const float *unit_pow;
+    uint32_t     unit_pow_n;
+    const float *pow_mean;
+    const float *pow_sd;
+    uint32_t     pow_rows;
+    float        pow_a;
+    float        pow_b;
+    float        w_pow_t;
 } spfy_anchor_voice_t;
 
-/* Output cand record. */
 typedef struct {
     uint32_t  ss;
     uint32_t  se;
     uint32_t  posting_idx;
-    float     pre_dp;        /* full anchor cand cost */
+    float     pre_dp;
 } spfy_anchor_cand_t;
 
-/* Score one anchor slot.
- *
- * Inputs:
- *   av           voice-level static data
- *   in           per-slot input (first_hp/last_hp/ctx/cart/sp_target)
- *   postings     cklx posting indices for the slot key
- *   ckls_grp     ckls group containing span data (ss, se per posting)
- *   n_postings   number of postings
- *
- * Outputs (caller-owned):
- *   out_cands    surviving cands, ranked by pre_dp ascending
- *   out_cap      capacity of out_cands array
- *   out_n        number of surviving cands written
- *
- * Returns SPFY_OK or SPFY_E_*.
- */
+/* Score one anchor slot. */
 int spfy_anchor_score(const spfy_anchor_voice_t          *av,
                        const spfy_anchor_slot_input_t     *in,
                        const uint32_t                     *postings,
@@ -179,8 +156,7 @@ int spfy_anchor_score(const spfy_anchor_voice_t          *av,
                        uint32_t                            out_cap,
                        uint32_t                           *out_n);
 
-/* Load the engine-truth hp_class table from disk file. The file is a
- * raw byte array of size n_units. Caller frees with spfy_anchor_hpclass_free. */
+/* Load the engine-truth hp_class table from disk file. */
 int spfy_anchor_hpclass_load(const char *path,
                               uint8_t **out_data, uint32_t *out_n);
 void spfy_anchor_hpclass_free(uint8_t *data);
@@ -198,12 +174,9 @@ void spfy_anchor_hpclass_free(uint8_t *data);
  * SPFY_NO_V100005_CTX4 in the environment forces the no-op (A/B). */
 int spfy_anchor_build_ctx4(spfy_anchor_voice_t *av, uint8_t **out_owned);
 
-/* Initialize default cost weights from Frida-captured Tom values. */
 void spfy_anchor_voice_set_default_weights(spfy_anchor_voice_t *av);
 
-/* Same, then override from the voice's own VCF. This is what any non-Tom
- * voice needs: Jill weights JOIN_COST at 1.75 vs Tom's 0.7, STRESS
- * mismatch at 0.5 vs 0.05, and PHONE_IN_SYL at 0.3 vs Tom's 0. */
+/* Same, then override from the voice's own VCF. */
 void spfy_anchor_voice_set_weights_from_vcf(spfy_anchor_voice_t *av,
                                             const spfy_vcf_t *vcf);
 

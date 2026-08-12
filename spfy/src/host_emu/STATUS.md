@@ -52,7 +52,7 @@ native, or `-DSPFY_FE_EMU=ON` on 32-bit x86 to exercise the emulator.
 
 ## Audit — post-Phase-5 re-run
 
-`master_compare2.py --modes uid` under the auto-detect defaults
+`master_spfy_parity.py --modes uid` under the auto-detect defaults
 (64-bit MSYS2 mingw64 host, `SPFY_FE_EMU=ON` selected automatically):
 
 ```text

@@ -54,7 +54,7 @@ void spfy_dll_emu_write(uint32_t guest_va, const void *host_src, uint32_t n) {
 }
 
 int spfy_dll_emu_boot(const uint8_t *dll_bytes, uint32_t dll_len) {
-    if (g_booted) return 0;       /* idempotent */
+    if (g_booted) return 0;
     if (!dll_bytes || dll_len < 0x40) {
         fprintf(stderr, "[spfy_dll_emu] boot: bad blob (ptr=%p len=%u)\n",
                 (const void *)dll_bytes, dll_len);
@@ -64,10 +64,9 @@ int spfy_dll_emu_boot(const uint8_t *dll_bytes, uint32_t dll_len) {
     mem_init();
     cpu_reset();
 
-    /* Reset import table BEFORE pe_load_mem because pe_load_mem walks
-     * the import directory and calls win32_register_import per name —
-     * which appends into g_imp[]. A stale table from a previous boot
-     * would shift the import indices and corrupt IAT patching. */
+    /* Reset import table BEFORE pe_load_mem because pe_load_mem walks the
+     * import directory and calls win32_register_import per name — which
+     * appends into g_imp[]. */
     win32_reset();
 
     if (pe_load_mem(dll_bytes, dll_len) != 0) {

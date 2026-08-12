@@ -1,12 +1,4 @@
-/* SP (position-mismatch) cost component.
- *
- *   SP = sum over k=0..4:  weight[k] * matrix[k][target[k]][cand[k]]
- *
- * Per-target features and per-candidate column bytes are out-of-bounds-
- * checked: any out-of-range index contributes 0 to the term (matching the
- * engine's behaviour where invalid feature values fall through to a
- * default empty cell). This keeps callers from having to validate the
- * 5-tuples before each call. */
+/* SP (position-mismatch) cost component. */
 
 #include "cost.h"
 

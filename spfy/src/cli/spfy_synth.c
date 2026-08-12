@@ -1,27 +1,7 @@
-/* spfy_synth -- M5 end-to-end text->WAV via FE -> USel -> WSOLA pipeline.
- *
- * Pipeline:
- *   text -> spfy_fe_synth_text() -> per-slot ctx[5] + sp[5] + voicing
- *        -> per-slot PRSL pool query -> per-slot CART durt/f0tr (zeroed
- *           for first cut; engine target cost will be approximate)
- *        -> per-(slot, cand) score via spfy_hp_innerscorer
- *        -> Viterbi DP with hash-based join cost
- *        -> chosen UIDs -> decode + WSOLA Hann-OLA streamer
- *        -> WAV.
- *
- * Usage:
- *   spfy_synth <voice.vin> <voice.vdb> <voice.vcf> "<text>" <out.wav>
- *
- *   spfy_synth <voice.vin> <voice.vdb> <voice.vcf> <hpclass.bin>
- *              <vocab.json> <fe_tables_a> <fe_tables_b>
- *              "<text>" <out.wav>                          (legacy)
- *
- * This is the minimum-viable wiring: any bit-exact gaps (CART, full
- * post-scoring adjustment) are deferred -- the path produces audible
- * speech end-to-end so we can A/B against the engine.
- */
+/* spfy_synth -- M5 end-to-end text->WAV via FE -> USel -> WSOLA pipeline. */
 
 #include <spfy/spfy.h>
+#include "env.h"
 
 #include "../synth/spfy_synth_lib.h"
 
@@ -35,6 +15,7 @@
 #include "../voice/chunk_table.h"
 #include "../usel/anchor_score.h"
 #include "../usel/build_graph.h"
+#include "../usel/syl_span.h"
 #include "../usel/hash.h"
 #include "../usel/prsl.h"
 #include "../usel/viterbi.h"
@@ -42,16 +23,16 @@
 #include "../wsola/ulaw.h"
 #include "../wsola/wav.h"
 #include "../wsola/wsola.h"
+#include "../prosody/pmarks.h"
+#include "../prosody/psola_unit.h"
+#include "../prosody/contour.h"
+#include "../prosody/reselect.h"
 #include "../fe/fe.h"
 #include "../fe/phoneset.h"
 #include "../fe/prosody.h"
 #include "../fe/baked_pos.h"
 
-/* Live-trace event emitters. In the normal spfy_synth build (and the SAPI
- * DLL) SPFY_TRACE is undefined, so every spfy_trace_eventf() below is a
- * no-op macro that compiles away — the synth path stays byte-identical and
- * full-speed. Only the spfy_synth_trace target builds this file with
- * -DSPFY_TRACE=1, turning the emits into NDJSON written to the trace sink. */
+/* Live-trace event emitters. */
 #include "../common/le.h"
 #include "../common/log.h"
 
@@ -66,78 +47,640 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>     /* asset tempdir uniqueness via argv[0] mtime */
+#include <sys/stat.h>
 
+#if defined(_WIN32)
+/* Get/SetEnvironmentVariableA for Speechify 4 mode. */
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#endif
+
+/* ⚠ 169578 is TOM's last unit index, not a universal constant. The engine's
+ * trailing-silence unit is the LAST unit of whatever voice is loaded --
+ * measured on its own prsl_slot records, which pin every phrase's final
+ * half-phone to exactly that index: tom 169578, jill 185474, javier 219500,
+ * paulina 663409, felix 259659, each n_units-1. Use SILENCE_UID(v) wherever a
+ * voice is in scope; the literal survives only as the no-voice fallback. */
 #define SILENCE_SENTINEL_UID 169578u
+#define SILENCE_UID(v) ((v)->units.n_units ? (v)->units.n_units - 1u \
+                                           : SILENCE_SENTINEL_UID)
 #define MAX_CANDS_PER_SLOT   512
 
-/* ------------------------------------------------------------------ */
-/* Diagnostic verbosity                                                */
-/* ------------------------------------------------------------------ */
-
-/* Gates the per-synth status chatter emitted by spfy_synth_to_sink (FE
- * slot count, phrase-boundary marker, PRSL pool sizes, PostScoringAdj
- * tally, F0-curve params, final viterbi cost). Resolved lazily on first
- * use: verbose when SPFY_VERBOSE or SPFY_SYNTH_DEBUG is set in the
- * environment, else quiet. The CLI's -v/--verbose and -q/--quiet flags
- * override this by assigning it directly in main() before the first synth
- * call (-1 = unresolved). The one-time "[spfy] FE backend: ..." banner is
- * NOT gated — it prints in both modes.
+/*
+ * One switch for the prosody configuration judged closest to Speechify 4.
  *
- * Keying off SPFY_SYNTH_DEBUG keeps the audit drivers
- * (test/oracle/master_compare*.py, which set it) fully verbose with no
- * change on their side, while a bare `spfy_synth` invocation stays quiet. */
+ * WHAT IT IS. The `f95_k1` settings: the relative contour with a -6 st
+ * declination, zero-meaned, plus a soft absolute F0 floor at 95 Hz with a
+ * 1 st knee. On "This is a radar indicated threat." this was judged
+ * indistinguishable from a 2012 off-air reference by ear AND by waveform,
+ * and it is the best-sounding configuration the project has produced.
+ *
+ * WHY THESE AND NOT OTHERS, briefly, so they are not re-litigated:
+ *   ABSOLUTE=0   absolute mode costs 3.93 st/s of natural downstep and buys
+ *                no extra authority over the contour.
+ *   DECL 0 and FALL 0 -- the contour imposes NO global downward trend and no
+ *                phrase-final fall. This is the mode's biggest correction and
+ *                it was chosen by ear, twice, independently.
+ *
+ *                WHY, and it is not "less is better": the units are selected
+ *                from real bulletin speech, so they ALREADY carry both. From
+ *                the mark dump, with the contour zeroed, Tom's own units
+ *                decline at -0.71/-0.89/-0.61 st/s on 1.5/3.7/5.5 s phrases
+ *                and already land 0.77-1.32 st under his median at the tail.
+ *                The contour was adding a SECOND declination and a SECOND
+ *                final fall on top of ones that were already there.
+ *
+ *                The original DECL_ST=-6 made it worse than double: decl_st
+ *                is a total over NORMALISED position, so the same -6 st is
+ *                crammed into whatever length the phrase is, and the three
+ *                phrases came out at -3.54/-2.57/-1.44 st/s -- the SHORTEST
+ *                five times steeper than the voice ever is. Zero-meaning
+ *                splits that both ways, so the onset went to +2.8..+5.8 st
+ *                above the median while the tail sat 2.5..3.7 below. Two
+ *                listeners called it robotic at the top and "the end of a
+ *                very long sentence with no breaths taken" at the bottom, and
+ *                SPFY_RATE could not help because stretching the phrase
+ *                stretches the curve with it.
+ *
+ *                With both off, the realised tail is -1.19/-0.82/-0.97 st
+ *                against the units' own -0.79/-0.77/-1.05: the stage now
+ *                REDISTRIBUTES pitch across the phrase and no longer argues
+ *                with its overall shape. 94-97% of marks are still warped, so
+ *                this is emphatically not the stage doing nothing.
+ *
+ *                DECL_RATE_ST_S exists for anyone who does want declination:
+ *                it is st/SECOND, so slope stops depending on phrase length,
+ *                which DECL_ST cannot do. Bounded by DECL_MAX_ST. Both are
+ *                off here; the knobs are correct, the need for them was not.
+ *   DOWNSTEP_FLOOR 1.0 -- downstep OFF. The third global shape component
+ *                turned off for the same reason as the other two: the units
+ *                already carry it. Chosen by ear from a ladder whose rungs
+ *                were the MEASURED height of the accent on "lowest":
+ *                0.90 / 1.50 / 2.10 / 3.00 st. At the old 0.30 floor that
+ *                accent was the 5th in the phrase and pinned at 3.0*0.30,
+ *                a third the size of the first -- audible as "it is trying
+ *                but I can barely hear it".
+ *   ALIGN_MS=0   accents are centred on the syllable NUCLEUS now, and the
+ *                -25 ms pre-alignment was compensating for the old centring.
+ *                Measured with the accent-position dump: at -25 one of the
+ *                eight accents lands on a `t` rather than the following `iy`;
+ *                at 0 all eight land on a nucleus.
+ *   METHOD=lp    LP-PSOLA, not plain TD-PSOLA. This is the one change that
+ *                removed the "straining to hit the notes" stutter outright
+ *                rather than trading it against something else.
+ *
+ *                WHY TD-PSOLA COULD NOT BE FIXED. Raising pitch means emitting
+ *                more glottal pulses than the recording contains, so grains
+ *                get duplicated -- and a grain carries a pulse AND the formant
+ *                ring after it, so packing grains closer packs the rings
+ *                together and the closed phase disappears. That is a pressed
+ *                voice. A dose ladder judged by ear (0.2 / 0.5 / 1.0 / 3.0 st)
+ *                came out cleanly monotonic, which is the signature of an
+ *                artifact proportional to how far grains move. Everything that
+ *                left that distance alone failed: sub-sample and blended grain
+ *                placement, asymmetric up-limiting, the F0 floor, a dead zone,
+ *                and unit re-selection (which cannot help at all in relative
+ *                mode -- the shift is the contour, whatever unit is chosen).
+ *
+ *                LP-PSOLA moves the grain walk to the LP residual and rebuilds
+ *                the formants afterwards with coefficients pinned to the
+ *                ORIGINAL time axis. A duplicated residual pulse duplicates
+ *                far less signal, and the ring is regenerated rather than
+ *                copied. Measured: 0 fallbacks in 94 units, +9.8% synthesis
+ *                time, within 0.9 dB of TD in every band. Judged by ear to
+ *                remove the stutter while keeping the accent strength, which
+ *                is better than predicted -- the artifact and the prosody are
+ *                no longer traded against each other.
+ *
+ *                SPFY_PSOLA_METHOD=td restores plain TD-PSOLA.
+ *   MAX_ST=12    the limiter is a tanh, so it bends every ratio a little
+ *                rather than clipping a few; at 12 it removes under 0.27 st
+ *                at the 95th percentile and never binds hard.
+ *   FLOOR 95 Hz  without it 7.4% of a bulletin's marks land under 80 Hz and
+ *                the tail creaks. The knee makes it a soft landing so the
+ *                floor does not flatten the tail into a plateau.
+ *   RATE 1.0     a pass-through. Our untagged duration is already within
+ *                0.02 s of the reference, and the variable is listed here
+ *                only so the whole recipe is in one place.
+ *   SMOOTH 1     sub-sample grain placement. Level 0 rounds every output
+ *                pitch mark to a whole sample, which puts a random +-0.25
+ *                semitone on every glottal cycle -- measured at 8.7-9.4 cents
+ *                mean across three bulletins, and 0.29 samples of jitter
+ *                against a 0.026 instrument floor on a synthetic probe.
+ *                Level 1 removes it entirely (0.026, i.e. the floor). The
+ *                cost is 0.6-1.2 dB in 3.8-4.0 kHz, a band holding 0.5% of
+ *                the energy, because a half-sample delay must null at fs/2.
+ *                Level 2 additionally blends adjacent grains; it is a
+ *                judgment call rather than a defect fix, so it is opt-in.
+ *
+ * ⚠ NOT INCLUDED: band-aware re-selection (SPFY_PROSODY_RESELECT_BAND).
+ * It measurably cuts the work the knee has to do (-27% on the median bend)
+ * but was judged by ear to introduce a slight microstutter, and its
+ * permissive variant turned the word "threat" into a purr. Measurably
+ * better, audibly worse. It stays opt-in and out of this mode.
+ *
+ * EDIT THESE to change what the mode means. They are applied as env
+ * DEFAULTS -- anything already set in the environment wins -- so the mode
+ * is a starting point that can be overridden one variable at a time, and
+ * `SPFY_4_MODE=1 SPFY_PROSODY_DECL_ST=-3` is a legal way to explore.
+ */
+
+#define SPFY4_STAGE          "1"
+#define SPFY4_ABSOLUTE       "0"
+#define SPFY4_DECL_ST        "0"
+#define SPFY4_DECL_RATE_ST_S "0"
+#define SPFY4_DECL_MAX_ST    "4"
+#define SPFY4_FALL_ST        "0"
+#define SPFY4_MAX_ST         "12"
+#define SPFY4_ZEROMEAN       "1.0"
+#define SPFY4_F0_FLOOR_HZ    "95"
+#define SPFY4_F0_KNEE_ST     "1.0"
+#define SPFY4_RATE           "1.0"
+#define SPFY4_PSOLA_SMOOTH   "1"
+#define SPFY4_ALIGN_MS       "0"
+#define SPFY4_DOWNSTEP_FLOOR "1.0"
+#define SPFY4_PSOLA_METHOD   "lp"
+
+/* The pitch-mark pair is found by dropping the VDB's extension:
+ * <voice>/tom8.vdb -> <voice>/tom8{.pmindex,.pmdata}, which is where
+ * reveng/spfy4/tools/gen_pitchmarks_real.py writes them. */
+
+/* Remembered VDB path, for `\s4m` — see spfy4_note_vdb_path() in
+ * spfy_synth_lib.h for why it cannot just use argv. */
+static char g_s4_vdb[512];
+
+void spfy4_note_vdb_path(const char *vdb)
+{
+    if (!vdb || !*vdb) return;
+    snprintf(g_s4_vdb, sizeof g_s4_vdb, "%s", vdb);
+}
+
+/* Set `name` to `val` ONLY if it is not already in the environment, so an
+ * explicit setting always beats a mode default. */
+static void spfy4_env_default(const char *name, const char *val)
+{
+#if defined(_WIN32)
+    /* SetEnvironmentVariableA, NOT _putenv: _putenv updates only the CRT's
+     * private copy, and spfy_env() reads the OS block (see common/env.c for
+     * why it must). */
+    if (GetEnvironmentVariableA(name, NULL, 0) != 0) return;
+    SetEnvironmentVariableA(name, val);
+#else
+    if (getenv(name)) return;
+    setenv(name, val, 0);
+#endif
+}
+
+/* Apply the mode. */
+/* Set by --no-s4. */
+static int g_s4_forbidden = 0;
+
+/* A `\s4m` that arrived with nothing to say, waiting for the utterance it
+ * was meant for. */
+typedef struct spfy4_env_scope_s spfy4_env_scope_t;
+static int g_s4_pending = 0;
+
+/* Every variable the mode writes, listed once because the per-utterance
+ * `\s4m` path has to put every one of them back afterwards. */
+static const char *const SPFY4_VARS[] = {
+    "SPFY_PROSODY_STAGE", "SPFY_PROSODY_ABSOLUTE", "SPFY_PROSODY_DECL_ST",
+    "SPFY_PROSODY_MAX_ST", "SPFY_PROSODY_ZEROMEAN", "SPFY_PROSODY_F0_FLOOR_HZ",
+    "SPFY_PROSODY_F0_KNEE_ST", "SPFY_RATE", "SPFY_PROSODY_PM",
+    "SPFY_PSOLA_SMOOTH", "SPFY_PROSODY_DECL_RATE_ST_S",
+    "SPFY_PROSODY_DECL_MAX_ST", "SPFY_PROSODY_FALL_ST",
+    "SPFY_PROSODY_ALIGN_MS", "SPFY_PROSODY_DOWNSTEP_FLOOR",
+    "SPFY_PSOLA_METHOD",
+};
+#define SPFY4_NVARS (sizeof SPFY4_VARS / sizeof *SPFY4_VARS)
+
+/* Snapshot / restore, so `\s4m` can scope the mode to ONE utterance. */
+struct spfy4_env_scope_s {
+    char          val[SPFY4_NVARS][512];
+    unsigned char present[SPFY4_NVARS];
+};
+
+static spfy4_env_scope_t g_s4_pending_scope;
+
+static void spfy4_env_save(spfy4_env_scope_t *s)
+{
+    if (!s) return;
+    for (size_t i = 0; i < SPFY4_NVARS; ++i) {
+#if defined(_WIN32)
+        DWORD n = GetEnvironmentVariableA(SPFY4_VARS[i], s->val[i],
+                                          (DWORD)sizeof s->val[i]);
+        s->present[i] = (n != 0 && n < sizeof s->val[i]) ? 1u : 0u;
+        if (!s->present[i]) s->val[i][0] = '\0';
+#else
+        const char *v = getenv(SPFY4_VARS[i]);
+        s->present[i] = v ? 1u : 0u;
+        s->val[i][0] = '\0';
+        if (v) snprintf(s->val[i], sizeof s->val[i], "%s", v);
+#endif
+    }
+}
+
+static void spfy4_env_restore(const spfy4_env_scope_t *s)
+{
+    if (!s) return;
+    for (size_t i = 0; i < SPFY4_NVARS; ++i) {
+#if defined(_WIN32)
+        /* NULL removes the variable, which is what a previously-unset one
+         * must go back to -- setting it to "" would leave the prosody stage
+         * switched on. */
+        SetEnvironmentVariableA(SPFY4_VARS[i],
+                                s->present[i] ? s->val[i] : NULL);
+#else
+        if (s->present[i]) setenv(SPFY4_VARS[i], s->val[i], 1);
+        else               unsetenv(SPFY4_VARS[i]);
+#endif
+    }
+    spfy_env_reset();
+}
+
+/* Write the defaults. */
+static void spfy4_apply_defaults(const char *vdb_path)
+{
+    spfy4_env_default("SPFY_PROSODY_STAGE",       SPFY4_STAGE);
+    spfy4_env_default("SPFY_PROSODY_ABSOLUTE",    SPFY4_ABSOLUTE);
+    spfy4_env_default("SPFY_PROSODY_DECL_ST",     SPFY4_DECL_ST);
+    spfy4_env_default("SPFY_PROSODY_DECL_RATE_ST_S", SPFY4_DECL_RATE_ST_S);
+    spfy4_env_default("SPFY_PROSODY_DECL_MAX_ST",    SPFY4_DECL_MAX_ST);
+    spfy4_env_default("SPFY_PROSODY_FALL_ST",     SPFY4_FALL_ST);
+    spfy4_env_default("SPFY_PROSODY_MAX_ST",      SPFY4_MAX_ST);
+    spfy4_env_default("SPFY_PROSODY_ZEROMEAN",    SPFY4_ZEROMEAN);
+    spfy4_env_default("SPFY_PROSODY_F0_FLOOR_HZ", SPFY4_F0_FLOOR_HZ);
+    spfy4_env_default("SPFY_PROSODY_F0_KNEE_ST",  SPFY4_F0_KNEE_ST);
+    spfy4_env_default("SPFY_RATE",                SPFY4_RATE);
+    spfy4_env_default("SPFY_PSOLA_SMOOTH",        SPFY4_PSOLA_SMOOTH);
+    spfy4_env_default("SPFY_PROSODY_ALIGN_MS",    SPFY4_ALIGN_MS);
+    spfy4_env_default("SPFY_PROSODY_DOWNSTEP_FLOOR", SPFY4_DOWNSTEP_FLOOR);
+    spfy4_env_default("SPFY_PSOLA_METHOD",        SPFY4_PSOLA_METHOD);
+    /* ⚠ MANDATORY after the putenv()s above. spfy_env() caches per call site,
+     * including a cached NULL, so any site that probed one of these variables
+     * before this point would go on seeing "unset" forever and S4 mode would
+     * silently do nothing. The lazy call from the prosody stage is exactly
+     * such a case: by then synthesis has already read SPFY_PROSODY_*. */
+    spfy_env_reset();
+
+    /* Fall back to the path noted at voice-load time: a `\s4m` tag reaches
+     * here with no argv to derive from. */
+    if (!vdb_path || !*vdb_path) vdb_path = g_s4_vdb[0] ? g_s4_vdb : NULL;
+    if (vdb_path && *vdb_path && !spfy_env("SPFY_PROSODY_PM")) {
+        char stem[512];
+        size_t n = strlen(vdb_path);
+        const char *dot = NULL;
+        for (size_t i = n; i > 0; --i) {
+            char c = vdb_path[i - 1];
+            if (c == '/' || c == '\\') break;
+            if (c == '.') { dot = vdb_path + (i - 1); break; }
+        }
+        if (!dot) dot = vdb_path + n;
+        n = (size_t)(dot - vdb_path);
+        if (n < sizeof stem) {
+            memcpy(stem, vdb_path, n);
+            stem[n] = '\0';
+            spfy4_env_default("SPFY_PROSODY_PM", stem);
+            spfy_env_reset();
+        }
+    }
+    if (!spfy_env("SPFY_PROSODY_PM"))
+        spfy_log_warn("S4 mode: no SPFY_PROSODY_PM and none derivable; "
+                      "the prosody stage will not start");
+    else
+        /* Plain ASCII: this line lands in consoles that decode as cp1252,
+         * where a UTF-8 em-dash arrives as mojibake. */
+        spfy_log_warn("S4 mode ON - decl %s st, max %s st, floor %s Hz "
+                      "(knee %s st), marks '%s'",
+                      spfy_env("SPFY_PROSODY_DECL_ST"),
+                      spfy_env("SPFY_PROSODY_MAX_ST"),
+                      spfy_env("SPFY_PROSODY_F0_FLOOR_HZ"),
+                      spfy_env("SPFY_PROSODY_F0_KNEE_ST"),
+                      spfy_env("SPFY_PROSODY_PM"));
+}
+
+/* One-shot wrapper for the PROCESS-WIDE routes: --s4, -4 and SPFY_4_MODE. */
+static void spfy4_mode_apply(const char *vdb_path, int forced)
+{
+    static int done = 0;
+    if (forced < 0) { g_s4_forbidden = 1; done = 1; return; }
+    if (done) return;
+    if (forced == 0) {
+        const char *e = spfy_env("SPFY_4_MODE");
+        if (!(e && *e && *e != '0')) return;
+    }
+    done = 1;
+    spfy4_apply_defaults(vdb_path);
+}
+
+
+/* Gates the per-synth status chatter emitted by spfy_synth_to_sink (FE slot
+ * count, phrase-boundary marker, PRSL pool sizes, PostScoringAdj tally,
+ * F0-curve params, final viterbi cost). */
 static int spfy_synth_verbose = -1;
 
 static int synth_is_verbose(void)
 {
     if (spfy_synth_verbose < 0)
-        spfy_synth_verbose = (getenv("SPFY_VERBOSE") != NULL
-                              || getenv("SPFY_SYNTH_DEBUG") != NULL) ? 1 : 0;
+        spfy_synth_verbose = (spfy_env("SPFY_VERBOSE") != NULL
+                              || spfy_env("SPFY_SYNTH_DEBUG") != NULL) ? 1 : 0;
     return spfy_synth_verbose;
 }
 
-/* ------------------------------------------------------------------ */
-/* Audio helpers (mirror spfy_synth_replay.c)                          */
-/* ------------------------------------------------------------------ */
 
+/* One `pau` sub-unit inside a WsolaUnit, for FUN_08ee1ee0's resize.
+ *
+ * A unit can be a RUN of consecutive UIDs, and only one of its subs is the
+ * pau -- e.g. "dog." batches g1/g2 with the trailing pause because their UIDs
+ * are consecutive. The splice happens at THAT SUB's midpoint, not at the
+ * run's, so the offset has to travel with it. Sizing the run by truncation
+ * instead diverges from the engine across the whole run. */
+typedef struct {
+    uint32_t off;
+    uint32_t nom;
+    uint32_t tgt;
+} pau_resize_t;
+
+/* FUN_08ee1e70: symmetric V-notch centred ON a splice point, `n` samples each
+ * side, gain i/n rising away from the centre -- the signal is faded to ZERO
+ * at the join rather than crossfaded, because two uncorrelated stretches of
+ * recorded silence have nothing to crossfade.
+ *
+ * ⚠ `gain` lives in an x87 register: the step is read as float32 but
+ * ACCUMULATED in 80-bit, and each sample product is formed in 80-bit before
+ * the truncating convert (FUN_08ee8828, which is what a plain C float->int
+ * cast already does). Accumulating in float rounds every iteration and leaves
+ * +/-1 scattered across the taper. */
+static void apply_splice_taper(int16_t *buf, uint32_t blen,
+                               uint32_t at, uint32_t n)
+{
+    if (!n) return;
+    float step = (float)(1.0L / (long double)n);
+    long double gain = 0.0L;
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t fwd = at + i;
+        if (fwd < blen) buf[fwd] = (int16_t)((long double)buf[fwd] * gain);
+        if (at >= i)    buf[at - i] = (int16_t)((long double)buf[at - i] * gain);
+        gain += (long double)step;
+    }
+}
+
+/* `pau` / `n_pau`: the pau subs to resize, ascending by `off`. */
 static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_ms,
                                 const spfy_feat_table_t *feat,
                                 const spfy_vdb_t        *vdb,
                                 const spfy_vdb_lookup_t *lookup,
                                 uint32_t over_n,
+                                const pau_resize_t      *pau, uint32_t n_pau,
                                 int16_t **out, size_t *out_n,
-                                size_t *out_nominal_n)
+                                size_t *out_nominal_n,
+                                size_t *out_pre_n)
 {
     *out = NULL; *out_n = 0;
     if (out_nominal_n) *out_nominal_n = 0;
-    if (dur_ms == 0) return SPFY_OK;
+    if (out_pre_n) *out_pre_n = 0;
+    /* ⚠ A ZERO-DURATION UNIT IS STILL A WsolaUnit.
+     *
+     * Returning here made it vanish from the stream, so the engine's join for
+     * it never happened on our side. The engine builds the same
+     * [pre][content][over-read] span with content = 0, runs FUN_08ee3560, and
+     * emits the W blend samples; only the body loop finds nothing to copy.
+     * Skipping it therefore costs W of output AND leaves the NEXT join
+     * correlating against the wrong history, which shifts its lag too.
+     *
+     * Measured on javier es_084: path uid 198426 (dur_like 0) sits between
+     * 125792 and 127766 in the engine's own wsola_in list, and dropping it
+     * accounted for exactly the 82-sample deficit -- 80 of missing blend plus
+     * the 2 that the following join's lag moved by.
+     *
+     * SPFY_ZERO_DUR_SKIP=1 restores the drop. */
+    static int zd_skip = -1;
+    if (zd_skip < 0) zd_skip = (spfy_env("SPFY_ZERO_DUR_SKIP") != NULL);
+    if (dur_ms == 0 && zd_skip) return SPFY_OK;
     if (file_idx >= feat->n_entries) return SPFY_E_OOB;
     const spfy_feat_entry_t *fe = &feat->entries[file_idx];
     uint32_t rec_off = 0, rec_size = 0;
     int rc = spfy_vdb_lookup_by_name(lookup, fe->name, fe->name_len,
                                      &rec_off, &rec_size);
     if (rc != SPFY_OK) return rc;
-    uint32_t off  = lp_ms * 8u;
-    uint32_t nominal = dur_ms * 8u;
-    uint32_t blen = nominal + over_n;
-    if (off >= rec_size) return SPFY_OK;
-    /* Don't read past end of recording — clamp the overread; if we hit
-     * the recording end before getting the full nominal, that's the
-     * caller's problem (audible for non-existent overread but
-     * preserves correctness). */
-    if (off + blen > rec_size) blen = rec_size - off;
+    /* ⚠ SAMPLES vs BYTES. `rec_size` comes from the indx entry offsets, which
+     * are BYTE offsets into the data chunk, while everything below counts
+     * SAMPLES. Those coincide only for 1-byte µ-law, which is why the 8 kHz
+     * path could conflate them; at 16-bit PCM they differ by 2. */
+    uint32_t sps = vdb->sample_rate / 1000u;
+    if (sps == 0u) sps = 8u;
+    uint32_t bps = vdb->bytes_per_sample ? vdb->bytes_per_sample : 1u;
+    uint32_t rec_n = rec_size / bps;
+    uint32_t off  = lp_ms * sps;
+    /* Always decode the unit's FULL span. A pau target is not a truncation:
+     * FUN_08ee1ee0 resizes the pau IN THE DECODED BUFFER by splicing at its
+     * MIDPOINT -- deleting samples symmetrically about the middle (or
+     * inserting zeros there to lengthen) -- so both ENDS of the recorded
+     * silence survive and only the middle is dropped. Truncating to the
+     * first `target` samples keeps the right COUNT and the wrong SAMPLES. */
+    uint32_t nominal = dur_ms * sps;
+    if (off >= rec_n) return SPFY_OK;
+    /* ⭐ PRE-ROLL, not post-overread.
+     *
+     * FUN_08ee2960 reads from (local_pos - W) and records the unit's start
+     * as being W samples INTO the decoded buffer (this+0x35d0 = W, or the
+     * clamped start when the unit sits within W of the recording's head).
+     * FUN_08ee3560 then blends from buffer offset `lag`, i.e. inside that
+     * pre-roll, and FUN_08ee36e0 starts the body at W + lag.
+     *
+     * So the crossfade is fed by the audio BEFORE the unit, and the unit's
+     * own samples all survive to the output. Measured against the engine's
+     * output cursor over the pangram: speech units emit dur - lag, with a
+     * median shortfall of 16 samples and a +/-40 spread (= the lag range),
+     * NOT dur - 80.
+     *
+     * We previously over-read AFTER the unit and let the blend eat the
+     * unit's first `ola_samples`, losing an extra ~80 per join on top of
+     * the lag — which is why our renders stayed long in a way no constant
+     * could fix.
+     *
+     * `pre` is how much history we actually got; it may be short at the very
+     * start of a recording, which is exactly the clamped case the engine
+     * handles with `if (iVar11 < iVar3)`. SPFY_WSOLA_NO_PREROLL=1 restores
+     * the old post-overread. */
+    static int no_pre = -1;
+    if (no_pre < 0) no_pre = (spfy_env("SPFY_WSOLA_NO_PREROLL") != NULL);
+    /* Pre-roll is W (this+4), NOT the over-read. FUN_08ee2960 clamps it to
+     * local_pos when the unit sits within W of the recording's head, which
+     * is why uid 0 (local_pos 0) gets none at all. */
+    uint32_t pre = 0;
+    if (!no_pre) {
+        /* Pre-roll is W, so it follows the VDB's rate for the same reason
+         * the blend does -- 10 ms either way, 160 samples at 16 kHz. */
+        uint32_t want = spfy_wsola_w_for_rate(vdb->sample_rate);
+        pre = (want < off) ? want : off;
+    }
+    uint32_t start = off - pre;
+    uint32_t cap = pre + nominal + over_n;
+    for (uint32_t k = 0; k < n_pau; ++k)
+        if (pau[k].tgt > pau[k].nom) cap += (pau[k].tgt - pau[k].nom);
+    uint32_t blen = pre + nominal + over_n;
     if (blen == 0) return SPFY_OK;
-    int16_t *buf = (int16_t *)malloc(blen * sizeof *buf);
+    int16_t *buf = (int16_t *)malloc(cap * sizeof *buf);
     if (!buf) return SPFY_E_NOMEM;
-    spfy_ulaw_decode(vdb->data + rec_off + off, blen, buf);
+    /* ⚠ ZERO-PAD past the recording's end; do NOT shrink the span.
+     * FUN_08ee2960 allocates the decoded span plus a zero run and memsets it,
+     * so a unit near the end of a recording still presents a full-length
+     * buffer to the lag search and the body copy. Clamping `blen` instead
+     * shortened the last unit of every phrase -- 6 samples on "One.". */
+    uint32_t dec_n = blen;
+    if (start + dec_n > rec_n) dec_n = rec_n - start;
+    /* Sample-domain call: spfy_vdb_decode applies bytes-per-sample and
+     * zero-fills any shortfall, so the µ-law/PCM split stays out of here. */
+    spfy_vdb_decode(vdb, rec_off, start, dec_n, buf);
+    if (dec_n < blen)
+        memset(buf + dec_n, 0, (size_t)(blen - dec_n) * sizeof *buf);
+
+    /* Pau resize, FUN_08ee1ee0. Splice symmetrically about the pau's
+     * midpoint; the engine then writes the resolved target back into the
+     * sub's dur/samples fields, which is what our content length becomes.
+     *
+     * Splicing leaves a discontinuity, so FUN_08ee1e70 tapers it out: a
+     * symmetric V-notch centred ON the splice, `n` samples each side, gain
+     * i/n rising away from the centre. The signal is faded to ZERO at the
+     * join rather than crossfaded -- two uncorrelated stretches of recorded
+     * silence have nothing to crossfade. The decompiler drops the FPU
+     * operands; the disassembly is
+     *     step = 1/n; gain = 0
+     *     loop i: fwd[i] *= gain; bwd[-i] *= gain; gain += step
+     * and rounding is FUN_08ee8828 = truncate toward zero, which is what a
+     * plain C float->int cast already does. */
+    uint32_t content = nominal;
+    int32_t  shift   = 0;
+    for (uint32_t k = 0; k < n_pau; ++k) {
+        uint32_t splice_at = 0, splice_n = 0;
+        /* ⚠ `blen` has ALREADY absorbed every earlier splice, so `shift`
+         * belongs on the SPAN side of this test -- subtracting it from the
+         * buffer as well counts each earlier cut twice and rejects the
+         * second pau of any run that already shrank one.
+         *
+         * jill text_004 ("I.") is the case that exposed it: one run of four
+         * carries a leading pau (760 -> 104) and a trailing one (280 -> 200),
+         * and only the first ran. The engine's content there is 3760 where
+         * ours was 3840, and the first differing sample lands at buffer index
+         * 3642 -- the left edge of the taper the skipped splice would have
+         * applied (cut_start 3740, half-width 99). Both the length and the
+         * position fall out of running it.
+         *
+         * SPFY_PAU_AVAIL_LEGACY=1 restores the double-count. */
+        static int avail_legacy = -1;
+        if (avail_legacy < 0)
+            avail_legacy = (spfy_env("SPFY_PAU_AVAIL_LEGACY") != NULL);
+        int32_t span_end = (int32_t)(pre + nominal)
+                         + (avail_legacy ? 0 : shift);
+        int32_t avail_end = (int32_t)blen + (avail_legacy ? shift : 0);
+        if (!pau[k].nom || pau[k].tgt == pau[k].nom
+            || pau[k].off + pau[k].nom > nominal
+            || span_end > avail_end)
+            continue;
+        /* Midpoint of THIS SUB, not of the unit, and after any earlier
+         * splice has already moved the samples that precede it. */
+        int32_t base = (int32_t)(pre + pau[k].off) + shift;
+        if (base < 0) continue;
+        uint32_t mid = (uint32_t)base + pau[k].nom / 2u;
+        if (pau[k].tgt < pau[k].nom) {
+            uint32_t rm = pau[k].nom - pau[k].tgt;
+            uint32_t cut_end = mid + rm / 2u;
+            if (cut_end <= blen && cut_end >= rm && (cut_end - rm) >= pre) {
+                uint32_t cut_start = cut_end - rm;
+                memmove(buf + cut_start, buf + cut_end,
+                        (size_t)(blen - cut_end) * sizeof *buf);
+                blen    -= rm;
+                content -= rm;
+                shift   -= (int32_t)rm;
+                splice_at = cut_start;
+                splice_n  = pau[k].tgt / 2u;
+                if (splice_n) --splice_n;
+            }
+        } else {
+            uint32_t add = pau[k].tgt - pau[k].nom;
+            if (blen + add <= cap && mid <= blen) {
+                /* ⚠ ORDER. FUN_08ee1ee0 calls the taper BEFORE the memmove on
+                 * this branch (and after it on the shrink branch). So both
+                 * sides of the ORIGINAL midpoint are faded to zero and the
+                 * inserted zeros go BETWEEN them. Tapering afterwards instead
+                 * lands the forward half on the zeros, leaving the samples
+                 * after the gap jumping to full amplitude -- visible as a
+                 * zero run consistently shorter than the engine's. */
+                uint32_t n = pau[k].nom / 2u;
+                if (n) --n;
+                apply_splice_taper(buf, blen, mid, n);
+                memmove(buf + mid + add, buf + mid,
+                        (size_t)(blen - mid) * sizeof *buf);
+                memset(buf + mid, 0, (size_t)add * sizeof *buf);
+                blen    += add;
+                content += add;
+                shift   += (int32_t)add;
+            }
+        }
+        if (splice_n) apply_splice_taper(buf, blen, splice_at, splice_n);
+    }
+
     *out = buf; *out_n = blen;
-    /* Report the nominal sample count for duration-preserving truncation
-     * downstream. If we couldn't decode the full nominal (hit recording
-     * end), nominal is reduced to what's actually available. */
-    if (out_nominal_n)
-        *out_nominal_n = (nominal < blen) ? nominal : blen;
+    if (out_pre_n) *out_pre_n = pre;
+    /* The unit's own length after any resize; the caller offsets past `pre`
+     * to reach it. */
+    if (out_nominal_n) {
+        uint32_t avail = (blen > pre) ? (blen - pre) : 0;
+        *out_nominal_n = (content < avail) ? content : avail;
+    }
     return SPFY_OK;
+}
+
+/* Optional prosody stage (reveng/spfy4/PLAN_PROSODY_STAGE.md). */
+typedef struct {
+    int              on;
+    spfy_pmarks_t    marks;
+    spfy_contour_t   contour;
+    /* Per-slot output length, from prosody_slot_out_dur(). */
+    uint32_t        *slot_dur;
+    /* Global output sample count at the start of THIS phrase — for the
+     * end-of-phrase sanity check only. */
+    uint64_t         out0;
+    /* phone_center label of `pau`, or 0xFFFF if the voice has none.
+     *
+     * The real engine's WsolaVoiceDatabase::getPitchMarks (FUN_08EE4200,
+     * reveng/DLL_ANALYSIS.md) guards every sub-unit with
+     * `strncmp(sub_unit->name, "pau", 3) != 0` — pauses carry NO marks. We
+     * read them, and Tom's pau units supply 15.6% of all marks with periods
+     * down to 2 samples (4000 Hz), which is silence being warped by values
+     * that are not pitch periods at all. SPFY_PROSODY_PM_PAU=0 restores the
+     * old behaviour for A/B. */
+    uint16_t         pau_label;
+    const uint8_t   *phone_center;
+    uint32_t         phone_stride;
+    uint32_t         n_units;
+} prosody_stage_t;
+
+/* Identifies which units a push covers, so the stage can fetch their marks
+ * and sample the contour at the right output time. */
+typedef struct {
+    uint32_t uid;
+    uint32_t run_n;
+    /* Position on the contour's timeline where this push starts: the
+     * cumulative sum of prosody_slot_out_dur() over the slots already
+     * consumed in this phrase. */
+    uint64_t nom_pos;
+} unit_ref_t;
+
+/* Env helpers for the prosody guards. */
+static float env_f(const char *name, float dflt)
+{
+    const char *e = spfy_env(name);
+    return (e && *e) ? (float)atof(e) : dflt;
+}
+
+/* True only when the variable is explicitly "0" -- i.e. */
+static int env_flag_off(const char *name)
+{
+    const char *e = spfy_env(name);
+    return e && *e == '0';
 }
 
 static int append_recording_span(spfy_wsola_streamer_t *ws,
@@ -148,23 +691,31 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
                                  int align,
                                  uint8_t f0_tail, uint8_t f0_head,
                                  uint32_t sample_rate,
-                                 float vol_gain)
+                                 float vol_gain,
+                                 const prosody_stage_t *pros,
+                                 const unit_ref_t *ref,
+                                 const pau_resize_t *pau, uint32_t n_pau)
 {
-    int16_t *buf = NULL; size_t n = 0, nominal_n = 0;
+    int16_t *buf = NULL; size_t n = 0, nominal_n = 0, pre_n = 0;
     /* Over-decode by SPFY_WSOLA_MAX_LAG_DEFAULT (= engine's lag search
-     * range = window_size = 80 samples @ 8 kHz) so the lag shift has
-     * a look-ahead reservoir. SPFY_WSOLA_NO_OVERREAD=1 disables. */
+     * range = window_size = 80 samples @ 8 kHz) so the lag shift has a
+     * look-ahead reservoir. */
     static int no_overread = -1;
     if (no_overread < 0)
-        no_overread = (getenv("SPFY_WSOLA_NO_OVERREAD") != NULL);
-    uint32_t over_n = no_overread ? 0u : SPFY_WSOLA_MAX_LAG_DEFAULT;
+        no_overread = (spfy_env("SPFY_WSOLA_NO_OVERREAD") != NULL);
+    /* ⚠ 2W, not W. FUN_08ee2960 grows the decoded span by `this+0xc` (= 2W =
+     * 160 @ 8 kHz), and that tail is what FUN_08ee2d60 copies into the
+     * lag-search history. Over-reading only W left the next join correlating
+     * against 80 samples of zero padding. */
+    uint32_t over_n = no_overread ? 0u
+                    : (spfy_wsola_w_for_rate(vdb->sample_rate) * 2u);
     int rc = decode_unit_samples((uint16_t)file_idx, (uint16_t)lp,
                                  (uint16_t)dur, feat, vdb, lookup,
-                                 over_n, &buf, &n, &nominal_n);
+                                 over_n, pau, n_pau,
+                                 &buf, &n, &nominal_n, &pre_n);
     if (rc != SPFY_OK) return rc;
     /* Per-word volume (\!vp/\!vd embedded tags): scale the decoded unit
-     * before the OLA push. gain == 1.0 (the untagged default) is a no-op so
-     * normal synth stays byte-identical. */
+     * before the OLA push. */
     if (vol_gain != 1.0f && buf) {
         for (size_t i = 0; i < n; ++i) {
             float v = (float)buf[i] * vol_gain;
@@ -173,7 +724,7 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
             buf[i] = (int16_t)lrintf(v);
         }
     }
-    if (getenv("SPFY_TRACE_UNITS")) {
+    if (spfy_env("SPFY_TRACE_UNITS")) {
         /* Cumulative sample-count tracker so the user can map output
          * waveform positions back to which unit was being emitted. */
         static uint64_t cum_n = 0;
@@ -184,20 +735,259 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
                 (unsigned long long)cum_n);
         cum_n += nominal_n;
     }
-    rc = spfy_wsola_push_unit_psola(ws, buf, n, nominal_n, align,
-                                    f0_tail, f0_head, sample_rate);
+    /* Prosody stage: warp this unit's pitch toward the FE-derived contour,
+     * pre-join, using the exact VDB marks. */
+    if (pros && pros->on && ref && buf) {
+        /* Concatenate the run's per-uid marks, exactly as the engine's
+         * getPitchMarks walks consecutive sub-units. */
+        int16_t mk[512];
+        float   tg[512];
+        /* DIAGNOSTIC ONLY, never read by the warp. */
+        float   tgraw[512];
+        float   stc[512];
+        unsigned char why[512];        /* 0 warp 1 pau 2 nat_guard 3 lead-in inherited 4 lead-in orphan 5 no period
+ * 6 contour returned 0 */
+        /* mk[] concatenates several units' mark arrays, and the LEAD-IN is
+         * the first element of EACH unit's array, not just of mk[]. */
+        unsigned char lead[512];
+        unsigned char paum[512];
+        int nm = 0;
+        for (uint32_t k = 0; k < ref->run_n && nm < (int)(sizeof mk / sizeof *mk); ++k) {
+            const int16_t *pp = NULL;
+            /* `pau` sub-units are FLAGGED, not dropped. */
+            const int is_pau =
+                (pros->pau_label != 0xFFFFu && pros->phone_center
+                 && (ref->uid + k) < pros->n_units
+                 && pros->phone_center[(size_t)(ref->uid + k)
+                                       * pros->phone_stride]
+                    == (uint8_t)pros->pau_label);
+            int c = spfy_pmarks_get(&pros->marks, ref->uid + k, &pp);
+            for (int i = 0; i < c && nm < (int)(sizeof mk / sizeof *mk); ++i) {
+                lead[nm] = (i == 0) ? 1u : 0u;
+                paum[nm] = is_pau ? 1u : 0u;
+                mk[nm++] = pp[i];
+            }
+        }
+        if (nm >= 2) {
+            double t = (double)ref->nom_pos;
+            /* Only binds in ABSOLUTE mode, where a bad mark no longer
+             * cancels out of the warp ratio. */
+            /* ⚠ NO LONGER GATED ON ABSOLUTE MODE. The original reasoning was
+             * that in relative mode a wrong natural cancels out of the warp
+             * RATIO (tg/nat collapses to 2^(st/12)), so a bad mark was
+             * harmless. It cancels out of the ratio and NOT out of the PSOLA:
+             * the warp still lays this unit's pulses at mk/ratio, so a mark
+             * carrying half the true period places pulses at double rate.
+             *
+             * Measured on 4 items (accent_where.py): 8.66% of emitted marks sit
+             * more than 7 st from Tom's 117.6 Hz median, and they are 2.4x
+             * over-represented among the highest output pitches -- 22% of
+             * z011's top decile against a 9.0% base rate. That is the
+             * "struggles to hit it" half of the complaint, and it is separate
+             * from the target being too high.
+             *
+             * tg = 0 leaves such a mark alone rather than warping it on a
+             * period that is not a period. SPFY_PROSODY_NAT_GUARD=0 restores
+             * the old behaviour; the stage is off by default either way. */
+            /* The warp's upward ceiling, so the dumps below report what the
+             * engine ACTUALLY applies rather than the symmetric limit. */
+            double warp_max_up = 0.0, warp_dz = 0.0;
+            {
+                const char *mu = spfy_env("SPFY_PROSODY_MAX_UP_ST");
+                if (mu && *mu) warp_max_up = strtod(mu, NULL);
+                const char *dz = spfy_env("SPFY_PROSODY_DEADZONE_ST");
+                if (dz && *dz) warp_dz = strtod(dz, NULL);
+            }
+            const int nat_guard = !env_flag_off("SPFY_PROSODY_NAT_GUARD");
+            const float nat_min_hz = env_f("SPFY_PROSODY_NAT_MIN_HZ", 50.0f);
+            const float nat_max_hz = env_f("SPFY_PROSODY_NAT_MAX_HZ", 400.0f);
+            const int lead_in_fix = !env_flag_off("SPFY_PROSODY_PM_LEADIN");
+            /* Diagnostic only, and gated because spfy_contour_st_at() walks
+             * every accent and valley -- worth one getenv, not one extra
+             * traversal per mark on the shipped path. */
+            static int want_stc = -1;
+            if (want_stc < 0)
+                want_stc = (spfy_env("SPFY_PROSODY_MARK_DUMP") != NULL);
+            for (int i = 0; i < nm; ++i) {
+                t += (double)mk[i];
+                tgraw[i] = 0.0f;
+                stc[i] = 0.0f;
+                why[i] = 0u;
+                if (want_stc)
+                    stc[i] = spfy_contour_st_at(&pros->contour, t);
+                if (paum[i]) { tg[i] = 0.0f; why[i] = 1u; continue; }
+                /* natural F0 at this mark is the reciprocal of its own
+                 * period; in RELATIVE mode the contour rides on it, so
+                 * zeroed parameters warp at ratio 1.0 (bit-identical). */
+                float nat = (mk[i] > 0)
+                          ? (float)((double)sample_rate / (double)mk[i])
+                          : 0.0f;
+                /* Degenerate pitch marks produce absurd "natural" F0, and
+                 * in ABSOLUTE mode that lands straight in the warp ratio. */
+                if (nat_guard && nat > 0.0f
+                    && (nat < nat_min_hz || nat > nat_max_hz)) {
+                    tg[i] = 0.0f;
+                    why[i] = 2u;
+                    continue;
+                }
+                tg[i] = spfy_contour_at(&pros->contour, t, nat);
+                tgraw[i] = tg[i];
+                if (tg[i] <= 0.0f) why[i] = (mk[i] > 0) ? 6u : 5u;
+                /* ABSOLUTE F0 BOUNDS, which max_st does not provide. */
+                if (tg[i] > 0.0f) {
+                    const float knee = env_f("SPFY_PROSODY_F0_KNEE_ST", 2.0f);
+                    const float flo  = env_f("SPFY_PROSODY_F0_FLOOR_HZ", 0.0f);
+                    const float cei  = env_f("SPFY_PROSODY_F0_CEIL_HZ", 0.0f);
+                    if (flo > 0.0f && tg[i] < flo) {
+                        double d = 12.0 * log2((double)flo / (double)tg[i]);
+                        double c = (knee > 0.0f)
+                                 ? (double)knee * (1.0 - exp(-d / knee))
+                                 : 0.0;
+                        tg[i] = (float)((double)flo / pow(2.0, c / 12.0));
+                    } else if (cei > 0.0f && tg[i] > cei) {
+                        double d = 12.0 * log2((double)tg[i] / (double)cei);
+                        double c = (knee > 0.0f)
+                                 ? (double)knee * (1.0 - exp(-d / knee))
+                                 : 0.0;
+                        tg[i] = (float)((double)cei * pow(2.0, c / 12.0));
+                    }
+                }
+            }
+            /* LEAD-IN MARKS. */
+            if (lead_in_fix) {
+                for (int i = 0; i < nm; ++i) {
+                    if (!lead[i] || mk[i] <= 0) continue;
+                    int j = i + 1;
+                    if (j >= nm || mk[j] <= 0 || tg[j] <= 0.0f) {
+                        tg[i] = 0.0f;
+                        tgraw[i] = 0.0f;
+                        why[i] = 4u;
+                        continue;
+                    }
+                    double nat_j = (double)sample_rate / (double)mk[j];
+                    double nat_i = (double)sample_rate / (double)mk[i];
+                    tg[i] = (float)(nat_i * ((double)tg[j] / nat_j));
+                    tgraw[i] = (tgraw[j] > 0.0f)
+                             ? (float)(nat_i * ((double)tgraw[j] / nat_j))
+                             : tg[i];
+                    why[i] = 3u;
+                }
+            }
+            /* SPFY_PROSODY_WARP_DUMP=1: per-unit requested vs CLAMPED
+             * shift, so a "robotic tail" can be attributed rather than
+             * guessed. */
+            if (spfy_env("SPFY_PROSODY_WARP_DUMP")) {
+                /* Report the APPLIED shift beside the requested one. */
+                const char *sv = spfy_env("SPFY_PROSODY_SOFT_ST");
+                const int soft = !(sv && *sv == '0');
+                const double lim = (double)pros->contour.p.max_st;
+                double lo = 99.0, hi = -99.0, sum = 0.0, asum = 0.0;
+                double alo = 99.0;
+                int pin = 0, cnt = 0;
+                for (int i = 0; i < nm; ++i) {
+                    if (mk[i] <= 0 || tg[i] <= 0.0f) continue;
+                    double nat = (double)sample_rate / (double)mk[i];
+                    double st  = 12.0 * log2((double)tg[i] / nat);
+                    /* Same limiter the WARP uses, asymmetry included. */
+                    double ar  = spfy_prosody_deadzone(
+                                     spfy_prosody_limit_ratio2(
+                                         (double)tg[i] / nat, warp_max_up,
+                                         lim, soft), warp_dz);
+                    double ast = 12.0 * log2(ar);
+                    if (st < lo) lo = st;
+                    if (st > hi) hi = st;
+                    if (ast < alo) alo = ast;
+                    sum += st;
+                    asum += ast;
+                    if (st < -lim + 1e-6 || st > lim - 1e-6) ++pin;
+                    ++cnt;
+                }
+                if (cnt)
+                    fprintf(stderr,
+                            "[warp] uid=%6u run=%u marks=%3d  want avg=%+6.2f "
+                            "min=%+6.2f max=%+6.2f  got avg=%+6.2f "
+                            "min=%+6.2f  pinned=%d/%d%s\n",
+                            ref->uid, ref->run_n, cnt, sum / cnt, lo, hi,
+                            asum / cnt, alo, pin, cnt,
+                            pin ? "  <-- CLAMPED" : "");
+            }
+            /* SPFY_PROSODY_MARK_DUMP=1: one line per pitch mark, carrying
+             * the engine's OWN arithmetic instead of an estimate of it. */
+            if (spfy_env("SPFY_PROSODY_MARK_DUMP")) {
+                const char *msv = spfy_env("SPFY_PROSODY_SOFT_ST");
+                const int msoft = !(msv && *msv == '0');
+                const double mlim = (double)pros->contour.p.max_st;
+                double tn = (double)ref->nom_pos;
+                /* Output-sample anchor. */
+                const unsigned long wpos =
+                    ws && ws->wav
+                    ? (unsigned long)(ws->wav->n_samples_written
+                                      + (ws->engine_mode ? ws->hist_n
+                                                         : ws->tail_n))
+                    : 0UL;
+                for (int i = 0; i < nm; ++i) {
+                    double nat, ar;
+                    tn += (double)mk[i];
+                    if (mk[i] <= 0) continue;
+                    nat = (double)sample_rate / (double)mk[i];
+                    ar = (tg[i] > 0.0f)
+                       ? spfy_prosody_deadzone(
+                             spfy_prosody_limit_ratio2((double)tg[i] / nat,
+                                                       warp_max_up, mlim,
+                                                       msoft), warp_dz)
+                       : 1.0;
+                    /* nominal_n is emitted too because the marks describe
+                     * the SOURCE recording's periods, while the engine
+                     * emits nominal_n samples for the span. */
+                    /* `pau` is emitted so the analysis side does not have
+                     * to re-derive which units are silence -- it was
+                     * excluding two hard-coded uids while the engine flags
+                     * every unit carrying the pau phone. */
+                    /* Fields 9-11, APPENDED: the raw contour target (pre
+                     * floor/ceiling knee), the target actually used, and
+                     * the branch that decided this mark. */
+                    fprintf(stderr,
+                            "[mark] %u %d %d %.8f %.1f %lu %lu %d "
+                            "%.4f %.4f %d %.6f\n",
+                            ref->uid, (int)lead[i], (int)mk[i], ar, tn, wpos,
+                            (unsigned long)nominal_n, (int)paum[i],
+                            (double)tgraw[i], (double)tg[i], (int)why[i],
+                            (double)stc[i]);
+                }
+            }
+            spfy_prosody_warp_unit(buf, n, mk, nm, tg,
+                                   pros->contour.p.max_st, (int)sample_rate);
+        }
+    }
+    /* Engine-faithful path. */
+    static int legacy = -1;
+    if (legacy < 0) legacy = (spfy_env("SPFY_WSOLA_LEGACY") != NULL);
+    /* Paired with wsola.c's [wsolat] line under the same env var; emitted
+     * first so the two interleave as (unit, push) on stderr. */
+    static int ws_trace = -1;
+    if (ws_trace < 0) ws_trace = (spfy_env("SPFY_WSOLA_TRACE") != NULL);
+    if (ws_trace) {
+        fprintf(stderr, "[wsolau] uid=%u file=%u lp=%u dur=%u run=%u npau=%u",
+                ref ? ref->uid : 0u, file_idx, lp, dur,
+                ref ? ref->run_n : 0u, n_pau);
+        for (uint32_t k = 0; k < n_pau; ++k)
+            fprintf(stderr, " pau%u=[off=%u nom=%u tgt=%u]", k,
+                    pau[k].off, pau[k].nom, pau[k].tgt);
+        fputc('\n', stderr);
+    }
+    if (!legacy) {
+        rc = spfy_wsola_push_engine(ws, buf, n, pre_n, nominal_n);
+    } else {
+        spfy_wsola_set_next_pre(ws, (uint32_t)pre_n);
+        rc = spfy_wsola_push_unit_psola(ws, buf, n, nominal_n, align,
+                                        f0_tail, f0_head, sample_rate);
+    }
     free(buf);
     return rc;
 }
 
-/* ------------------------------------------------------------------ */
-/* CART feature kernels (durt + f0tr)                                  */
-/* ------------------------------------------------------------------ */
 
-/* feat-order phone -> ccos labl index. Mirrors phone_feat_to_labl in
- * src/usel/anchor_score.c; see voice/phone_order.h for where the table
- * comes from. Was a hardcoded Tom swap (9->10, 10->11, 11->9; 14<->15),
- * which silently mis-indexed the durt tree forest on every other voice. */
+/* feat-order phone -> ccos labl index. */
 static uint32_t phone_to_labl(const spfy_voice_t *v, uint32_t phone)
 {
     if (!v || !v->phone_order.feat_to_labl ||
@@ -206,10 +996,7 @@ static uint32_t phone_to_labl(const spfy_voice_t *v, uint32_t phone)
     return (lab == SPFY_PHONE_NONE) ? phone : lab;
 }
 
-/* Is this slice ctx[2] one of the voice's two `pau` half-phone classes?
- * Was hardcoded to 64/65 -- Tom's pau sits at feat index 32, but felix's
- * is 35 (70/71) and javier's 24 (48/49), so the literal silently
- * mis-classified silence on every non-Tom voice. */
+/* Is this slice ctx[2] one of the voice's two `pau` half-phone classes? */
 static int ctx_is_silence(const spfy_voice_t *v, uint32_t ctx2)
 {
     uint32_t pau = v ? spfy_phone_order_index(&v->phone_order, "pau")
@@ -218,22 +1005,102 @@ static int ctx_is_silence(const spfy_voice_t *v, uint32_t ctx2)
     return ctx2 == l || ctx2 == l + 1u;
 }
 
+/* Per-slot OUTPUT length in samples, mirroring the concat loop's emission
+ * rules. */
+/* Word/phrase event positions are captured in PRE-stretch sample time,
+ * because spfy_wav_close() applies the time-scale after the whole utterance
+ * is held. */
+static uint32_t out_pos(const spfy_wav_writer_t *w, uint32_t pos)
+{
+    if (!w || w->stretch <= 0.0f || w->stretch == 1.0f) return pos;
+    return (uint32_t)((double)pos / (double)w->stretch + 0.5);
+}
+
+static void prosody_slot_out_dur(const spfy_voice_t *v,
+                                 const uint32_t *path_uids, uint32_t n_slots,
+                                 const uint32_t *hp_to_post,
+                                 const uint32_t (*ctx_arr)[5],
+                                 const uint32_t *hp_word_idx,
+                                 size_t silence_n, int no_run,
+                                 uint32_t *out_dur)
+{
+    memset(out_dur, 0, (size_t)n_slots * sizeof *out_dur);
+    uint32_t prev_word_idx = 0xFFFFFFFFu;
+    uint32_t last_emitted  = 0xFFFFFFFFu;
+    int      prev_have     = 0;
+    uint32_t s = 0;
+    while (s < n_slots) {
+        uint32_t u = path_uids[s];
+        if (u == 0xFFFFFFFFu) { ++s; continue; }
+        if (u == 0 || u == SILENCE_UID(v) || u >= v->units.n_units) {
+            ++s; prev_have = 0; continue;
+        }
+        spfy_unit_record_t r1;
+        if (spfy_unit_record_get(&v->units, u, &r1) != SPFY_OK) {
+            ++s; prev_have = 0; continue;
+        }
+        int this_is_silence = ctx_is_silence(v, ctx_arr[hp_to_post[s]][2]);
+        uint32_t this_word_idx = hp_word_idx[s];
+        if (silence_n > 0 && prev_have && prev_word_idx != 0xFFFFFFFFu
+            && this_word_idx != prev_word_idx && !this_is_silence) {
+            if (last_emitted < n_slots)
+                out_dur[last_emitted] += (uint32_t)silence_n;
+            prev_have = 0;
+        }
+        if (!this_is_silence) prev_word_idx = this_word_idx;
+
+        uint32_t run_n = 1;
+        if (!no_run) {
+            while (s + run_n < n_slots) {
+                uint32_t v_prev = path_uids[s + run_n - 1];
+                uint32_t v_next = path_uids[s + run_n];
+                if (v_next == 0 || v_next == SILENCE_UID(v)
+                    || v_next >= v->units.n_units) break;
+                if (v_next != v_prev + 1u) break;
+                spfy_unit_record_t rn, rp;
+                if (spfy_unit_record_get(&v->units, v_next, &rn) != SPFY_OK) break;
+                if (spfy_unit_record_get(&v->units, v_prev, &rp) != SPFY_OK) break;
+                if (rn.file_idx != rp.file_idx) break;
+                if (rn.local_pos < rp.local_pos
+                    || rn.local_pos > rp.local_pos + rp.dur_like + 64u) break;
+                ++run_n;
+            }
+        }
+        for (uint32_t k = 0; k < run_n; ++k) {
+            spfy_unit_record_t rk, rn;
+            uint32_t ms;
+            if (spfy_unit_record_get(&v->units, path_uids[s + k], &rk)
+                != SPFY_OK)
+                continue;
+            if (k + 1 < run_n
+                && spfy_unit_record_get(&v->units, path_uids[s + k + 1], &rn)
+                   == SPFY_OK
+                && rn.local_pos >= rk.local_pos)
+                ms = (uint32_t)rn.local_pos - (uint32_t)rk.local_pos;
+            else
+                ms = (uint32_t)rk.dur_like;
+            out_dur[s + k] = ms * 8u;
+        }
+        last_emitted = s + run_n - 1;
+        prev_have = 1;
+        s += run_n;
+    }
+}
+
 typedef struct {
     const spfy_fe_slot_t *slot;
     uint32_t              q5;
-    const spfy_voice_t   *voice;    /* for the feat->labl phone permutation */
-    int                   is_f0tr;  /* if 1, q3/q4/q5/q9 are clamped to 0
-                                       per engine's f0tr CART convention
-                                       (cart_walker_args trace shows these
-                                       are always 0 when tree=='f0tr'). */
+    const spfy_voice_t   *voice;
+    int                   is_f0tr;  /* if 1, q3/q4/q5/q9 are clamped to 0 per engine's f0tr CART convention
+ * (cart_walker_args trace shows these are always 0 when tree=='f0tr'). */
 } cart_feat_ctx_t;
 
 static int32_t cart_feat(uint32_t q_type, void *user)
 {
     const cart_feat_ctx_t *c = (const cart_feat_ctx_t *)user;
     if (c->is_f0tr) {
-        /* engine's f0tr CART is syllable-level — only q1, q2, q7, q8
-         * are populated. Everything else clamps to 0. */
+        /* engine's f0tr CART is syllable-level — only q1, q2, q7, q8 are
+         * populated. */
         if (q_type == 3 || q_type == 4 || q_type == 5 || q_type == 9)
             return 0;
     } else {
@@ -277,11 +1144,7 @@ static int32_t cart_feat(uint32_t q_type, void *user)
     return v;
 }
 
-/* Compute the q5 (halfphones-in-syllable) array. Slots in the same
- * syllable share (sp[2], sp[3]); the count of consecutive same-tuple
- * slots is the slot's q5. Boundary-silence slots (FE pad) get q5=1
- * per the engine's _NULL_-syllable fallback. Unused under SPFY_FE_HOSTED
- * (the slot-tree derive_q5_table replaces it). */
+/* Compute the q5 (halfphones-in-syllable) array. */
 __attribute__((unused)) static
 void compute_q5_per_slot(const spfy_fe_utterance_t *utt,
                                  uint32_t *q5_out)
@@ -306,10 +1169,7 @@ void compute_q5_per_slot(const spfy_fe_utterance_t *utt,
     }
 }
 
-/* Detect the phrase-terminating punctuation in the input text. The slot
- * derivation reads `phrase_term` to choose between sentence-final and
- * mid-sentence prosody categories. Used by BOTH delta_to_fe_utt (non-
- * hosted) AND parsed_to_fe_utt (hosted); kept outside the ifdef. */
+/* Detect the phrase-terminating punctuation in the input text. */
 static char detect_phrase_term(const char *text)
 {
     char term = '.';
@@ -321,26 +1181,13 @@ static char detect_phrase_term(const char *text)
     return term;
 }
 
-/* Forward decl: is_arpa_vowel is defined in the post-ifdef block but
- * used by BOTH delta_to_fe_utt (non-hosted) AND parsed_to_fe_utt
- * (hosted, max-onset re-syllabification). Kept outside the ifdef so
- * the hosted branch can see it. */
+/* Forward decl: is_arpa_vowel is defined in the post-ifdef block but used
+ * by BOTH delta_to_fe_utt (non-hosted) AND parsed_to_fe_utt (hosted,
+ * max-onset re-syllabification). */
 static int is_arpa_vowel(const char *a);
 
-/* Classify a ToBI accent string's phrase-BOUNDARY tone into an F0
- * ramp endpoint in signed semitones (relative to the syllable's
- * carrier). 0 = no boundary tone. Only phrase-level boundary tones
- * (the `X-Y%` forms) trigger a ramp; starred pitch accents (H*, L*)
- * shape prominence and are handled via syl_accent. The two tone
- * letters immediately preceding `%` select the contour:
- *
- *   L-L%  declarative fall    → -6
- *   L-H%  continuation rise    → +4
- *   H-L%  list-final / partial → -3
- *   H-H%  question rise        → +6
- *
- * The magnitude is a nominal contour depth; downstream scaling decides
- * how it maps to an actual F0 bias. Accepts both `L-L%` and `LL%`. */
+/* Classify a ToBI accent string's phrase-BOUNDARY tone into an F0 ramp
+ * endpoint in signed semitones (relative to the syllable's carrier). */
 static int boundary_tone_target_st(const char *accent)
 {
     if (!accent || !*accent) return 0;
@@ -356,13 +1203,73 @@ static int boundary_tone_target_st(const char *accent)
     return 0;
 }
 
+/* Classify the STARRED pitch-accent part of a ToBI accent string into a
+ * nominal F0 bias in signed semitones, relative to a generic H* (so the
+ * stock FE's near-universal H* maps to 0 and stays put). */
+static int accent_type_st(const char *accent)
+{
+    if (!accent || !*accent) return 0;
+    const char *star = strchr(accent, '*');
+    if (!star) return 0;
+    const char *semi = strchr(accent, ';');
+    if (semi && star > semi) return 0;
+    /* Longest-match against the token that ends at '*' (plus the L*+H
+     * lookahead). */
+    if (strncmp(accent, "H+!H*", 5) == 0) return -2;
+    if (strncmp(accent, "L+H*", 4) == 0)  return +2;
+    if (strncmp(accent, "L*+H", 4) == 0)  return -3;
+    if (strncmp(accent, "!H*", 3) == 0)   return -2;
+    if (strncmp(accent, "L*", 2) == 0)    return -5;
+    if (strncmp(accent, "H*", 2) == 0)    return 0;
+    return 0;
+}
+
+/* Is this phone a syllable NUCLEUS -- the thing that actually carries
+ * stress? */
+static int phone_is_nucleus(const char *n)
+{
+    static const char *const NUC[] = {
+        "aa", "ae", "ah", "ao", "aw", "ax", "axr", "ay", "eh", "er", "ey",
+        "ih", "ix", "iy", "ow", "oy", "uh", "uw", "ux", "el", "em", "en",
+    };
+    if (!n || !*n) return 0;
+    for (size_t i = 0; i < sizeof NUC / sizeof *NUC; ++i)
+        if (strcmp(n, NUC[i]) == 0) return 1;
+    return 0;
+}
+
+/* The inline \![ToBI:] vocabulary. */
+static const struct {
+    const char *name;
+    uint8_t     code;
+    uint8_t     accented;
+    int8_t      bias;
+} SPFY_TOBI_TAGS[] = {
+    { "H+!H*", 6, 1, -2 },
+    { "L*+H",  7, 1, -3 },
+    { "L+H*",  4, 1, +2 },
+    { "!H*",   5, 1, -2 },
+    { "H*",    1, 1,  0 },
+    { "L*",    2, 1, -5 },
+    { "NONE",  3, 0,  0 },
+    { "0",     3, 0,  0 },
+};
+#define SPFY_N_TOBI_TAGS (sizeof SPFY_TOBI_TAGS / sizeof *SPFY_TOBI_TAGS)
+
+static int spfy_tobi_by_code(uint8_t code, uint8_t *accented, int8_t *bias)
+{
+    for (size_t i = 0; i < SPFY_N_TOBI_TAGS; ++i) {
+        if (SPFY_TOBI_TAGS[i].code != code) continue;
+        *accented = SPFY_TOBI_TAGS[i].accented;
+        *bias     = SPFY_TOBI_TAGS[i].bias;
+        return 1;
+    }
+    return 0;
+}
+
 
 /* Hosted FE: build spfy_fe_utt_t directly from the parser's per-word
- * structure for a single phrase_id. The hosted FE has already done
- * POS-aware accenting + correct syllabification, so this converter
- * skips the function-word stop list, baked-POS gating, and max-onset
- * resyllabification that delta_to_fe_utt applies to the hand-written
- * FE's output. */
+ * structure for a single phrase_id. */
 static int parsed_to_fe_utt(const fe_parsed_t *parsed,
                             const char        *original_text,
                             int                phrase_id,
@@ -379,16 +1286,14 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
     }
     if (n_words_phr == 0) return SPFY_E_INVAL;
 
-    uint32_t total_words = (uint32_t)n_words_phr + 2u;   /* + 2 _NULL_ pads */
+    uint32_t total_words = (uint32_t)n_words_phr + 2u;
     uint32_t total_syls  = (uint32_t)n_syls_phr  + 2u;
     uint32_t total_segs  = (uint32_t)n_segs_phr  + 2u;
 
     out->n_words     = total_words;
     out->n_syls      = total_syls;
     out->n_segs      = total_segs;
-    /* Per-phrase terminator captured by the parser. Fall back to
-     * full-text scan if the parser didn't get it (e.g. older trace
-     * material with no per-phrase markers). */
+    /* Per-phrase terminator captured by the parser. */
     if (phrase_id >= 0 && phrase_id < parsed->n_phrase_terms
         && parsed->phrase_terms[phrase_id] != 0) {
         out->phrase_term = parsed->phrase_terms[phrase_id];
@@ -403,15 +1308,17 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
     out->syl_stress   = (int32_t  *)calloc(total_syls,  sizeof *out->syl_stress);
     out->syl_accent   = (uint32_t *)calloc(total_syls,  sizeof *out->syl_accent);
     out->syl_btone    = (int8_t   *)calloc(total_syls,  sizeof *out->syl_btone);
+    out->syl_acctype  = (int8_t   *)calloc(total_syls,  sizeof *out->syl_acctype);
+    out->syl_cont_prev= (uint8_t  *)calloc(total_syls,  sizeof *out->syl_cont_prev);
     out->syl_n_segs   = (uint32_t *)calloc(total_syls,  sizeof *out->syl_n_segs);
     out->syl_segs     = (uint32_t **)calloc(total_syls,  sizeof *out->syl_segs);
     if (!out->word_shareds || !out->word_names || !out->word_n_syls
         || !out->word_syls || !out->syl_stress || !out->syl_accent
-        || !out->syl_btone || !out->syl_n_segs || !out->syl_segs) {
+        || !out->syl_btone || !out->syl_acctype || !out->syl_cont_prev
+        || !out->syl_n_segs || !out->syl_segs) {
         spfy_fe_utt_free(out); return SPFY_E_NOMEM;
     }
 
-    /* Leading silence pad (word 0, syl 0, seg 0; shared ids start at 1). */
     out->word_shareds[0] = 1;
     out->word_names[0]   = strdup("_NULL_");
     out->word_n_syls[0]  = 1;
@@ -427,9 +1334,8 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
     if (!out->syl_segs[0]) { spfy_fe_utt_free(out); return SPFY_E_NOMEM; }
     out->syl_segs[0][0]  = 1;
 
-    /* Content words. */
     uint32_t next_word_shared = 2, next_syl_shared = 2, next_seg_shared = 2;
-    uint32_t syl_g_idx = 1;   /* global syllable index in out->syl_* arrays */
+    uint32_t syl_g_idx = 1;
     uint32_t word_out_idx = 1;
 
     for (int wi = 0; wi < parsed->n_words; wi++) {
@@ -447,11 +1353,8 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
             }
         }
 
-        /* Walk syllables of this word (0..n_syllables-1) and partition
-         * its phoneme list by syl_index. The parser's `.X` markers
-         * already encode the engine-correct syllable boundaries —
-         * unlike the hand-written FE which had to run max-onset to fix
-         * its baked-dict's syl_id=0-for-all-phonemes bug. */
+        /* Walk syllables of this word (0..n_syllables-1) and partition its
+         * phoneme list by syl_index. */
         for (int si = 0; si < w->n_syllables; si++) {
             uint32_t this_syl_shared = next_syl_shared++;
             out->word_syls[word_out_idx][si] = this_syl_shared;
@@ -474,8 +1377,12 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
             out->syl_stress[syl_g_idx] = (int32_t)ph0->syl_stress;
             out->syl_accent[syl_g_idx] =
                 (ph0->accent[0] && strchr(ph0->accent, '*')) ? 1u : 0u;
-            /* Phrase-boundary tone: scan the syllable's phonemes for a
-             * ToBI boundary marker (it usually rides the last phoneme). */
+            out->syl_acctype[syl_g_idx] = (int8_t)accent_type_st(ph0->accent);
+            /* Mark the fr-CA liaison syllable. */
+            out->syl_cont_prev[syl_g_idx] =
+                (w->first_syl_implicit && si == 0 && word_out_idx > 1) ? 1u : 0u;
+            /* Phrase-boundary tone: scan the syllable's phonemes for a ToBI
+             * boundary marker (it usually rides the last phoneme). */
             {
                 int bt = 0;
                 for (int pi = first_pi; pi <= last_pi && bt == 0; pi++)
@@ -483,12 +1390,9 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
                 out->syl_btone[syl_g_idx] = (int8_t)bt;
             }
 
-            /* first_pi and last_pi are assigned together in the scan
-             * above, and the first_pi < 0 case already `continue`d, so
-             * the true count is [1, n_phonemes]. GCC can't infer that
-             * pairing: it sees last_pi - first_pi + 1 as possibly
-             * negative, which wraps to a huge uint32 and trips
-             * -Walloc-size-larger-than on 32-bit. State the invariant. */
+            /* first_pi and last_pi are assigned together in the scan above,
+             * and the first_pi < 0 case already `continue`d, so the true
+             * count is [1, n_phonemes]. */
             int n_seg_signed = last_pi - first_pi + 1;
             if (n_seg_signed < 0)                n_seg_signed = 0;
             if (n_seg_signed > w->n_phonemes)    n_seg_signed = w->n_phonemes;
@@ -507,7 +1411,6 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
         word_out_idx++;
     }
 
-    /* Trailing silence pad. */
     uint32_t tail_w = total_words - 1u;
     uint32_t tail_s = total_syls  - 1u;
     out->word_shareds[tail_w] = next_word_shared++;
@@ -524,14 +1427,48 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
     out->syl_segs[tail_s]     = (uint32_t *)calloc(1, sizeof **out->syl_segs);
     if (!out->syl_segs[tail_s]) { spfy_fe_utt_free(out); return SPFY_E_NOMEM; }
     out->syl_segs[tail_s][0]  = next_seg_shared++;
+
+    /* Speechify-4 deaccenting (the "hat pattern"). */
+    {
+        static int deacc_mode = -1;
+        static int deacc_bias = 0;
+        if (deacc_mode < 0) {
+            const char *e = spfy_env("SPFY_SPFY4_DEACCENT");
+            deacc_mode = 0;
+            if (e && *e && strcmp(e, "0") != 0)
+                deacc_mode = (strcmp(e, "first") == 0) ? 2 : 1;
+            /* Stripping the accent flag alone often loses to coverage: the
+             * DB's renditions of NWR template words are accented-sounding
+             * and win on join costs regardless of class. */
+            const char *b = spfy_env("SPFY_SPFY4_DEACCENT_BIAS");
+            deacc_bias = (b && *b) ? atoi(b) : -4;
+            if (deacc_bias < -12) deacc_bias = -12;
+            if (deacc_bias > 0)   deacc_bias = 0;
+        }
+        if (deacc_mode > 0) {
+            uint32_t first = 0, last = 0, n_acc = 0;
+            for (uint32_t g = 1; g + 1 < total_syls; ++g) {
+                if (out->syl_accent[g]) {
+                    if (!n_acc) first = g;
+                    last = g;
+                    ++n_acc;
+                }
+            }
+            if (n_acc > (uint32_t)(deacc_mode == 1 ? 2 : 1)) {
+                for (uint32_t g = 1; g + 1 < total_syls; ++g) {
+                    if (!out->syl_accent[g] || g == first) continue;
+                    if (deacc_mode == 1 && g == last) continue;
+                    out->syl_accent[g]  = 0;
+                    out->syl_acctype[g] = (int8_t)deacc_bias;
+                }
+            }
+        }
+    }
     return SPFY_OK;
 }
 
 /* Build the ARPAbet segment-name list directly from the hosted parser
- * output for a single phrase. Order matches what parsed_to_fe_utt's
- * syl_segs encoding implies (leading _NULL_ pad, content phonemes,
- * trailing pad). Caller frees the returned array (but not the strings,
- * which point into the parser's owned memory). */
+ * output for a single phrase. */
 static int build_segments_from_parsed(const fe_parsed_t *parsed,
                                       int                phrase_id,
                                       const char       ***out, uint32_t *out_n)
@@ -560,7 +1497,6 @@ static int build_segments_from_parsed(const fe_parsed_t *parsed,
 }
 
 
-/* ARPAbet vowel-class check for Syl PSA re-syllabification. */
 static int is_arpa_vowel(const char *a)
 {
     if (!a) return 0;
@@ -572,53 +1508,58 @@ static int is_arpa_vowel(const char *a)
     return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Viterbi join cost                                                   */
-/* ------------------------------------------------------------------ */
 
 typedef struct {
     const spfy_hash_t       *hash;
     const spfy_unit_table_t *units;
     float                    miss_default;
-    /* Engine-faithful F0-prob curve (VIN `hist` chunk + voice+0xc8).
-     * On hash miss the engine adds:
-     *   miss_cost = MISSING_JOIN_COST
-     *             + (gate ? F0_EDGE_CHANGE_WEIGHT * curve[idx] : 0)
-     * gate = (curr.c6c > 20) && (prev.c80 < 15) && (prev.c7c > 20).
-     * idx  = clamp(curr.c6c - sub_off - prev.c7c, 0, max_idx-1).
-     *
-     * curve points into VIN bytes; sub_off is signed (Tom: -50);
-     * max_idx is the curve length (Tom: 100). When curve == NULL the
-     * callback uses miss_default for any miss (legacy behaviour).
-     *
-     * Held as raw bytes and read via spfy_le_f32(): the `data` sub-chunk
-     * lands at an arbitrary VIN offset, and a misaligned float load is a
-     * SIGBUS on 32-bit ARM. See common/le.h. */
+    /* Engine-faithful F0-prob curve (VIN `hist` chunk + voice+0xc8). */
     const uint8_t           *curve;
     int32_t                  curve_max_idx;
     int32_t                  curve_sub_off;
     float                    f0_edge_change_weight;
     float                    missing_join_cost;
+    /* SPFY_JOIN_W_APPLY: apply `cost = w*cell + off` to hash-HIT cells. */
+    int                      apply_join_w;
+    float                    join_w;
+    float                    join_off;
+    /* --- SPFY_DP_F0_CONT: F0-continuity term (NOT engine behaviour) -----
+     * Per-uid TRUE F0 from the pitch marks (spfy_reselect_build), so the DP
+     * can price the pitch STEP across a join. */
+    /* --- SPFY_POW_CONT_W: energy-continuity term (NOT engine behaviour)
+     * --- Per-uid log-RMS measured from the VDB, so the DP can price the
+     * ENERGY step across a join. */
+    const float             *pow;
+    uint32_t                 pow_n;
+    float                    pow_cont_w;
+    float                    pow_cont_dead;
+    const float             *f0;
+    uint32_t                 f0_n;
+    float                    f0_cont_w;
+    float                    f0_cont_dead;
+    float                    f0_cont_up;
+    /* Anti-dodge. */
+    float                    f0_cont_break;
+    /* Expected semitone step per voiced join; the penalty is on the
+     * DEVIATION from it, |dF0 - slope|, not on |dF0|. */
+    float                    f0_cont_slope;
+    /* Which joins the term is allowed to price. */
+    int                      f0_cont_scope;
+    /* Extra cost on any join that is NOT a same-rec continuation, i.e. */
+    float                    f0_cont_seam;
 } join_ctx_t;
 
 /* NB: the VCF's JOIN_COST_WEIGHT / JOIN_COST_OFFSET are deliberately NOT
- * applied to a hash-HIT cell. Tested 2026-07-20 as `cost = w*cell + off`
- * with each voice's own VCF values: Tom 100% -> 93.2% and Jill 93.8% ->
- * 89.7% path UID. Both voices get worse, so the hash cells are already
- * baked with whatever weighting the voice build applied. This matches the
- * note in spfy_viterbi_replay.c that an earlier attempt to apply
- * JOIN_COST_WEIGHT here was a bug. */
+ * applied to a hash-HIT cell. */
 
-/* Parse VIN `hist` sub-chunks (head + data) and populate the curve params.
- * On any malformed-chunk error returns a "no curve" state (legacy miss). */
+/* Parse VIN `hist` sub-chunks (head + data) and populate the curve params. */
 static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
 {
     jc->curve = NULL;
     jc->curve_max_idx = 0;
     jc->curve_sub_off = 0;
     if (!vin || !vin->hist || vin->hist_n < 16) return;
-    /* `head` 8 bytes (max_idx, sub_off) then `data` n*4 bytes. We don't
-     * use the riff iterator here -- the chunk is small + well-formed. */
+    /* `head` 8 bytes (max_idx, sub_off) then `data` n*4 bytes. */
     const uint8_t *p   = vin->hist;
     const uint8_t *end = vin->hist + vin->hist_n;
     while (p + 8 <= end) {
@@ -628,13 +1569,13 @@ static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
                      | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
         const uint8_t *body = p + 8;
         if (body + sz > end) return;
-        if (fcc == 0x64616568u /* 'head' LE */ && sz >= 8) {
+        if (fcc == 0x64616568u  && sz >= 8) {
             uint32_t mx, off;
             memcpy(&mx,  body,     4);
             memcpy(&off, body + 4, 4);
             jc->curve_max_idx = (int32_t)mx;
             jc->curve_sub_off = (int32_t)off;
-        } else if (fcc == 0x61746164u /* 'data' LE */) {
+        } else if (fcc == 0x61746164u ) {
             jc->curve = body;
         }
         p = body + sz;
@@ -642,10 +1583,232 @@ static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
     }
 }
 
-/* Read candidate i from whichever candidate pool is live for this slot.
- * `prsl_pool` aliases the VIN buffer (possibly unaligned, LE u32); the
- * hp-bucket fallback `bucket_pool` is an owned, aligned uint32_t array.
- * Exactly one of the two is non-NULL. */
+/* --- SPFY_POW_CONT_W support: per-uid log-RMS energy, measured -----------
+ * NOT engine behaviour. */
+/* --- SPFY_POW_TGT_W support: the VIN `mean` chunk ------------------------
+ * 92 phone-variants x 8 features: duration, dur_spread, pitch,
+ * pitch_spread, voice, voice_spread, power, power_spread. */
+static int load_mean_power(const spfy_vin_t *vin, float **out_mean,
+                           float **out_sd, uint32_t *out_rows)
+{
+    *out_mean = NULL; *out_sd = NULL; *out_rows = 0u;
+    if (!vin || !vin->mean || vin->mean_n < 8) return SPFY_E_OOB;
+    uint32_t n_rows, n_cols;
+    memcpy(&n_rows, vin->mean,     4);
+    memcpy(&n_cols, vin->mean + 4, 4);
+    if (n_rows == 0u || n_cols < 8u) return SPFY_E_OOB;
+    if ((size_t)n_rows * n_cols * 4u + 8u != vin->mean_n) return SPFY_E_OOB;
+    float *mu = (float *)malloc((size_t)n_rows * sizeof *mu);
+    float *sd = (float *)malloc((size_t)n_rows * sizeof *sd);
+    if (!mu || !sd) { free(mu); free(sd); return SPFY_E_NOMEM; }
+    const uint8_t *d = vin->mean + 8;
+    for (uint32_t r = 0; r < n_rows; ++r) {
+        const uint8_t *row = d + (size_t)r * n_cols * 4u;
+        memcpy(&mu[r], row + 6 * 4, 4);
+        memcpy(&sd[r], row + 7 * 4, 4);
+    }
+    *out_mean = mu; *out_sd = sd; *out_rows = n_rows;
+    return SPFY_OK;
+}
+
+static int cmp_float_asc(const void *a, const void *b)
+{
+    float x = *(const float *)a, y = *(const float *)b;
+    return (x > y) - (x < y);
+}
+
+static float *build_unit_power(const spfy_voice_t *v, uint32_t *out_n,
+                               uint32_t *out_measured)
+{
+    if (out_n)        *out_n        = 0;
+    if (out_measured) *out_measured = 0;
+    if (!v || v->units.n_units == 0) return NULL;
+
+    uint32_t n   = v->units.n_units;
+    float   *pow = (float *)calloc(n, sizeof *pow);
+    if (!pow) return NULL;
+
+    uint32_t measured = 0;
+    for (uint32_t uid = 0; uid < n; ++uid) {
+        spfy_unit_record_t ur;
+        if (spfy_unit_record_get(&v->units, uid, &ur) != SPFY_OK) continue;
+        if (ur.dur_like == 0) continue;
+        if (ur.file_idx >= v->feat.n_entries) continue;
+        const spfy_feat_entry_t *fe = &v->feat.entries[ur.file_idx];
+        uint32_t rec_off = 0, rec_size = 0;
+        if (spfy_vdb_lookup_by_name(&v->lookup, fe->name, fe->name_len,
+                                    &rec_off, &rec_size) != SPFY_OK) continue;
+        uint32_t sps = v->vdb.sample_rate / 1000u;
+        if (sps == 0u) sps = 8u;
+        uint32_t bps = v->vdb.bytes_per_sample
+                     ? v->vdb.bytes_per_sample : 1u;
+        uint32_t rec_n = rec_size / bps;
+        uint32_t off = (uint32_t)ur.local_pos * sps;
+        if (off >= rec_n) continue;
+        uint32_t len = (uint32_t)ur.dur_like * sps;
+        /* Clamp rather than zero-pad: padding a short tail with silence
+         * would bias that unit's RMS down for a reason that has nothing to
+         * do with how loud it was recorded. */
+        if (off + len > rec_n) len = rec_n - off;
+        if (len == 0) continue;
+        /* Decode rather than index the raw bytes: `sq` is a u-law lookup
+         * and would be meaningless over PCM. */
+        int16_t *sm = (int16_t *)malloc((size_t)len * sizeof *sm);
+        if (!sm) continue;
+        spfy_vdb_decode(&v->vdb, rec_off, off, len, sm);
+        double acc = 0.0;
+        for (uint32_t i = 0; i < len; ++i)
+            acc += (double)sm[i] * (double)sm[i];
+        free(sm);
+        double rms = sqrt(acc / (double)len);
+        if (rms <= 0.0) continue;
+        pow[uid] = (float)log(rms);
+        ++measured;
+    }
+
+    if (out_n)        *out_n        = n;
+    if (out_measured) *out_measured = measured;
+    return pow;
+}
+
+/* Read candidate i from whichever candidate pool is live for this slot. */
+/* SPFY_UID_DUMP=<path>|- — the UID capture harness. */
+static FILE *spfy_uid_dump_fp(void)
+{
+    static FILE *fp = NULL;
+    static int   tried = 0;
+    if (!tried) {
+        tried = 1;
+        const char *e = spfy_env("SPFY_UID_DUMP");
+        if (e && *e) {
+            if (!strcmp(e, "-") || !strcmp(e, "1")) {
+                fp = stderr;
+            } else {
+                fp = fopen(e, "wb");
+                if (!fp) {
+                    spfy_log_warn("SPFY_UID_DUMP: cannot open '%s', "
+                                  "falling back to stderr", e);
+                    fp = stderr;
+                }
+            }
+        }
+    }
+    return fp;
+}
+
+/* SPFY_UID_DUMP, emit half — WHERE each slot's audio actually landed. */
+static void uid_dump_emit(const spfy_voice_t *v, uint32_t phrase_idx,
+                          uint32_t slot0, const uint32_t *path_uids,
+                          uint32_t run_n, uint32_t lp_first,
+                          uint32_t out_start, const spfy_wav_writer_t *sink)
+{
+    FILE *uf = spfy_uid_dump_fp();
+    if (!uf || !v || !path_uids) return;
+    uint32_t sps = v->vdb.sample_rate / 1000u;
+    if (sps == 0) sps = 1;
+    for (uint32_t k = 0; k < run_n; ++k) {
+        spfy_unit_record_t rk;
+        uint32_t off = out_start;
+        if (spfy_unit_record_get(&v->units, path_uids[slot0 + k], &rk)
+                == SPFY_OK && (uint32_t)rk.local_pos >= lp_first)
+            off += ((uint32_t)rk.local_pos - lp_first) * sps;
+        fprintf(uf, "{\"t\":\"emit\",\"phrase\":%u,\"slot\":%u,\"uid\":%u,"
+                    "\"out\":%u,\"run\":%u,\"k\":%u}\n",
+                (unsigned)phrase_idx, (unsigned)(slot0 + k),
+                (unsigned)path_uids[slot0 + k],
+                (unsigned)out_pos(sink, off), (unsigned)run_n, (unsigned)k);
+    }
+}
+
+/* SPFY_UID_OVERRIDE=<path> — force specific units into the chosen path.
+ *
+ * THE POINT: a recovered unit id is only a hypothesis until somebody hears
+ * it. This renders the substitution so the claim can be judged by ear rather
+ * than by an NCC table.
+ *
+ * It reads exactly the record type SPFY_UID_DUMP writes, so a dump can be
+ * edited and fed straight back:
+ *
+ *   {"t":"pick","phrase":0,"slot":7,"uid":12345}
+ *
+ * Lines of any other type are ignored, which means an unedited dump
+ * containing "cands" and "emit" records is a legal input and reproduces the
+ * original path exactly. That is the identity case, and it is worth checking
+ * before trusting any substitution.
+ *
+ * ⚠ THIS ONE DOES CHANGE THE AUDIO — unlike the dump, which is inert. It is
+ * still off unless the variable is set, so the shipped path and the audit are
+ * untouched, but it must never be left set during a comparison run.
+ *
+ * A substituted uid is NOT required to have been in the slot's pool: the
+ * whole question is what a unit the DP rejected would have sounded like.
+ * Run batching is left to re-derive itself downstream, so substituting a
+ * uid+1 run reproduces the engine's own single-push behaviour naturally.
+ */
+struct uid_ovr { uint32_t phrase, slot, uid; };
+
+static struct uid_ovr *g_uid_ovr;
+static size_t          g_uid_ovr_n;
+
+static void uid_override_load(void)
+{
+    static int tried = 0;
+    if (tried) return;
+    tried = 1;
+    const char *path = spfy_env("SPFY_UID_OVERRIDE");
+    if (!path || !*path) return;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        spfy_log_warn("SPFY_UID_OVERRIDE: cannot open '%s'", path);
+        return;
+    }
+    char line[8192];
+    size_t cap = 0;
+    while (fgets(line, sizeof line, fp)) {
+        if (!strstr(line, "\"t\":\"pick\"")) continue;
+        const char *pp = strstr(line, "\"phrase\":");
+        const char *sp = strstr(line, "\"slot\":");
+        const char *up = strstr(line, "\"uid\":");
+        if (!pp || !sp || !up) continue;
+        long ph = strtol(pp + 9, NULL, 10);
+        long sl = strtol(sp + 7, NULL, 10);
+        long ud = strtol(up + 6, NULL, 10);
+        if (ph < 0 || sl < 0 || ud < 0) continue;
+        if (g_uid_ovr_n == cap) {
+            size_t nc = cap ? cap * 2 : 256;
+            struct uid_ovr *nb = (struct uid_ovr *)
+                realloc(g_uid_ovr, nc * sizeof *nb);
+            if (!nb) break;
+            g_uid_ovr = nb; cap = nc;
+        }
+        g_uid_ovr[g_uid_ovr_n].phrase = (uint32_t)ph;
+        g_uid_ovr[g_uid_ovr_n].slot   = (uint32_t)sl;
+        g_uid_ovr[g_uid_ovr_n].uid    = (uint32_t)ud;
+        ++g_uid_ovr_n;
+    }
+    fclose(fp);
+    spfy_log_warn("SPFY_UID_OVERRIDE: %zu substitutions loaded from '%s'",
+                  g_uid_ovr_n, path);
+}
+
+static void uid_override_apply(uint32_t phrase_idx, uint32_t *path_uids,
+                               uint32_t n_slots)
+{
+    uid_override_load();
+    if (!g_uid_ovr_n || !path_uids) return;
+    uint32_t hit = 0;
+    for (size_t i = 0; i < g_uid_ovr_n; ++i) {
+        if (g_uid_ovr[i].phrase != phrase_idx) continue;
+        if (g_uid_ovr[i].slot >= n_slots) continue;
+        if (path_uids[g_uid_ovr[i].slot] == g_uid_ovr[i].uid) continue;
+        path_uids[g_uid_ovr[i].slot] = g_uid_ovr[i].uid;
+        ++hit;
+    }
+    if (hit && synth_is_verbose())
+        spfy_log_warn("SPFY_UID_OVERRIDE: phrase %u, %u slots replaced",
+                      (unsigned)phrase_idx, (unsigned)hit);
+}
+
 static uint32_t pool_cand(const uint8_t *prsl_pool,
                           const uint32_t *bucket_pool, uint32_t i)
 {
@@ -668,32 +1831,48 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
     const join_ctx_t *jc = (const join_ctx_t *)user;
     float cost = 0.0f;
     const char *path = "";
-    /* Same-rec adjacent bypass — applies regardless of curve. */
+    /* Which branch produced `cost`, for the F0-continuity scope test: 0
+     * same_rec, 1 hash_hit, 2 miss/no_curve. */
+    int path_kind = 2;
     if (curr_uid == prev_uid_join_key + 1u && curr_uid > 0u) {
         spfy_unit_record_t r;
         if (spfy_unit_record_get(jc->units, curr_uid, &r) == SPFY_OK
             && r.flag_b) {
             cost = 0.0f;
             path = "same_rec";
+            path_kind = 0;
             goto dump;
         }
     }
     int rc = spfy_hash_lookup(jc->hash, prev_uid_join_key, curr_uid, &cost);
     if (rc == SPFY_OK) {
-        path = "hash_hit";
+        if (jc->apply_join_w) {
+            cost = jc->join_w * cost + jc->join_off;
+            path = "hash_hit_w";
+        } else {
+            path = "hash_hit";
+        }
+        path_kind = 1;
         goto dump;
     }
     /* Hash miss — engine-exact (FUN_08e8b620):
      *   miss = MISSING_JOIN_COST + (gate ? F0_EDGE_CHANGE_WEIGHT * curve[idx]
      *                                    : CCOS_DEFAULT)
-     * For Tom: MISSING_JOIN_COST=0 (VCF unset), CCOS_DEFAULT=0
-     * (_DAT_08e9852c), F0_EDGE_CHANGE_WEIGHT=0.6.
+     * MISSING_JOIN_COST is 1000.0 when the VCF omits it -- which EVERY
+     * shipped voice does. Verified in SWIttsUSel.dll: FUN_08e90dc0 stores
+     * 0x447a0000 (1000.0) at +0x84 in the constructor, and the config read
+     * at 08e9122b is `test eax,eax / jne` PAST the store, so a failed lookup
+     * leaves the default standing. This comment used to say "For Tom:
+     * MISSING_JOIN_COST=0 (VCF unset)", contradicting the loader 3500 lines
+     * below (which has always passed 1000.0f) and inviting the reader to
+     * "fix" a value that was already right.
+     * CCOS_DEFAULT=0 (_DAT_08e9852c), F0_EDGE_CHANGE_WEIGHT=0.6 for Tom.
      *
      * Gate condition: curr.c6c > 20 AND prev.c80 < 15 AND prev.c7c > 20.
      * Curve idx: clamp((curr.c6c - sub_off) - prev.c7c, 0, max_idx-1). */
     if (!jc->curve) { cost = jc->miss_default; path = "no_curve"; goto dump; }
     {
-        float curve_val = 0.0f;     /* CCOS_DEFAULT = 0 */
+        float curve_val = 0.0f;
         path = "miss_no_gate";
         if ((int32_t)curr_c6c > 20 && prev_c80 < 15 && prev_c7c > 20) {
             int32_t idx = (int32_t)curr_c6c - jc->curve_sub_off - prev_c7c;
@@ -706,26 +1885,71 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
         cost = jc->missing_join_cost + curve_val;
     }
 dump:
-    if (getenv("SPFY_JOIN_DUMP")) {
-        fprintf(stderr, "{\"join\":1,\"prev_slot\":%u,\"prev_idx\":%u,"
-                        "\"curr_slot\":%u,\"curr_idx\":%u,"
-                        "\"prev_jk\":%u,\"curr_uid\":%u,"
-                        "\"prev_c7c\":%d,\"prev_c80\":%d,\"curr_c6c\":%u,"
-                        "\"cost\":%.6f,\"path\":\"%s\"}\n",
-                prev_slot, prev_idx, curr_slot, curr_idx,
-                prev_uid_join_key, curr_uid,
-                prev_c7c, prev_c80, curr_c6c,
-                (double)cost, path);
+    {
+        /* F0-continuity surcharge, applied to EVERY path including the free
+         * same-rec one. */
+        float f0_step = 0.0f, f0_pen = 0.0f;
+        /* Scope test: never charge a join the engine gets for free. */
+        int in_scope = (jc->f0_cont_scope == 0)
+                    || (jc->f0_cont_scope == 1 && path_kind != 0)
+                    || (jc->f0_cont_scope >= 2 && path_kind == 2);
+        if (in_scope && jc->f0
+            && prev_uid_join_key < jc->f0_n && curr_uid < jc->f0_n) {
+            float a = jc->f0[prev_uid_join_key];
+            float b = jc->f0[curr_uid];
+            if (a > 0.0f && b > 0.0f) {
+                f0_step = 12.0f * log2f(b / a);
+                /* Deviation from the expected step, so a steady decline is
+                 * free and wandering is not. */
+                float dev = f0_step - jc->f0_cont_slope;
+                float mag = fabsf(dev) - jc->f0_cont_dead;
+                if (mag > 0.0f) {
+                    f0_pen = jc->f0_cont_w * mag;
+                    /* Asymmetry: S4's phrase is one rise then a steady
+                     * fall, so a prior that charges RISES more than falls
+                     * pushes the path toward declination rather than merely
+                     * toward flatness. */
+                    if (dev > 0.0f) f0_pen *= jc->f0_cont_up;
+                    cost += f0_pen;
+                }
+            } else if ((a > 0.0f) != (b > 0.0f) && jc->f0_cont_break > 0.0f) {
+                f0_pen = jc->f0_cont_w * jc->f0_cont_break;
+                cost += f0_pen;
+            }
+        }
+        /* Seam price. */
+        if (jc->f0 && jc->f0_cont_seam > 0.0f && path_kind != 0) {
+            f0_pen += jc->f0_cont_seam;
+            cost   += jc->f0_cont_seam;
+        }
+        /* ENERGY continuity. */
+        if (jc->pow && jc->pow_cont_w > 0.0f
+            && prev_uid_join_key < jc->pow_n && curr_uid < jc->pow_n) {
+            float pa = jc->pow[prev_uid_join_key];
+            float pb = jc->pow[curr_uid];
+            if (pa > 0.0f && pb > 0.0f) {
+                float mag = fabsf(pb - pa) - jc->pow_cont_dead;
+                if (mag > 0.0f) cost += jc->pow_cont_w * mag;
+            }
+        }
+        if (spfy_env("SPFY_JOIN_DUMP")) {
+            fprintf(stderr, "{\"join\":1,\"prev_slot\":%u,\"prev_idx\":%u,"
+                            "\"curr_slot\":%u,\"curr_idx\":%u,"
+                            "\"prev_jk\":%u,\"curr_uid\":%u,"
+                            "\"prev_c7c\":%d,\"prev_c80\":%d,\"curr_c6c\":%u,"
+                            "\"cost\":%.6f,\"path\":\"%s\","
+                            "\"f0_step_st\":%.3f,\"f0_pen\":%.6f}\n",
+                    prev_slot, prev_idx, curr_slot, curr_idx,
+                    prev_uid_join_key, curr_uid,
+                    prev_c7c, prev_c80, curr_c6c,
+                    (double)cost, path,
+                    (double)f0_step, (double)f0_pen);
+        }
     }
     return cost;
 }
 
-/* ------------------------------------------------------------------ */
-/* Main                                                                */
-/* ------------------------------------------------------------------ */
 
-
-/* SPR single-char -> ARPAbet name. Lifted from bin/spfy_dumpwav.c. */
 static const char *spr_to_arpabet(char c)
 {
     static const struct { char spr; const char *arpa; } TABLE[] = {
@@ -744,26 +1968,8 @@ static const char *spr_to_arpabet(char c)
     return NULL;
 }
 
-/* ================================================================== */
-/* Embedded \!-tag pre-pass (Speechify User's Guide ch. 2, FE/text tags)*/
-/*                                                                      */
-/* The real engine resolves user-facing \! embedded tags in            */
 /* SWIttsSSML.dll, UPSTREAM of the FE — the FE DLL has no tag parser    */
-/* (it spells \!p300 out as "p three hundred"). We mirror the          */
-/* text-layer subset here as a portable pure-C text transform that runs */
-/* before FE dispatch, so it works on every backend (hosted DLL,        */
-/* in-house, WASM, Android):                                            */
-/*                                                                      */
-/*   \!eos          -> sentence terminator on the preceding word        */
-/*   \!ts0/c/a/r    -> character spellout modes (expand spanned chars)   */
-/*   \!ny0 / \!ny1  -> 4-digit number as quantity / year (en default)    */
-/*                                                                      */
-/* \!pN pauses and \![SPR] pass through untouched to the inline builder. */
-/* Engine-layer tags (\!bm \!di \!vp \!vd \!rp \!rd) are a later batch;  */
-/* any other \!-prefixed token is dropped, per the guide's "unknown \!   */
-/* tags are ignored in the speech output" rule.                         */
 
-/* '0'->"zero" .. '9'->"nine", else NULL. */
 static const char *etag_digit_name(int c)
 {
     static const char *D[10] = {"zero","one","two","three","four",
@@ -771,10 +1977,7 @@ static const char *etag_digit_name(int c)
     return (c >= '0' && c <= '9') ? D[c - '0'] : NULL;
 }
 
-/* Spoken letter name for \!tsa / \!tsc. Forms attested in the guide
- * examples (a->ay, i->aye, l->ell, m->emm, n->en, p->pea, r->ar,
- * s->ess, t->tee, z->zee, b->bee, c->cee, e->ee, f->eff); the rest use
- * the conventional spoken spelling the FE pronounces cleanly. */
+/* Spoken letter name for \!tsa / \!tsc. */
 static const char *etag_letter_name(int c)
 {
     if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
@@ -787,7 +1990,6 @@ static const char *etag_letter_name(int c)
     return L[c - 'a'];
 }
 
-/* International Radio (NATO) alphabet for \!tsr. */
 static const char *etag_radio_name(int c)
 {
     if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
@@ -802,8 +2004,7 @@ static const char *etag_radio_name(int c)
 }
 
 /* Spoken name of a punctuation/symbol char for all-character spellout
- * (\!tsc). NULL for chars with no special name (caller emits verbatim).
- * Dash/comma attested in the guide ("...dash bee...", "...comma..."). */
+ * (\!tsc). */
 static const char *etag_symbol_name(int c)
 {
     switch (c) {
@@ -836,7 +2037,6 @@ static const char *ETAG_TENS[10] = {
     "","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"
 };
 
-/* Cardinal words for 0..99 -> buf; returns bytes written (excl NUL). */
 static int etag_cardinal_2(int n, char *buf, size_t cap)
 {
     if (n < 20)        return snprintf(buf, cap, "%s", ETAG_ONES[n]);
@@ -844,8 +2044,7 @@ static int etag_cardinal_2(int n, char *buf, size_t cap)
     return snprintf(buf, cap, "%s %s", ETAG_TENS[n / 10], ETAG_ONES[n % 10]);
 }
 
-/* Cardinal (quantity) words for a 4-digit number 1000..9999, e.g.
- * 1945 -> "one thousand nine hundred forty five". \!ny0 reading. */
+/* Cardinal (quantity) words for a 4-digit number 1000..9999, e.g. */
 static int etag_cardinal_4(int n, char *buf, size_t cap)
 {
     int th = n / 1000, hu = (n / 100) % 10, rest = n % 100;
@@ -860,9 +2059,8 @@ static int etag_cardinal_4(int n, char *buf, size_t cap)
 }
 
 /* If `p` begins with "\!"<kw> AND the char after <kw> is a valid tag
- * boundary (not alphanumeric — a tag "cannot be followed immediately by
- * an alphanumeric character"), return p advanced past the keyword; else
- * NULL. */
+ * boundary (not alphanumeric — a tag "cannot be followed immediately by an
+ * alphanumeric character"), return p advanced past the keyword; else NULL. */
 static const char *etag_after(const char *p, const char *kw)
 {
     if (p[0] != '\\' || p[1] != '!') return NULL;
@@ -872,25 +2070,30 @@ static const char *etag_after(const char *p, const char *kw)
     return p + 2 + kn;
 }
 
-/* True when `text` carries an embedded \! tag this pre-pass resolves
- * (eos / spellout / year) or any \! token other than \![SPR] / \!pN,
- * which the downstream inline builder owns. Plain text and SPR-only /
- * pause-only text return 0 so their existing paths stay byte-identical. */
+/* True when `text` carries an embedded \! */
 static int spfy_etags_need_resolve(const char *text)
 {
+    /* Bare `[ToBI:` — see the resolver for why the `\!` may already be gone
+     * by the time the text reaches us (Balabolka splits Speak() calls on
+     * it). */
+    if (strstr(text, "[ToBI:")) return 1;
     for (const char *q = text; (q = strstr(q, "\\!")) != NULL; q += 2) {
         int c = (unsigned char)q[2];
-        if (c == '[') continue;                              /* \![SPR]  */
-        if (c == 'p' && isdigit((unsigned char)q[3])) continue; /* \!pN  */
+        if (c == '[') {
+            /* `\![ToBI:...]` is ours and must trigger the resolver; every
+             * other bracketed tag (\![SPR] ...) still passes through
+             * verbatim. */
+            if (strncmp(q + 3, "ToBI:", 5) == 0) return 1;
+            continue;
+        }
+        if (c == 'p' && isdigit((unsigned char)q[3])) continue;
         return 1;
     }
     return 0;
 }
 
 /* Match `\!<vp|vd|rp|rd>(<digits>|r)` (volume/rate control) at p with a
- * valid tag boundary. On match sets *knd ('v'/'r'), *rel ('p' port /
- * 'd' baseline), *reset, *val, and returns p advanced past the tag; else
- * NULL. */
+ * valid tag boundary. */
 static const char *etag_vr(const char *p, int *knd, int *rel, int *reset, int *val)
 {
     if (p[0] != '\\' || p[1] != '!') return NULL;
@@ -903,55 +2106,56 @@ static const char *etag_vr(const char *p, int *knd, int *rel, int *reset, int *v
     if (isdigit((unsigned char)*q)) {
         int n = 0; const char *d = q;
         while (isdigit((unsigned char)*d)) { n = n * 10 + (*d - '0'); d++; }
-        if (isalpha((unsigned char)*d)) return NULL;   /* tag can't be followed by alpha */
+        if (isalpha((unsigned char)*d)) return NULL;
         *knd = k; *rel = r; *reset = 0; *val = n; return d;
     }
     return NULL;
 }
 
 /* Resolve eos / spellout / year embedded tags into plain text the FE
- * handles natively, AND emit parallel per-output-char volume/rate maps
- * from the \!vp/\!vd/\!rp/\!rd tags (consumed post-FE via each word's
- * char_start). Returns a malloc'd string (caller frees) or NULL on OOM;
- * *out_vol / *out_rate (each malloc'd, same length as the result, % values
- * where 0 means "default 100") are set on success. \!pN, \![SPR], and
- * <...> markup pass through verbatim; spellout is suspended inside them. */
+ * handles natively, AND emit parallel per-output-char volume/rate maps from
+ * the \!vp/\!vd/\!rp/\!rd tags (consumed post-FE via each word's
+ * char_start). */
 static char *spfy_etags_resolve(const char *text,
-                                uint16_t **out_vol, uint16_t **out_rate)
+                                uint16_t **out_vol, uint16_t **out_rate,
+                                uint8_t **out_acc)
 {
     size_t len = strlen(text);
-    size_t cap = len * 16 + 256;          /* worst case: radio / cardinal */
+    size_t cap = len * 16 + 256;
     char *out = (char *)malloc(cap);
     uint16_t *mvol = (uint16_t *)calloc(cap, sizeof *mvol);
     uint16_t *mrate = (uint16_t *)calloc(cap, sizeof *mrate);
-    if (!out || !mvol || !mrate) { free(out); free(mvol); free(mrate); return NULL; }
-    char *o = out, *eo = out + cap - 64;  /* slack for one token */
+    /* Per-char pitch-accent override from \![ToBI:...]. */
+    uint8_t *macc = (uint8_t *)calloc(cap, sizeof *macc);
+    if (!out || !mvol || !mrate || !macc) {
+        free(out); free(mvol); free(mrate); free(macc); return NULL;
+    }
+    char *o = out, *eo = out + cap - 64;
 
-    int sp = '0';   /* spellout: '0' default, 'c' all, 'a' alnum, 'r' radio */
-    int ny = '1';   /* year mode: '1' year (default), '0' quantity         */
-    int last = 0;   /* last non-space char emitted (for \!eos dedup)       */
+    int sp = '0';
+    int ny = '1';
+    int last = 0;
 
-    /* Volume/rate state. Port-specific and baseline both default to 100%
-     * (the CLI has no port; a SAPI port value would seed port_*). `pv`/`pr`
-     * are the volume/rate currently in effect; the maps are filled lazily
-     * from `filled` up to the current output position whenever they change
-     * or at the end. */
+    /* Volume/rate state. */
     int port_vol = 100, base_vol = 100, port_rate = 100, base_rate = 100;
     int pv = 100, pr = 100;
+    /* Accent override is ONE-SHOT: it binds to the next word and then
+     * clears, unlike volume and rate which stay in effect until changed. */
+    int pa = 0, pa_started = 0;
     size_t filled = 0;
 #define ETAG_FLUSH() do { size_t _e = (size_t)(o - out); \
         for (size_t _i = filled; _i < _e; _i++) { mvol[_i] = (uint16_t)pv; \
-            mrate[_i] = (uint16_t)pr; } filled = _e; } while (0)
+            mrate[_i] = (uint16_t)pr; macc[_i] = (uint8_t)pa; } \
+        filled = _e; } while (0)
 
     const char *p = text;
     while (*p && o < eo) {
         const char *a;
-        /* ---- \!vp/\!vd/\!rp/\!rd volume & rate control ---- */
         {
             int k, rel, rst, val;
             const char *a2 = etag_vr(p, &k, &rel, &rst, &val);
             if (a2) {
-                ETAG_FLUSH();                    /* chars so far keep old pv/pr */
+                ETAG_FLUSH();
                 int basis = (rel == 'p') ? (k == 'v' ? port_vol : port_rate)
                                          : (k == 'v' ? base_vol : base_rate);
                 int nv = rst ? basis : (val * basis / 100);
@@ -960,7 +2164,36 @@ static char *spfy_etags_resolve(const char *text,
                 p = a2; continue;
             }
         }
-        /* ---- mode tags (consumed, no output) ---- */
+        /* ---- \![ToBI:...] pitch-accent override, consumed, no output ----
+         * Forces the FE's accent decision for the NEXT word. */
+        /* BOTH SPELLINGS: `\![ToBI:...]` and a bare `[ToBI:...]`. */
+        const char *tobi_body = NULL;
+        if (p[0] == '\\' && p[1] == '!' && p[2] == '[' &&
+            strncmp(p + 3, "ToBI:", 5) == 0)
+            tobi_body = p + 8;
+        else if (p[0] == '[' && strncmp(p + 1, "ToBI:", 5) == 0)
+            tobi_body = p + 6;
+        if (tobi_body) {
+            const char *q = tobi_body;
+            int val = 0;
+            /* Longest-match over the whole vocabulary, not a first-character test. */
+            for (size_t ti = 0; ti < SPFY_N_TOBI_TAGS; ++ti) {
+                size_t n = strlen(SPFY_TOBI_TAGS[ti].name);
+                if (strncmp(q, SPFY_TOBI_TAGS[ti].name, n) != 0) continue;
+                val = SPFY_TOBI_TAGS[ti].code;
+                q += n;
+                break;
+            }
+            if (val && *q == ']') {
+                ETAG_FLUSH();
+                pa = val;
+                pa_started = 0;
+                p = q + 1;
+                continue;
+            }
+            /* Unrecognised body: fall through and let it pass verbatim, the
+             * same way \![SPR] does. */
+        }
         if      ((a = etag_after(p, "ts0"))) { sp = '0'; p = a; continue; }
         else if ((a = etag_after(p, "tsc"))) { sp = 'c'; p = a; continue; }
         else if ((a = etag_after(p, "tsa"))) { sp = 'a'; p = a; continue; }
@@ -968,36 +2201,33 @@ static char *spfy_etags_resolve(const char *text,
         else if ((a = etag_after(p, "ny0"))) { ny = '0'; p = a; continue; }
         else if ((a = etag_after(p, "ny1"))) { ny = '1'; p = a; continue; }
 
-        /* ---- \!eos: force a sentence end on the preceding word ---- */
         if ((a = etag_after(p, "eos"))) {
             if (last != '.' && last != '!' && last != '?') {
-                if (o > out && o[-1] == ' ') o--;   /* swallow trailing space */
+                if (o > out && o[-1] == ' ') o--;
                 *o++ = '.'; last = '.';
             }
             p = a; continue;
         }
 
-        /* ---- pass-through tokens (no spellout inside) ---- */
-        if (p[0] == '\\' && p[1] == '!' && p[2] == '[') {       /* \![SPR]   */
+        if (p[0] == '\\' && p[1] == '!' && p[2] == '[') {
             const char *close = strchr(p + 3, ']');
             const char *e = close ? close + 1 : p + strlen(p);
             while (p < e && o < eo) *o++ = *p++;
             last = 'x'; continue;
         }
         if (p[0] == '\\' && p[1] == '!' && p[2] == 'p'
-            && isdigit((unsigned char)p[3])) {                  /* \!pN      */
-            *o++ = *p++; if (o < eo) *o++ = *p++;               /* "\!"      */
+            && isdigit((unsigned char)p[3])) {
+            *o++ = *p++; if (o < eo) *o++ = *p++;
             while (o < eo && (*p == 'p' || isdigit((unsigned char)*p))) *o++ = *p++;
             last = 'x'; continue;
         }
-        if (p[0] == '<') {                                      /* SSML/pron */
+        if (p[0] == '<') {
             const char *gt = strchr(p, '>');
             const char *e = gt ? gt + 1 : p + strlen(p);
             while (p < e && o < eo) *o++ = *p++;
             last = 'x'; continue;
         }
 
-        /* ---- other / unknown \! token: dropped (guide: ignored) ---- */
         if (p[0] == '\\' && p[1] == '!') {
             p += 2;
             while (*p && !isspace((unsigned char)*p) && *p != '[') p++;
@@ -1005,12 +2235,21 @@ static char *spfy_etags_resolve(const char *text,
             continue;
         }
 
-        /* ---- whitespace: emit verbatim (word separator) ---- */
-        if (isspace((unsigned char)*p)) { *o++ = *p++; continue; }
+        if (isspace((unsigned char)*p)) {
+            /* A one-shot accent expires HERE, at the separator that ends
+             * the word it bound to -- not at the bottom of the loop, which
+             * this `continue` never reaches. */
+            if (pa && pa_started) {
+                ETAG_FLUSH();
+                pa = 0;
+                pa_started = 0;
+            }
+            *o++ = *p++;
+            continue;
+        }
 
         int c = (unsigned char)*p;
 
-        /* ---- spellout modes ---- */
         if (sp != '0') {
             const char *name = NULL;
             if (sp == 'c') {
@@ -1020,7 +2259,7 @@ static char *spfy_etags_resolve(const char *text,
             } else if (sp == 'a') {
                 if (isdigit(c))      name = etag_digit_name(c);
                 else if (isalpha(c)) name = etag_letter_name(c);
-            } else { /* 'r' radio */
+            } else {
                 if (isdigit(c))      name = etag_digit_name(c);
                 else if (isalpha(c)) name = etag_radio_name(c);
             }
@@ -1032,12 +2271,11 @@ static char *spfy_etags_resolve(const char *text,
                 last = (unsigned char)name[nl - 1];
                 p++; continue;
             }
-            /* alnum-mode punctuation / unmapped symbol: emit verbatim so the
-             * FE interprets it normally (may trigger a phrase break). */
+            /* alnum-mode punctuation / unmapped symbol: emit verbatim so
+             * the FE interprets it normally (may trigger a phrase break). */
             *o++ = (char)c; last = c; p++; continue;
         }
 
-        /* ---- default mode: \!ny0 forces 4-digit quantity reading ---- */
         if (ny == '0' && isdigit(c)) {
             int nd = 0; while (isdigit((unsigned char)p[nd])) nd++;
             int prev_alnum = (o > out && isalnum((unsigned char)o[-1]));
@@ -1055,32 +2293,96 @@ static char *spfy_etags_resolve(const char *text,
             }
         }
 
+        /* Mark that the bound word has actually started. */
+        if (pa) pa_started = 1;
         *o++ = (char)c; last = c; p++;
     }
     ETAG_FLUSH();
 #undef ETAG_FLUSH
     *o = '\0';
+    /* Collapse the per-char accent map to one entry per WHITESPACE-SEPARATED
+     * TOKEN, taking each token's first character.
+     *
+     * ⚠ WHY NOT PER-CHAR. The consumer keys words by
+     * `fe_parsed_word_t.char_start`, and on the host-emulator FE path that
+     * field is 0 for EVERY word -- dumped: pi=0 and pi=1 both report
+     * char_start=0. So every word read map[0] and a tag on the first word
+     * covered all 48 halfphones, while a tag anywhere else did nothing at
+     * all. Token ordinal is the key that actually survives this FE.
+     *
+     * LIMIT: ordinal matches the parsed word index only while the FE neither
+     * splits nor merges tokens. Expansions like "3.5" -> "three point five"
+     * or a spelled-out tag will shift everything after them, so a ToBI tag
+     * placed after such a word can land on the wrong one. */
+    /* macc stays PER-CHARACTER, like mvol and mrate. */
+    /* SPFY_ETAG_DUMP=1: what the resolver actually produced. */
+    if (spfy_env("SPFY_ETAG_DUMP")) {
+        size_t n = (size_t)(o - out);
+        fprintf(stderr, "[etag] resolved (%zu ch): %s\n", n, out);
+        for (size_t i = 0; i < n; ) {
+            if (!macc[i]) { ++i; continue; }
+            size_t j = i;
+            while (j < n && macc[j] == macc[i]) ++j;
+            fprintf(stderr, "[etag] acc=%u over chars %zu..%zu = \"%.*s\"\n",
+                    (unsigned)macc[i], i, j - 1, (int)(j - i), out + i);
+            i = j;
+        }
+    }
     *out_vol = mvol;
     *out_rate = mrate;
+    *out_acc = macc;
     return out;
 }
 
-/* Parse `\\![SPR]` and emit an FE tagged-output string. SPR `.0`/`.1`
- * (`.2`) starts a syllable with given stress; subsequent single chars
- * are phonemes. Output matches the FE's own tagged format so
- * fe_parse_tagged_output() can consume it.
+/* Reconstruct fe_parsed_word_t.char_start by matching each word's own text
+ * back into the text the FE was fed.
  *
- * Output: #{. pau(p25) <SPR (0,N) undef,STRESS [.S,H* arpa(p100) ... ] > pau(p50) } %%
+ * ⚠ WHY THIS IS NEEDED. The FE emits `?d` -- "unspecified" -- instead of a
+ * character offset on the plain-text feedConfigA path that fe_host.c and
+ * fe_host_emu.c both use, and fe_parse.c stores that as 0. So char_start is 0
+ * for EVERY word here (dumped: pi=0 and pi=1 both reporting 0), and every
+ * consumer keyed on it reads position 0 for the whole utterance. Measured
+ * consequences before this existed:
  *
- * When `phrase_final` is set, the LAST syllable carries the `;L-L%`
- * boundary tone (falling intonation) the engine puts on any word that ends
- * a phrase/utterance, so an inline-SPR word at a phrase boundary falls like
- * a natural one instead of staying flat. The first syllable keeps its `H*`
- * pitch accent (unless it is also the last, in which case the boundary tone
- * takes the slot — matching the engine's single-syllable phrase-final form,
- * e.g. `is` -> `.1;L-L%`).
+ *   \!vp / \!vd   a tag at the START of the text changed every word; a tag
+ *                 anywhere else was silently ignored. Volume was an
+ *                 all-or-nothing utterance control that looked per-word only
+ *                 if you never tested it past position 0.
+ *   \![ToBI:]     a tag on the first word overrode 48 halfphones instead of 6.
  *
- * Returns positive byte count on success, 0 on parse failure. */
+ * Words the FE invented -- "123" -> "wun hundred twenty three", where only the
+ * first carries a source span -- will not be found in the input; they inherit
+ * the previous word's offset, which is the span they came from. Matching is
+ * case-insensitive and requires non-alphanumeric boundaries, so a short word
+ * cannot match inside a longer one. */
+static void fe_fill_char_starts(void *parsed_v, const char *text)
+{
+    fe_parsed_t *p = (fe_parsed_t *)parsed_v;
+    if (!p || !text) return;
+    size_t n = strlen(text), cur = 0;
+    int last = 0;
+    for (int i = 0; i < p->n_words; ++i) {
+        fe_parsed_word_t *w = &p->words[i];
+        size_t wl = strlen(w->text);
+        if (wl == 0 || wl > n) { w->char_start = last; continue; }
+        size_t found = (size_t)-1;
+        for (size_t s = cur; s + wl <= n; ++s) {
+            if (s > 0 && isalnum((unsigned char)text[s - 1])) continue;
+            if (s + wl < n && isalnum((unsigned char)text[s + wl])) continue;
+            size_t k = 0;
+            while (k < wl
+                   && tolower((unsigned char)text[s + k])
+                      == tolower((unsigned char)w->text[k])) ++k;
+            if (k == wl) { found = s; break; }
+        }
+        if (found == (size_t)-1) { w->char_start = last; continue; }
+        w->char_start = (int)found;
+        last = (int)found;
+        cur = found + wl;
+    }
+}
+
+/* Parse `\\![SPR]` and emit an FE tagged-output string. */
 static int spr_inline_to_tagged(const char *text, char *out, size_t out_n,
                                 int phrase_final)
 {
@@ -1095,7 +2397,7 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n,
         if (*q == '.' && q + 1 < end_br
             && q[1] >= '0' && q[1] <= '9') {
             if ((q[1] - '0') > max_stress) max_stress = q[1] - '0';
-            last_syl = q;                    /* track final syllable marker */
+            last_syl = q;
         }
     char *o = out;
     char *eo = out + out_n - 1;
@@ -1109,14 +2411,36 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n,
         if (*q == ' ' || *q == '\t') { ++q; continue; }
         if (*q == '.' && q + 1 < end_br
             && q[1] >= '0' && q[1] <= '9') {
-            const char *marker = q;          /* this syllable's '.' */
+            const char *marker = q;
             int stress = q[1] - '0';
             q += 2;
-            /* Boundary tone on the phrase-final syllable wins the accent
-             * slot; otherwise the first syllable carries the H* accent. */
-            const char *accent = (phrase_final && marker == last_syl) ? ";L-L%"
-                               : first_syl                            ? ",H*"
-                               :                                        "";
+            /* ⚠ THE BOUNDARY TONE DOES NOT REPLACE THE PITCH ACCENT.
+             *
+             * This used to hand a phrase-final syllable `;L-L%` alone, on the
+             * theory that the tone "wins the accent slot". The real FE emits
+             * BOTH on a one-syllable phrase-final word -- `Aye.` tags as
+             * `.1,H*;L-L%`, and so does every one-syllable word in
+             * spfy_fe_text2tagged's output. Dropping the `,H*` cost the
+             * syllable its accent, and slot_ctx's pass A/B both key off
+             * `syl_accent != 0`: without it sp[1] falls back to the stress
+             * default (2, or 1 at stress 0) instead of 7, and sp[2] stays at
+             * its init 1 instead of 3.
+             *
+             * That is the whole of tom's and jill's 12-slot SLOT residual --
+             * every one is a SINGLE-syllable `\![.Nx]`, because a
+             * multi-syllable literal has first_syl != last_syl and so kept
+             * its `,H*` by accident. `I.` and `Aye.` are the controls: same
+             * shape, text mode, and they already matched at 7/3.
+             *
+             * SPFY_SPR_NO_FINAL_ACCENT=1 restores the replacing form. */
+            static int no_fin_acc = -1;
+            if (no_fin_acc < 0)
+                no_fin_acc = (spfy_env("SPFY_SPR_NO_FINAL_ACCENT") != NULL);
+            const char *accent;
+            if (phrase_final && marker == last_syl)
+                accent = (first_syl && !no_fin_acc) ? ",H*;L-L%" : ";L-L%";
+            else
+                accent = first_syl ? ",H*" : "";
             n = snprintf(o, (size_t)(eo - o),
                 "%s.%d%s ", first_syl ? "" : " ", stress, accent);
             if (n < 0) break;
@@ -1138,13 +2462,10 @@ static int spr_inline_to_tagged(const char *text, char *out, size_t out_n,
     return (int)(o - out);
 }
 
-/* Inline-markup segment kinds. PLAIN runs go through the DLL FE; the two
- * special kinds carry explicit pronunciation the DLL FE cannot read and
- * would spell out literally. */
+/* Inline-markup segment kinds. */
 enum { SEG_PLAIN = 0, SEG_SPR, SEG_PRON, SEG_PAUSE };
 
-/* `lt` points at a '<'. True if it opens a `<pron ...>` tag — name matched
- * case-insensitively and delimited by whitespace, '/', or '>'. */
+/* `lt` points at a '<'. */
 static int is_pron_open(const char *lt)
 {
     static const char kw[] = "pron";
@@ -1160,22 +2481,19 @@ static int is_pron_open(const char *lt)
 
 /* One-past-end of a `<pron ...>` construct starting at `lt`: past `/>` for
  * the self-closing form, past `</pron>` for `<pron ...>annotation</pron>`,
- * or just past the open tag's `>` if no close tag follows. NULL if there is
- * no `>` at all. */
+ * or just past the open tag's `>` if no close tag follows. */
 static const char *pron_construct_end(const char *lt)
 {
     const char *gt = strchr(lt, '>');
     if (!gt) return NULL;
-    if (gt > lt && gt[-1] == '/') return gt + 1;        /* <pron .../>        */
-    const char *close = strstr(gt + 1, "</pron>");       /* <pron ...>x</pron> */
+    if (gt > lt && gt[-1] == '/') return gt + 1;
+    const char *close = strstr(gt + 1, "</pron>");
     if (close) { const char *cg = strchr(close, '>'); if (cg) return cg + 1; }
-    return gt + 1;                                        /* unclosed open tag */
+    return gt + 1;
 }
 
-/* Find the next inline-markup token (`\![...]` SPR escape, `\!pN` pause,
- * or `<pron ...>` tag) at or after `s`. On success returns its start, sets
- * *kind and *tok_end (one-past). Returns NULL if none remains. Unterminated
- * tokens (no `]` / no `>`) are skipped — treated as plain text. */
+/* Find the next inline-markup token (`\![...]` SPR escape, `\!pN` pause, or
+ * `<pron ...>` tag) at or after `s`. */
 static const char *find_inline_token(const char *s, int *kind,
                                      const char **tok_end)
 {
@@ -1187,7 +2505,7 @@ static const char *find_inline_token(const char *s, int *kind,
                    && isdigit((unsigned char)q[3])) {
             const char *e = q + 3;
             while (isdigit((unsigned char)*e)) ++e;
-            *kind = SEG_PAUSE; *tok_end = e; return q;          /* \!pN */
+            *kind = SEG_PAUSE; *tok_end = e; return q;
         } else if (q[0] == '<' && is_pron_open(q)) {
             const char *e = pron_construct_end(q);
             if (e) { *kind = SEG_PRON; *tok_end = e; return q; }
@@ -1198,8 +2516,8 @@ static const char *find_inline_token(const char *s, int *kind,
 
 /* True when `text` carries inline markup the DLL FE can't read — an
  * `\![...]` SPR escape, a `\!pN` pause, or a `<pron ...>` tag — and so must
- * be routed through build_inline_mixed_tagged (which also covers the lone-
- * token case). Plain text returns 0. */
+ * be routed through build_inline_mixed_tagged (which also covers the
+ * lone-... */
 static int spfy_text_has_inline_markup(const char *text)
 {
     int kind; const char *te;
@@ -1208,8 +2526,7 @@ static int spfy_text_has_inline_markup(const char *text)
 
 /* Remove the single `;L-L%` phrase-final boundary tone an in-house-FE core
  * carries when a `<pron>` word is phonemized in isolation, for use when the
- * word is NOT phrase-final in the merged sentence (keeps mid-sentence pron
- * words from falling under SPFY_PROSODY_REALIZE). */
+ * word is NOT phrase-final in the merged sentence (keeps mid-sentence... */
 static void strip_boundary_tone(char *s)
 {
     char *b = strstr(s, ";L-L%");
@@ -1217,24 +2534,18 @@ static void strip_boundary_tone(char *s)
 }
 
 /* Locate the inner word/pause "core" of one tagged-output block: the span
- * AFTER the leading pad `pau(...)` and BEFORE the trailing pad `pau(...)`.
- * Every block (DLL-FE or spr_inline_to_tagged) is wrapped as
- *   `#{<T> pau(pNN) <word>...<word> pau(pNN) } %%`
- * so the leading/trailing pads are the FIRST and LAST `pau(` occurrences.
- * Internal pads (a comma break's `pau(p50) } {. pau(p25)`) sit between
- * them and are kept verbatim. Returns 1 and sets start+len on success, or
- * 0 when the block has no word core (empty / punctuation-only utterance). */
+ * AFTER the leading pad `pau(...)` and BEFORE the trailing pad `pau(...)`. */
 static int spr_tagged_core(const char *block, const char **start, size_t *len)
 {
     const char *first = strstr(block, "pau(");
     if (!first) return 0;
     const char *after = strchr(first, ')');
     if (!after) return 0;
-    after++;                                 /* just past the leading pad's ) */
+    after++;
 
-    const char *last = NULL, *q = block;     /* trailing pad = last "pau(" */
+    const char *last = NULL, *q = block;
     while ((q = strstr(q, "pau(")) != NULL) { last = q; q += 4; }
-    if (!last || last <= after) return 0;    /* no distinct trailing pad */
+    if (!last || last <= after) return 0;
 
     while (after < last && (unsigned char)*after <= ' ') after++;
     const char *e = last;
@@ -1246,10 +2557,7 @@ static int spr_tagged_core(const char *block, const char **start, size_t *len)
 }
 
 /* Map a character to the tagged-output phrase-terminator marker it implies,
- * or 0 if it is not phrase-breaking punctuation. Comma / semicolon and
- * period / `!` / `?` pass through verbatim (all accepted by the tagged
- * parser); colon maps to ';' since the parser has no ':' marker. Used to
- * decide whether an inline-SPR segment junction needs a phrase break. */
+ * or 0 if it is not phrase-breaking punctuation. */
 static char spr_break_marker(int c)
 {
     switch (c) {
@@ -1263,32 +2571,7 @@ static char spr_break_marker(int c)
 /* Build ONE flowing tagged-output utterance from text that mixes plain
  * words with inline markup — `\![...]` SPR escapes, `\!pN` pause tags,
  * and/or `<pron ...>` tags — none of which the DLL FE can read (it would
- * spell the markup out literally).
- *
- * `\!pN` is not phonemized: it injects a `pau(pN)` at its position — either
- * REPLACING an adjacent punctuation pause (when it sits immediately before
- * the mark) or ADDING one (elsewhere), matching the User's Guide.
- *
- * Rendering each segment as its own utterance (the obvious approach) gives
- * every run its own leading + trailing `pau` pad, so at a markup junction
- * the plain run's trailing pad and the markup run's leading pad stack into
- * a long, unnatural silence — and there is no cross-word WSOLA join.
- * Instead we phonemize each run with the right backend — plain runs via the
- * DLL FE, SPR via spr_inline_to_tagged, `<pron>` via the in-house FE (which
- * owns the Balabolka `<pron sym=...>` parser) — strip each block down to its
- * word core (dropping the OUTER pad pauses), and concatenate the cores under
- * a SINGLE leading/trailing pad. The markup words then sit inline among the
- * plain words in one phrase, flowing as a continuation, and downstream
- * USel/WSOLA join across the boundary like any other word pair.
- *
- * Phrase-breaking punctuation that lands at a segment JUNCTION (e.g. the
- * comma in `\![radio], commercial` — which the FE silently drops from a
- * segment-edge position) is re-materialised as a real phrase break so the
- * comma pause is preserved; only spans WITHOUT such punctuation join as a
- * pause-free continuation. A markup word that ends up phrase-final keeps its
- * `;L-L%` boundary tone (falling intonation); a non-final one has it removed.
- *
- * Returns a malloc'd tagged string (caller frees) or NULL on failure. */
+ * spell... */
 static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
 {
     size_t tlen   = strlen(text);
@@ -1307,19 +2590,19 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
 
     const char *p = text;
     int ok = 0, any_core = 0;
-    char pend_break = 0;                      /* break punct trailing prev seg */
-    int pend_pause = 0;                       /* \!pN duration to inject (ms)  */
+    char pend_break = 0;
+    int pend_pause = 0;
     while (*p) {
         int kind = SEG_PLAIN;
         const char *tok_end = NULL;
         const char *tok = find_inline_token(p, &kind, &tok_end);
         const char *seg_start = p;
         const char *seg_end;
-        if (tok == p) {                      /* this segment IS a markup token */
+        if (tok == p) {
             seg_end = tok_end;
-        } else if (tok) {                    /* plain run up to the next token */
+        } else if (tok) {
             seg_end = tok; kind = SEG_PLAIN;
-        } else {                             /* trailing plain run             */
+        } else {
             seg_end = p + strlen(p); kind = SEG_PLAIN;
         }
         int is_markup = (kind != SEG_PLAIN);
@@ -1329,21 +2612,17 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
 
         /* `\!pN` pause: not a phonemizable run — record the duration and
          * whether it sits immediately before punctuation, then apply it at
-         * the next junction (or before the closing pad). Per the guide a
-         * pause right before a punctuation mark REPLACES that mark's default
-         * pause; elsewhere it adds one. `pend_break` is left untouched so a
-         * preceding comma still triggers its phrase break. */
+         * the next junction (or before the closing pad). */
         if (kind == SEG_PAUSE) {
-            int n = atoi(seg_start + 3);     /* digits after "\!p"        */
+            int n = atoi(seg_start + 3);
             if (n < 1)     n = 1;
-            if (n > 32767) n = 32767;        /* guide valid range 1..32767 */
+            if (n > 32767) n = 32767;
             pend_pause = n;
             continue;
         }
 
         /* Skip whitespace-only plain runs (the space between a word and a
-         * markup token) — no phonemes, and the FE would emit an empty utt.
-         * A pending junction break carries across to the next real seg. */
+         * markup token) — no phonemes, and the FE would emit an empty utt. */
         if (!is_markup) {
             int ws_only = 1;
             for (size_t i = 0; i < seg_len; i++)
@@ -1353,8 +2632,7 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
 
         /* Phrase-break punctuation adjacent to THIS junction: the break
          * char trailing the previous seg, or leading this one (first non-ws
-         * char). The FE keeps a comma INSIDE a run but drops one at a
-         * run edge, so we re-insert it here. */
+         * char). */
         char lead = 0;
         {
             const char *s = seg_start;
@@ -1363,10 +2641,7 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         }
 
         /* A markup run is phrase-final when the next non-whitespace content
-         * is phrase-breaking punctuation or end-of-text — i.e. a break (or
-         * the closing pad) will follow it. Its last syllable then keeps the
-         * falling boundary tone; otherwise the tone is suppressed/removed.
-         * `p` already points past this run. */
+         * is phrase-breaking punctuation or end-of-text — i.e. */
         int seg_final = 0;
         if (is_markup) {
             const char *la = p;
@@ -1380,14 +2655,12 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         const char *block;
         if (kind == SEG_SPR) {
             if (spr_inline_to_tagged(seg, segbuf, segcap, seg_final) <= 0)
-                goto done;                   /* fail */
+                goto done;
             block = segbuf;
         } else if (kind == SEG_PRON) {
-            /* The in-house FE owns the <pron sym=...> parser. It phonemizes
-             * the tag in isolation (so always emits the phrase-final boundary
-             * tone); drop that tone when the word is NOT phrase-final here. */
+            /* The in-house FE owns the <pron sym=...> parser. */
             if (spfy_fe_internal_text_to_tagged(seg, segbuf, segcap) < 0)
-                goto done;                   /* fail (truncation rc=1 is ok) */
+                goto done;
             if (!seg_final) strip_boundary_tone(segbuf);
             block = segbuf;
         } else {
@@ -1396,21 +2669,17 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         }
 
         const char *core; size_t core_len;
-        if (!spr_tagged_core(block, &core, &core_len)) continue;  /* empty utt */
+        if (!spr_tagged_core(block, &core, &core_len)) continue;
 
-        /* Separator: a real phrase break when a comma/period/... sits at
-         * this junction, otherwise a plain space (pause-free continuation).
-         * Bound-checked (break separator is ~24 bytes + the final close). */
-        if (acc_len + core_len + 64 >= outcap) goto done;        /* fail-safe */
+        /* Separator: a real phrase break when a comma/period/... */
+        if (acc_len + core_len + 64 >= outcap) goto done;
         if (any_core) {
             char br = pend_break ? pend_break : lead;
             if (pend_pause) {
                 /* \!pN renders as a phrase break carrying a `pau(uN)` USER
                  * pause that the synth loop turns into N ms of injected
                  * silence (the FE pipeline does not size silence from the
-                 * structural `pau(pN)` value). Keep the adjacent punctuation
-                 * as the opener term so its prosody is preserved; a bare
-                 * pause (no punctuation here) uses a neutral ',' break. */
+                 * structural `pau(pN)` value). */
                 char term = br ? br : ',';
                 acc_len += (size_t)snprintf(acc + acc_len, outcap - acc_len,
                                             " pau(p50) } {%c pau(u%d) ", term, pend_pause);
@@ -1427,7 +2696,8 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         any_core = 1;
 
         /* Remember break punct trailing this seg (last non-ws char) for the
-         * NEXT junction — covers `word, \![...]` as well as `\![...], word`. */
+         * NEXT junction — covers `word, \![...]` as well as `\![...],
+         * word`. */
         pend_break = 0;
         {
             const char *e = seg_end;
@@ -1436,7 +2706,7 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         }
     }
 
-    if (!any_core) goto done;                /* nothing phonemizable */
+    if (!any_core) goto done;
     acc_len += (size_t)snprintf(acc + acc_len, outcap - acc_len,
                                 " pau(p50) } %%");
     ok = 1;
@@ -1448,40 +2718,117 @@ done:
     return acc;
 }
 
-/* Per-call synth: text -> FE -> USel -> WSOLA -> sink. The voice is
- * loaded once by the caller (CLI main() or SAPI Speak()) and reused.
- * The sink is any open spfy_wav_writer_t (file or callback mode); we
- * neither open nor close it. Text carrying inline pronunciation markup the
- * DLL FE can't read — `\![...]` SPR escapes or `<pron ...>` tags — is
- * routed through build_inline_mixed_tagged, which phonemizes each run with
- * the right backend and merges everything into one flowing utterance so the
- * markup reads as a continuation rather than standalone phrases with long
- * junction pauses (and so the DLL FE never sees, and literally speaks, the
- * markup). */
+/* Per-call synth: text -> FE -> USel -> WSOLA -> sink. */
 int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                        spfy_wav_writer_t *sink,
                        const spfy_synth_callbacks_t *cb,
                        spfy_synth_stats_t *out_stats)
 {
+    /* `\s4m` — Speechify 4 mode, for hosts that cannot pass a CLI flag or
+     * set an environment variable. */
+    /* ---- REJOIN A TAG A HOST CUT IN HALF -------------------------------
+     * Balabolka hands tagged text to the engine in pieces, splitting so
+     * that one Speak() call ENDS with a bare `\!` and the next begins with
+     * the rest of... */
+    static int g_split_pending = 0;
+    char *split_buf = NULL;
+    if (text) {
+        size_t n = strlen(text), end = n;
+        int need_prefix = g_split_pending;
+        g_split_pending = 0;
+        while (end && (text[end - 1] == ' ' || text[end - 1] == '\t'
+                       || text[end - 1] == '\r' || text[end - 1] == '\n'))
+            --end;
+        int dangling = (end >= 2 && text[end - 2] == '\\'
+                        && text[end - 1] == '!');
+        if (need_prefix || dangling) {
+            size_t keep = dangling ? end - 2 : n;
+            split_buf = (char *)malloc(keep + 3u);
+            if (split_buf) {
+                char *o = split_buf;
+                if (need_prefix) { *o++ = '\\'; *o++ = '!'; }
+                memcpy(o, text, keep);
+                o[keep] = '\0';
+                text = split_buf;
+            }
+            if (dangling) g_split_pending = 1;
+        }
+    }
+
+    spfy4_env_scope_t s4_scope;
+    int s4_scoped = 0;
+    if (text && !g_s4_forbidden) {
+        const char *p = text, *q = NULL;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+        if (p[0] == '\\') {
+            /* Ordered so a short string fails on the NUL before any later
+             * index is evaluated -- && short-circuits, so this cannot read
+             * past the terminator. */
+            if (p[1] == '!' && (p[2] == 's' || p[2] == 'S')
+                && p[3] == '4' && (p[4] == 'm' || p[4] == 'M'))
+                q = p + 5;
+            else if ((p[1] == 's' || p[1] == 'S')
+                     && p[2] == '4' && (p[3] == 'm' || p[3] == 'M'))
+                q = p + 4;
+        }
+        if (q && !isalnum((unsigned char)*q)) {
+            /* Snapshot BEFORE applying, or it captures the values the mode
+             * just wrote and the restore is a no-op. */
+            if (g_s4_pending) s4_scope = g_s4_pending_scope;
+            else              spfy4_env_save(&s4_scope);
+            spfy4_apply_defaults(NULL);
+            while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') ++q;
+            text = q;
+            /* Words after the tag? */
+            for (const char *r = text; *r; ++r)
+                if (isalnum((unsigned char)*r)) { s4_scoped = 1; break; }
+            if (s4_scoped) {
+                g_s4_pending = 0;
+            } else {
+                g_s4_pending_scope = s4_scope;
+                g_s4_pending = 1;
+            }
+        } else if (g_s4_pending) {
+            /* No tag of its own, but a tag-only utterance is waiting to be spent. */
+            for (const char *r = text; *r; ++r)
+                if (isalnum((unsigned char)*r)) { s4_scoped = 1; break; }
+            if (s4_scoped) {
+                s4_scope = g_s4_pending_scope;
+                g_s4_pending = 0;
+            }
+        }
+    }
+
     spfy_prosody_hints_t hints = {0};
     spfy_fe_utt_t fe_utt = {0};
     spfy_slot_tree_t tree = {0};
     spfy_slice_ctx_table_t slice_ctx = {0};
     spfy_sp_target_table_t sp_tab = {0};
     spfy_slot_preds_table_t preds_tab = {0};
+    /* SPFY_DP_F0_CONT state: per-uid true F0 for the DP continuity term. */
+    spfy_pmarks_t   dp_marks = {0};
+    /* Energy tables; NULL unless SPFY_POW_CONT_W (join) or SPFY_POW_TGT_W
+     * (target) is set. */
+    float          *unit_pow = NULL;
+    uint32_t        unit_pow_n = 0u;
+    float           pow_join_w = 0.0f, pow_join_dead = 0.0f;
+    float          *pow_mean = NULL, *pow_sd = NULL;
+    spfy_reselect_t dp_f0    = {0};
+    int             dp_f0_on = 0;
+    float           dp_f0_w = 0.0f, dp_f0_dead = 0.0f, dp_f0_up = 1.0f;
+    float           dp_f0_break = 0.0f, dp_f0_slope = 0.0f;
+    int             dp_f0_scope = 1;
+    float           dp_f0_seam = 0.0f;
     uint32_t *q5_per_slot = NULL;
     uint8_t  *q5_has = NULL;
     uint32_t *hp_to_post = NULL;
     uint32_t *post_to_hp = NULL;
     uint32_t *hp_word_idx = NULL;
-    /* Per-hp SSML / Balabolka prosody overrides (signed; 0 = neutral).
-     * Populated alongside hp_word_idx; read in the per-slot CART block
-     * so f0tr_mean / durt_mean adjust per-word from user markup. */
+    /* Per-hp SSML / Balabolka prosody overrides (signed; 0 = neutral). */
     int8_t   *hp_pitch_st = NULL;
     int8_t   *hp_rate_pct = NULL;
-    uint16_t *syl_vol = NULL;      /* per-syllable volume % from \!vp/\!vd (0 = 100),
-                                    * indexed by fe_shared-1 (reliable, unlike the
-                                    * tree-word -> parsed-word count) */
+    uint16_t *syl_vol = NULL;      /* per-syllable volume % from \!vp/\!vd (0 = 100), indexed by fe_shared-1
+ * (reliable, unlike the tree-word -> parsed-word count) */
     spfy_viterbi_slot_t *vslots = NULL;
     uint32_t **cbuf = NULL;
     float    **tbuf = NULL;
@@ -1499,35 +2846,37 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     uint32_t  *anchor_n      = NULL;
     spfy_viterbi_dag_slot_t *dag_slots = NULL;
     uint32_t  n_slots = 0;
-    /* Per-hp boundary-tone target (signed ST; 0 = none). Built from the
-     * slot tree's syllable fe_shared id → fe_utt.syl_btone, the reliable
-     * mapping (shared = global_syl_index + 1). Option A: biases the
-     * per-slot F0 target to steer unit selection toward naturally
-     * contoured units. SPFY_PROSODY_REALIZE-gated. */
+    /* Per-hp boundary-tone target (signed ST; 0 = none). */
     int8_t   *hp_btone = NULL;
+    int8_t   *hp_acctype = NULL;  /* per-hp accent-TYPE st bias (H*=0, L*=-5, !H*=-2 ...),
+ * SPFY_SPFY4_ACCTYPE_GAIN-gated */
+    uint8_t  *hp_accent = NULL;   /* per-hp accent PRESENCE (syl_accent[]); hp_acctype can't carry this -- 0
+ * means both "H*" and "unaccented". */
+    uint32_t *hp_syl = NULL;      /* per-hp syllable id, so the contour can keep abutting accented syllables
+ * apart */
+    uint8_t  *hp_nuc = NULL;      /* per-hp "is a syllable nucleus", so accents centre on the vowel, not the
+ * syllable */
     int rc;
-    char *etags_text = NULL;     /* owns the \!-tag pre-pass output (freed at cleanup) */
-    uint16_t *etag_vol = NULL;   /* per-char volume % map (0 = default 100) */
-    uint16_t *etag_rate = NULL;  /* per-char rate % map   (0 = default 100) */
-    size_t etag_maps_n = 0;      /* valid length of etag_vol / etag_rate     */
+    char *etags_text = NULL;
+    uint16_t *etag_vol = NULL;
+    uint16_t *etag_rate = NULL;
+    uint8_t  *etag_acc = NULL;
+    uint8_t  *hp_tobi = NULL;
+    size_t etag_maps_n = 0;
     spfy_prosody_hints_init(&hints);
 
-    /* Embedded \!-tag pre-pass (Speechify User's Guide ch. 2 FE/text tags):
-     * resolve \!eos, \!ts0/c/a/r spellout, and \!ny0/1 number-mode into plain
-     * text the FE handles natively. \!pN and \![SPR]/<pron> pass through to
-     * the inline builder below. Plain untagged text is untouched, so the
-     * byte-exact whole-text FE path (and the audit corpus) is unaffected. */
+    /* Embedded \!-tag pre-pass (Speechify User's Guide ch. */
     if (spfy_etags_need_resolve(text)) {
-        etags_text = spfy_etags_resolve(text, &etag_vol, &etag_rate);
+        etags_text = spfy_etags_resolve(text, &etag_vol, &etag_rate,
+                                        &etag_acc);
         if (etags_text) { text = etags_text; etag_maps_n = strlen(etags_text); }
     }
-    if (getenv("SPFY_ETAGS_DUMP"))
+    if (spfy_env("SPFY_ETAGS_DUMP"))
         fprintf(stderr, "[etags] resolved: %s\n", text);
 
-    if (getenv("SPFY_VOICING_DUMP")) {
+    if (spfy_env("SPFY_VOICING_DUMP")) {
         /* Diagnostic: dump voicing[] table to verify per-hp_class
-         * voiced/voiceless mapping. Index = 2*phone_id_alpha + side
-         * (alphabetical phone order from VCF "name" v->feat chunk). */
+         * voiced/voiceless mapping. */
         fprintf(stderr, "{\"voicing\":1,\"n\":%u,\"vals\":[",
                 v->av.voicing_n);
         for (uint32_t i = 0; i < v->av.voicing_n; ++i)
@@ -1537,17 +2886,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     }
 
     /* Hosted FE: drive the public synth_text API; the parsed result is
-     * stashed on `v->fe` and retrieved via spfy_fe_get_parsed. We no
-     * longer maintain a spfy_fe_delta_t — parsed_to_fe_utt feeds the
-     * downstream slot-tree pipeline directly. */
+     * stashed on `v->fe` and retrieved via spfy_fe_get_parsed. */
     {
         spfy_fe_utterance_t *utt_unused = NULL;
-        const char *tagged_file = getenv("SPFY_TAGGED_FILE");
+        const char *tagged_file = spfy_env("SPFY_TAGGED_FILE");
         if (tagged_file) {
             /* Experiment hook: synth from a tagged-output file verbatim,
-             * bypassing the FE text pass entirely. Lets A/B tests hand-edit
-             * ToBI accent / boundary-tone marks in otherwise identical
-             * tagged text. The positional <text> CLI arg is ignored. */
+             * bypassing the FE text pass entirely. */
             FILE *tf = fopen(tagged_file, "rb");
             if (!tf) {
                 fprintf(stderr, "SPFY_TAGGED_FILE: cannot open %s\n",
@@ -1569,39 +2914,46 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             free(tagged);
         } else if (spfy_text_has_inline_markup(text)) {
             /* Inline pronunciation markup — `\![...]` SPR escapes and/or
-             * `<pron ...>` tags — that the DLL FE can't read. Phonemize the
-             * plain runs with the DLL FE, the SPR runs with
-             * spr_inline_to_tagged, and the `<pron>` runs with the in-house
-             * FE, then merge into ONE flowing utterance so the markup words
-             * read as a continuation rather than standalone phrases with long
-             * junction pauses. Also covers the lone-token case (a single
-             * `\![...]` or `<pron ...>` with no surrounding words). */
+             * `<pron ...>` tags — that the DLL FE can't read. */
             char *mixed = build_inline_mixed_tagged(v->fe, text);
             if (!mixed) {
                 fprintf(stderr, "build_inline_mixed_tagged: bad inline markup\n");
                 rc = SPFY_E_INVAL; goto fail;
             }
-            if (getenv("SPFY_ETAGS_DUMP"))
+            if (spfy_env("SPFY_ETAGS_DUMP"))
                 fprintf(stderr, "[etags] tagged: %s\n", mixed);
-            rc = spfy_fe_synth_tagged(v->fe, mixed, &hints, &utt_unused);
-            free(mixed);
-        } else if (getenv("SPFY_FE_INTERNAL")) {
-            /* In-house FE path: text → fe_internal → tagged-text →
-             * spfy_fe_synth_tagged → slot tree. Skips the DLL entirely.
-             * Quality is lower than the hosted FE (no engine-specific
-             * lexicon, simple syllabifier, no full prosody model) but
-             * portable to ARM and platforms where the DLL can't run.
+            /* Refinement must be ON for THIS parse — same reasoning as the
+             * SPFY_FE_INTERNAL branch below, and the same symptom.
              *
-             * On Windows desktop this env var is the ONLY way to force
-             * the in-house FE — the default `spfy_fe_synth_text` call
-             * below resolves at link time to the hosted DLL backend
-             * (SPFY_FE_HOSTED=ON build) and gives 100% engine UID match
-             * since the FE output is bit-identical to the engine's. On
-             * Android NDK / WASM builds the same `spfy_fe_synth_text`
-             * call resolves to fe_stub.c which uses the in-house FE
-             * (no DLL loader on ARM / wasm32) — so on those platforms
-             * the env var is redundant. Logged once on first synth so
-             * the user can verify which backend is live. */
+             * The SPR runs here come from spr_inline_to_tagged, which emits
+             * the symbols VERBATIM. The engine flaps them: fed
+             * `\![.1pa.0tx.0wa.0tu.0mi]` its own --g2p answers
+             * `p aa dx ax w aa dx uw m iy` -- input `t` comes back as SPR
+             * `F` (dx). Our parse inherited ESPR's process-global
+             * refine=0 (set at voice load because ESPR output is already
+             * reduced) and so kept a hard `t`.
+             *
+             * Measured on spr_002: ctx differed at exactly the two `t`
+             * positions, phone 36 (t) where the engine has 11 (dx), which
+             * dragged slot fidelity to 6/24 and broke the audio too.
+             *
+             * ⚠ FLAP_ONLY, not full refinement. Inline SPR has already NAMED
+             * every phone, so the vowel passes must not fire -- the engine's
+             * own --g2p leaves the `x` (ax) exactly as written while flapping
+             * the `t`. Turning the full set on fixed the flap but then
+             * reduced that ax to ix, putting phone 21 where the engine has 5;
+             * slot fidelity went 6/24 -> 14/24 instead of 24/24.
+             *
+             * Save/restore so a later hosted-FE call still sees ESPR's
+             * choice. */
+            const int refine_prev_inline = fe_parse_get_refine();
+            fe_parse_set_refine(FE_REFINE_FLAP_ONLY);
+            rc = spfy_fe_synth_tagged(v->fe, mixed, &hints, &utt_unused);
+            fe_parse_set_refine(refine_prev_inline);
+            free(mixed);
+        } else if (spfy_env("SPFY_FE_INTERNAL")) {
+            /* In-house FE path: text → fe_internal → tagged-text →
+             * spfy_fe_synth_tagged → slot tree. */
             static int logged = 0;
             if (!logged) {
                 fprintf(stderr,
@@ -1609,8 +2961,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     "(SPFY_FE_INTERNAL forced override)\n");
                 logged = 1;
             }
-            /* 64 KB tagged buffer — accommodates long passages (the
-             * sioux pangram in the audit corpus runs ~30 KB tagged). */
+            /* 64 KB tagged buffer — accommodates long passages (the sioux
+             * pangram in the audit corpus runs ~30 KB tagged). */
             static char tagged_buf_[65536];
             int frc = spfy_fe_internal_text_to_tagged(
                 text, tagged_buf_, sizeof tagged_buf_);
@@ -1618,7 +2970,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 fprintf(stderr, "spfy_fe_internal_text_to_tagged failed\n");
                 rc = SPFY_E_INVAL; goto fail;
             }
+            /* Refinement must be ON for THIS parse, whatever the hosted
+             * backend decided. */
+            const int refine_prev = fe_parse_get_refine();
+            fe_parse_set_refine(1);
             rc = spfy_fe_synth_tagged(v->fe, tagged_buf_, &hints, &utt_unused);
+            fe_parse_set_refine(refine_prev);
         } else {
             static int logged = 0;
             if (!logged) {
@@ -1647,32 +3004,18 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     const fe_parsed_t *parsed =
         (const fe_parsed_t *)spfy_fe_get_parsed(v->fe);
     if (!parsed || parsed->n_words == 0) {
-        /* Valid input that produces no audio (e.g. lone period, just
-         * whitespace, an empty SSML frag). Return success with zero
-         * samples emitted — NOT an error. Returning failure causes
-         * SAPI consumers (Balabolka, NVDA) to abort the entire audio
-         * playback queue, dropping previously-queued audio from
-         * earlier frags in the same utterance. Lone-period frags
-         * arrive routinely in multi-fragment Balabolka SSML splits. */
+        /* Valid input that produces no audio (e.g. */
         rc = SPFY_OK; goto cleanup;
     }
 
-    /* Multi-utterance synthesis. Engine treats each FE phrase (split at
-     * commas/semicolons/colons by stage_textnorm) as a separate USel
-     * utterance with its own pad slots, own DAG, own audio chunk. We
-     * loop over phrase IDs and run the per-utterance pipeline once per
-     * phrase, concatenating audio with inter-phrase silence (~200 ms).
-     *
-     * SPFY_FIRST_PHRASE_ONLY=1 (audit/debugging) limits the loop to
-     * phrase 0 only. SPFY_INTERPHRASE_MS overrides the silence (default
-     * 200, max 500). */
+    /* Multi-utterance synthesis. */
     uint32_t max_phrase_id = 0;
     for (int i = 0; i < parsed->n_words; i++) {
         if ((uint32_t)parsed->words[i].phrase_id > max_phrase_id)
             max_phrase_id = (uint32_t)parsed->words[i].phrase_id;
     }
     uint32_t n_phrases = max_phrase_id + 1u;
-    int first_phrase_only = (getenv("SPFY_FIRST_PHRASE_ONLY") != NULL);
+    int first_phrase_only = (spfy_env("SPFY_FIRST_PHRASE_ONLY") != NULL);
     if (first_phrase_only) n_phrases = 1u;
 
     /* [live-trace] one-shot header: sample rate (for waveform decode) plus
@@ -1682,40 +3025,15 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         v->vdb.sample_rate, v->units.n_units, n_phrases);
 
     /* [live-trace] global spoken-word counter (across ALL phrases), aligned
-     * with the emitted `word` events. Tagged onto each `unit` event so the viz
-     * colors every stitched slice by its true word — stable the instant a
-     * slice lands, not re-derived from partial state. -1 until the first word.
-     * Guarded so the shipped (non-trace) build's control flow is identical. */
+     * with the emitted `word` events. */
 #ifdef SPFY_TRACE
     int g_wseq = -1;
 #endif
 
-    /* Inter-phrase silence — DEFAULT OFF as of 2026-05-19 evening.
-     *
-     * The FE pad slots at each phrase boundary already render natural
-     * silence: the leading + trailing slots of every utt have
-     * ctx[2]∈{64,65} (HP_PAU_L/R) and the unit selector pulls real
-     * recorded `pau` halfphone units for them. Those units carry the
-     * recording's low-level noise floor; concatenating two of them
-     * across an utt boundary gives the listener a natural breath
-     * pause. Engine does exactly this.
-     *
-     * The legacy 200 ms (and later per-FE-pause-driven) ZERO-padding
-     * push that lived here added clinical digital silence on top —
-     * which the WSOLA crossfade then merged with the real speech, but
-     * with the silence-floor at TRUE zero rather than the recording
-     * noise floor. The resulting silence→speech transitions sounded
-     * "edited" / "hard-cut" — diagnosed via envelope-flux analysis:
-     * with the zero pad, silence-onset attacks ramped in ≤5 ms (one
-     * 5 ms frame); with the engine's natural pad units, attacks ramp
-     * in 20-35 ms.
-     *
-     * To restore the old behaviour (e.g. if FE pad duration is too
-     * short for your input), set SPFY_INTERPHRASE_MS=<N> with N in
-     * milliseconds. SPFY_INTERPHRASE_MS=0 explicitly suppresses. */
+    /* Inter-phrase silence — DEFAULT OFF as of 2026-05-19 evening. */
     int inter_phrase_ms_override = -1;
     {
-        const char *e = getenv("SPFY_INTERPHRASE_MS");
+        const char *e = spfy_env("SPFY_INTERPHRASE_MS");
         if (e) {
             inter_phrase_ms_override = atoi(e);
             if (inter_phrase_ms_override < 0)   inter_phrase_ms_override = 0;
@@ -1723,12 +3041,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         }
     }
 
-    /* Sink is caller-owned (CLI opened a file, SAPI a callback). WSOLA
-     * streams all phrases into it; the streamer state itself is per-call. */
+    /* Sink is caller-owned (CLI opened a file, SAPI a callback). */
     spfy_wsola_streamer_t ws;
     spfy_wsola_init(&ws, sink);
 
-    /* Cumulative stats across phrases. */
     size_t total_played = 0, total_skipped = 0, total_paired_same = 0,
            total_paired_cross = 0, total_interword_pauses = 0;
 
@@ -1741,10 +3057,155 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * SPFY_NO_SENTENCE_IDX_PARA=1 reverts to the legacy hardcoded 0. */
     uint32_t sentence_idx_in_para = 0;
 
+    /* --- SPFY_DP_F0_CONT: load the per-uid true-F0 table
+     * ------------------ OFF unless SPFY_DP_F0_CONT is set to a non-zero
+     * weight, so the byte-exact S3 audit is untouched. */
+    {
+        const char *e = spfy_env("SPFY_DP_F0_CONT");
+        /* Set-but-zero is deliberately NOT "off": it builds the table and
+         * runs the diagnostic while adding exactly 0.0f to every edge, so
+         * it is the baseline arm of the sweep and a control in one. */
+        if (e && *e) {
+            const char *pm_stem = spfy_env("SPFY_PROSODY_PM");
+            dp_f0_w = (float)atof(e);
+            dp_f0_dead = 1.0f;
+            {
+                const char *d = spfy_env("SPFY_DP_F0_DEAD");
+                if (d && *d) dp_f0_dead = (float)atof(d);
+                const char *u = spfy_env("SPFY_DP_F0_UP");
+                if (u && *u) dp_f0_up = (float)atof(u);
+                const char *b = spfy_env("SPFY_DP_F0_BREAK");
+                if (b && *b) dp_f0_break = (float)atof(b);
+                const char *s = spfy_env("SPFY_DP_F0_SLOPE");
+                if (s && *s) dp_f0_slope = (float)atof(s);
+                const char *sc = spfy_env("SPFY_DP_F0_SCOPE");
+                if (sc && *sc) dp_f0_scope = atoi(sc);
+                const char *sm = spfy_env("SPFY_DP_F0_SEAM");
+                if (sm && *sm) dp_f0_seam = (float)atof(sm);
+            }
+            if (dp_f0_seam < 0.0f) dp_f0_seam = 0.0f;
+            if (dp_f0_scope < 0) dp_f0_scope = 0;
+            if (dp_f0_scope > 2) dp_f0_scope = 2;
+            if (dp_f0_dead  < 0.0f) dp_f0_dead  = 0.0f;
+            if (dp_f0_up    < 0.0f) dp_f0_up    = 0.0f;
+            if (dp_f0_break < 0.0f) dp_f0_break = 0.0f;
+            if (!pm_stem || !*pm_stem) {
+                spfy_log_warn("dp-f0: SPFY_DP_F0_CONT set but SPFY_PROSODY_PM "
+                              "is not; term DISABLED");
+            } else if (spfy_pmarks_load(pm_stem, &dp_marks) != SPFY_OK) {
+                spfy_log_warn("dp-f0: no pitch marks at '%s'; term DISABLED",
+                              pm_stem);
+            } else if (spfy_reselect_build(&dp_f0, &v->units, &dp_marks)
+                       != SPFY_OK) {
+                spfy_log_warn("dp-f0: could not build the F0 table; "
+                              "term DISABLED");
+                spfy_pmarks_free(&dp_marks);
+                dp_marks = (spfy_pmarks_t){0};
+            } else {
+                uint32_t voiced = 0;
+                for (uint32_t i = 0; i < dp_f0.n_units; ++i)
+                    if (dp_f0.f0[i] > 0.0f) ++voiced;
+                dp_f0_on = 1;
+                spfy_log_warn("dp-f0: ON — w=%.3f/st, dead=%.2f st, "
+                              "up=%.2fx, break=%.2f st, slope=%+.3f st/join, "
+                              "scope=%d, seam=%.3f, "
+                              "%u/%u units voiced (%.1f%%)",
+                              (double)dp_f0_w, (double)dp_f0_dead,
+                              (double)dp_f0_up, (double)dp_f0_break,
+                              (double)dp_f0_slope, dp_f0_scope,
+                              (double)dp_f0_seam,
+                              voiced, dp_f0.n_units,
+                              dp_f0.n_units
+                                  ? 100.0 * voiced / dp_f0.n_units : 0.0);
+            }
+        }
+    }
+
+    /* --- SPFY_POW_CONT_W / SPFY_POW_TGT_W: measure per-unit energy
+     * -------- Built HERE, before the phrase loop, for the same reason the
+     * F0 table is: it walks the whole inventory, and rebuilding it per
+     * phrase would make a... */
+    {
+        const char *e_join = spfy_env("SPFY_POW_CONT_W");
+        const char *e_tgt  = spfy_env("SPFY_POW_TGT_W");
+        int want_join = (e_join && *e_join);
+        int want_tgt  = (e_tgt  && *e_tgt);
+        if (want_join || want_tgt) {
+            uint32_t pm = 0;
+            unit_pow = build_unit_power(v, &unit_pow_n, &pm);
+            if (!unit_pow) {
+                spfy_log_warn("pow: could not measure unit energy; both "
+                              "energy terms DISABLED");
+                unit_pow_n = 0u;
+            } else {
+                /* Percentiles of the measured energies. */
+                float *srt = (float *)malloc((size_t)pm * sizeof *srt);
+                double p05 = 0.0, p50 = 0.0, p95 = 0.0;
+                if (srt && pm) {
+                    uint32_t k = 0;
+                    for (uint32_t i = 0; i < unit_pow_n; ++i)
+                        if (unit_pow[i] > 0.0f) srt[k++] = unit_pow[i];
+                    qsort(srt, k, sizeof *srt, cmp_float_asc);
+                    if (k) {
+                        p05 = srt[(uint32_t)(0.05 * (k - 1))];
+                        p50 = srt[(uint32_t)(0.50 * (k - 1))];
+                        p95 = srt[(uint32_t)(0.95 * (k - 1))];
+                    }
+                }
+                free(srt);
+                spfy_log_warn("pow: %u/%u units measured (%.1f%%), "
+                              "log-RMS p05/p50/p95 = %.3f/%.3f/%.3f",
+                              pm, unit_pow_n,
+                              unit_pow_n ? 100.0 * pm / unit_pow_n : 0.0,
+                              p05, p50, p95);
+            }
+        }
+        if (unit_pow && want_join) {
+            pow_join_w = (float)atof(e_join);
+            const char *d = spfy_env("SPFY_POW_CONT_DEAD");
+            if (d && *d) pow_join_dead = (float)atof(d);
+            if (pow_join_w    < 0.0f) pow_join_w    = 0.0f;
+            if (pow_join_dead < 0.0f) pow_join_dead = 0.0f;
+            spfy_log_warn("pow-cont (join): ON — w=%.3f/log-unit, dead=%.3f",
+                          (double)pow_join_w, (double)pow_join_dead);
+        }
+        if (unit_pow && want_tgt) {
+            uint32_t rows = 0;
+            if (load_mean_power(&v->vin, &pow_mean, &pow_sd, &rows)
+                != SPFY_OK) {
+                spfy_log_warn("pow-tgt: no usable `mean` chunk; term "
+                              "DISABLED");
+            } else {
+                /* Calibration from tools/mean_ident.py: the `mean` power
+                 * column equals 0.9813 * our_log_rms - 3.0232 (r=0.931,
+                 * residual 0.337 against a shipped spread of 0.330). */
+                v->av.pow_a = 0.9813f;
+                v->av.pow_b = -3.0232f;
+                const char *cal_a = spfy_env("SPFY_POW_TGT_A");
+                const char *cal_b = spfy_env("SPFY_POW_TGT_B");
+                if (cal_a && *cal_a) v->av.pow_a = (float)atof(cal_a);
+                if (cal_b && *cal_b) v->av.pow_b = (float)atof(cal_b);
+                v->av.unit_pow   = unit_pow;
+                v->av.unit_pow_n = unit_pow_n;
+                v->av.pow_mean   = pow_mean;
+                v->av.pow_sd     = pow_sd;
+                v->av.pow_rows   = rows;
+                v->av.w_pow_t    = (float)atof(e_tgt);
+                if (v->av.w_pow_t < 0.0f) v->av.w_pow_t = 0.0f;
+                spfy_log_warn("pow-tgt: ON — w=%.4f, %u rows, "
+                              "scale %.4f*x%+.4f, mean[0..2]=%.3f/%.3f/%.3f",
+                              (double)v->av.w_pow_t, rows,
+                              (double)v->av.pow_a, (double)v->av.pow_b,
+                              rows > 0 ? (double)pow_mean[0] : 0.0,
+                              rows > 1 ? (double)pow_mean[1] : 0.0,
+                              rows > 2 ? (double)pow_mean[2] : 0.0);
+            }
+        }
+    }
+
     for (uint32_t phrase_idx = 0; phrase_idx < n_phrases; ++phrase_idx) {
 
 
-    /* Hosted FE: skip empty phrase ids that produced no words. */
     {
         int phrase_has_words = 0;
         for (int i = 0; i < parsed->n_words; i++) {
@@ -1755,7 +3216,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         if (!phrase_has_words) continue;
     }
 
-    if (getenv("SPFY_MULTI_DEBUG")) {
+    if (spfy_env("SPFY_MULTI_DEBUG")) {
         int n_w = 0, n_p = 0;
         for (int i = 0; i < parsed->n_words; i++) {
             if ((uint32_t)parsed->words[i].phrase_id == phrase_idx) {
@@ -1766,11 +3227,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 phrase_idx, n_w, n_p);
     }
 
-    /* Build the trace-format spfy_fe_utt_t from the FE output, then
-     * drive the validated slot-tree pipeline (BuildGraph + LinkGraph +
-     * derive_slice_ctx + derive_sp_targets + derive_q5_table). The
-     * slot-tree-based derivation is validated bit-exact (822/822)
-     * against captured engine traces. */
+    /* Build the trace-format spfy_fe_utt_t from the FE output, then drive
+     * the validated slot-tree pipeline (BuildGraph + LinkGraph +
+     * derive_slice_ctx + derive_sp_targets + derive_q5_table). */
     const char **seg_names = NULL;
     uint32_t n_segs_arr = 0;
     if ((rc = parsed_to_fe_utt(parsed, text, (int)phrase_idx, &fe_utt)) != SPFY_OK
@@ -1779,8 +3238,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         goto fail;
     }
     /* delta stays alive across the whole phrase loop; we restore its
-     * contents from delta_backup_tokens at the start of each iteration.
-     * Final spfy_fe_delta_free happens in the cleanup block. */
+     * contents from delta_backup_tokens at the start of each iteration. */
 
     if ((rc = spfy_build_graph(&fe_utt, &tree)) != SPFY_OK) {
         free(seg_names); goto fail;
@@ -1791,15 +3249,64 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                                     v->phone_order.phone_names,
                                     v->phone_order.n_phones, &slice_ctx))
         != SPFY_OK
+        /* voice_d4_flag was a hardcoded 0 -- Tom's value, and Tom is the
+         * only voice it was ever checked against. */
         || (rc = spfy_derive_sp_targets(&tree, &fe_utt,
-                getenv("SPFY_NO_SENTENCE_IDX_PARA") ? 0 : sentence_idx_in_para,
-                0, &sp_tab))
+                spfy_env("SPFY_NO_SENTENCE_IDX_PARA") ? 0 : sentence_idx_in_para,
+                spfy_env("SPFY_VOICE_D4_FLAG")
+                    ? atoi(spfy_env("SPFY_VOICE_D4_FLAG")) : 0, &sp_tab))
            != SPFY_OK) {
         free(seg_names); goto fail;
     }
+    /* SPFY_SP_OVERRIDE — force the prosodic-position target on chosen
+     * half-phones. */
+    {
+        const char *ov = spfy_env("SPFY_SP_OVERRIDE");
+        if (ov && *ov) {
+            uint32_t hp = 0;
+            /* Half-phone ordinal -> tree slot, so the caller indexes the
+             * same thing the dumps print instead of raw tree slots (which
+             * include word and syllable anchors and would silently
+             * mis-target). */
+            for (uint32_t s = 0; s < tree.n_slots; ++s) {
+                if (tree.slots[s].kind != SPFY_SK_HALFPHONE) continue;
+                const char *p = ov;
+                while (*p) {
+                    char *end = NULL;
+                    unsigned long want = strtoul(p, &end, 10);
+                    if (end == p) break;
+                    if (*end == ':' && want == (unsigned long)hp) {
+                        const char *q = end + 1;
+                        for (int k = 0; k < 5 && *q; ++k) {
+                            if (*q != '-') {
+                                char *e2 = NULL;
+                                unsigned long val = strtoul(q, &e2, 10);
+                                if (e2 != q) {
+                                    sp_tab.sp[s][k] = (uint32_t)val;
+                                    q = e2;
+                                }
+                            } else {
+                                ++q;
+                            }
+                            if (*q == ',') ++q;
+                        }
+                        fprintf(stderr, "[sp_override] hp=%u slot=%u -> "
+                                "[%u,%u,%u,%u,%u]\n", hp, s,
+                                sp_tab.sp[s][0], sp_tab.sp[s][1],
+                                sp_tab.sp[s][2], sp_tab.sp[s][3],
+                                sp_tab.sp[s][4]);
+                    }
+                    p = strchr(end, ';');
+                    if (!p) break;
+                    ++p;
+                }
+                ++hp;
+            }
+        }
+    }
     /* SPFY_SP_TARGET_DUMP=1: emit our per-HP sp[0..4] for offline diff
      * against engine's inner_scorer.sp_target. */
-    if (getenv("SPFY_SP_TARGET_DUMP")) {
+    if (spfy_env("SPFY_SP_TARGET_DUMP")) {
         for (uint32_t s = 0; s < tree.n_slots; ++s) {
             if (tree.slots[s].kind != SPFY_SK_HALFPHONE) continue;
             if (!sp_tab.has[s]) continue;
@@ -1828,7 +3335,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     if ((rc = spfy_link_graph(&tree, &preds_tab)) != SPFY_OK) {
         free(seg_names); goto fail;
     }
-    if (getenv("SPFY_DUMP_TREE")) {
+    if (spfy_env("SPFY_DUMP_TREE")) {
         for (uint32_t s = 0; s < tree.n_slots; ++s) {
             const spfy_slot_node_t *n = &tree.slots[s];
             const char *ks = (n->kind == SPFY_SK_HALFPHONE) ? "HP"
@@ -1850,8 +3357,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         }
     }
 
-    /* Iterate halfphone-leaf slots only. The Viterbi runs over those.
-     * Map hp_idx (compact) <-> post_idx (slot tree). */
+    /* Iterate halfphone-leaf slots only. */
     uint32_t n_hp = tree.n_halfphone;
     hp_to_post = (uint32_t *)calloc(n_hp, sizeof *hp_to_post);
     if (!hp_to_post) {
@@ -1874,14 +3380,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     }
     if (synth_is_verbose()) {
         fprintf(stdout, "FE produced %u halfphone slots for text: %s\n", n_hp, text);
-        /* Also emit a stderr marker so multi-phrase audit parsers can detect
-         * phrase boundaries reliably even when stdout/stderr buffers are
-         * flushed out-of-order through a merged pipe. JSON slot dumps and
-         * this marker share the stderr stream — guaranteed interleaved.
-         * Flush stdout first so previous stdout chunks (path debug, etc)
-         * land in the pipe BEFORE this marker; without the flush, prior
-         * stdout output appended to the start of the marker line breaks
-         * the parser's regex anchor. */
+        /* Also emit a stderr marker so multi-phrase audit parsers can
+         * detect phrase boundaries reliably even when stdout/stderr buffers
+         * are flushed out-of-order through a merged pipe. */
         fflush(stdout);
         fprintf(stderr, "\nspfy_phrase_boundary: phrase_idx=%u n_hp=%u\n",
                 phrase_idx, n_hp);
@@ -1890,19 +3391,15 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     if (n_hp == 0) { rc = SPFY_E_FORMAT; goto fail; }
 
     /* [live-trace] phrase start: emitted once n_hp is known and before any
-     * candidate scoring, so the viz gets phrase -> slots -> cands -> pick ->
-     * unit in temporal order. `t` is the output sample count at phrase entry
-     * (the phrase's audio start on the timeline). */
+     * candidate scoring, so the viz gets phrase -> slots -> cands -> pick
+     * -> unit in temporal order. */
     spfy_trace_eventf("phrase",
         "{\"idx\":%u,\"n_hp\":%u,\"t\":%u}",
         phrase_idx, n_hp, sink->n_samples_written);
 
 #ifdef SPFY_TRACE
     /* [live-trace] Per-word phone breakdown for the Synthesis Tracer's word
-     * grouping ({text, [arpabet phones]}, keyed by phrase). `parsed` is the
-     * common FE output (populated for hosted AND in-house backends), so this
-     * works regardless of SPFY_FE_HOSTED. The whole block is #ifdef'd out of
-     * the shipped build so the buffer construction costs nothing there. */
+     * grouping ({text, [arpabet phones]}, keyed by phrase). */
     for (int wi_ = 0; wi_ < parsed->n_words; ++wi_) {
         const fe_parsed_word_t *w_ = &parsed->words[wi_];
         if ((uint32_t)w_->phrase_id != phrase_idx) continue;
@@ -1923,7 +3420,6 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     }
 #endif
 
-    /* Per-tree-slot anchor storage (populated by PSA below). */
     anchor_cands  = (uint32_t **)calloc(tree.n_slots, sizeof *anchor_cands);
     anchor_jks    = (uint32_t **)calloc(tree.n_slots, sizeof *anchor_jks);
     anchor_target = (float    **)calloc(tree.n_slots, sizeof *anchor_target);
@@ -1937,7 +3433,6 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         rc = SPFY_E_NOMEM; free(seg_names); goto fail;
     }
 
-    /* Build Viterbi inputs per halfphone slot. */
     vslots = (spfy_viterbi_slot_t *)calloc(n_hp, sizeof *vslots);
     cbuf   = (uint32_t **)calloc(n_hp, sizeof *cbuf);
     tbuf   = (float    **)calloc(n_hp, sizeof *tbuf);
@@ -1951,52 +3446,90 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         rc = SPFY_E_NOMEM; free(seg_names); goto fail;
     }
     hp_btone = (int8_t *)calloc(n_hp, sizeof *hp_btone);
-    if (!hp_btone) { rc = SPFY_E_NOMEM; free(seg_names); goto fail; }
+    hp_acctype = (int8_t *)calloc(n_hp, sizeof *hp_acctype);
+    /* Accent PRESENCE, distinct from accent TYPE: accent_type_st() returns
+     * 0 for both H* and "no accent", so hp_acctype alone cannot tell the
+     * prosody stage where the accents are. */
+    hp_accent = (uint8_t *)calloc(n_hp, sizeof *hp_accent);
+    hp_syl    = (uint32_t *)calloc(n_hp, sizeof *hp_syl);
+    hp_nuc    = (uint8_t *)calloc(n_hp, sizeof *hp_nuc);
+    if (!hp_btone || !hp_acctype || !hp_accent || !hp_syl || !hp_nuc) {
+        rc = SPFY_E_NOMEM; free(seg_names); goto fail;
+    }
     for (uint32_t hp = 0; hp < n_hp; ++hp) {
         uint32_t s = hp_to_post[hp];
-        /* Walk parent chain HP -> SYL -> WORD. */
         uint32_t syl_post = tree.slots[s].parent_idx;
         uint32_t word_post = (syl_post < tree.n_slots)
                              ? tree.slots[syl_post].parent_idx
                              : UINT32_MAX;
         hp_word_idx[hp] = word_post;
-        /* Per-hp boundary tone via the syllable slot's fe_shared id.
-         * fe_shared = global_syl_index + 1 (parsed_to_fe_utt assigns
-         * shared ids sequentially from 1 for the leading pad). This is
-         * the reliable HP→syllable map; the tree-word→parsed-word count
-         * is NOT (it merged adjacent words in earlier attempts). */
+        /* Per-hp boundary tone + accent type via the syllable slot's
+         * fe_shared id. */
         if (syl_post < tree.n_slots
-            && tree.slots[syl_post].kind == SPFY_SK_SYLLABLE
-            && fe_utt.syl_btone) {
+            && tree.slots[syl_post].kind == SPFY_SK_SYLLABLE) {
             uint32_t shared = tree.slots[syl_post].fe_shared;
-            if (shared >= 1 && (shared - 1) < fe_utt.n_syls)
-                hp_btone[hp] = fe_utt.syl_btone[shared - 1];
+            if (shared >= 1 && (shared - 1) < fe_utt.n_syls) {
+                /* Merged index: a liaison continuation half-phone would
+                 * otherwise read its OWN word's syllable record rather than
+                 * the record of the syllable it actually belongs to. */
+                uint32_t si = spfy_syl_effective(&fe_utt, shared - 1);
+                if (fe_utt.syl_btone)
+                    hp_btone[hp] = fe_utt.syl_btone[si];
+                if (fe_utt.syl_acctype)
+                    hp_acctype[hp] = fe_utt.syl_acctype[si];
+                if (fe_utt.syl_accent)
+                    hp_accent[hp] = fe_utt.syl_accent[si] ? 1u : 0u;
+            }
+            /* Syllable identity, so the contour can keep two abutting
+             * accented syllables apart. */
+            if (hp_syl) hp_syl[hp] = tree.slots[syl_post].fe_shared;
+        }
+        /* Nucleus flag. */
+        if (hp_nuc && s < tree.n_slots && v->phone_order.phone_names) {
+            uint32_t ph = slice_ctx.ctx[s][2] >> 1;
+            if (ph < v->phone_order.n_phones)
+                hp_nuc[hp] = phone_is_nucleus(
+                    v->phone_order.phone_names[ph]) ? 1u : 0u;
         }
     }
 
-    /* Per-hp SSML / Balabolka prosody overrides. Built once from the
-     * parsed FE output so the CART block reads them in O(1) per slot.
-     * Tree's WORD slots are emitted in fe_parsed_t order, so we count
-     * them up to map tree-post-order word index → parsed->words[]. */
+    /* Per-hp SSML / Balabolka prosody overrides. */
     hp_pitch_st = (int8_t *)calloc(n_hp, sizeof *hp_pitch_st);
     hp_rate_pct = (int8_t *)calloc(n_hp, sizeof *hp_rate_pct);
+    hp_tobi     = (uint8_t *)calloc(n_hp, sizeof *hp_tobi);
     syl_vol = (uint16_t *)calloc(fe_utt.n_syls ? fe_utt.n_syls : 1,
                                  sizeof *syl_vol);
     if (!hp_pitch_st || !hp_rate_pct) {
         rc = SPFY_E_NOMEM; free(seg_names); goto fail;
     }
     {
-        /* Build word_post → parsed_word_idx map (UINT32_MAX = not a word). */
         uint32_t *word_post_to_parsed =
             (uint32_t *)malloc(tree.n_slots * sizeof *word_post_to_parsed);
         if (word_post_to_parsed) {
             for (uint32_t s = 0; s < tree.n_slots; ++s)
                 word_post_to_parsed[s] = UINT32_MAX;
+            /* OFF-BY-ONE, fixed 2026-08-05. */
             uint32_t wc = 0;
+            int seen_first_word = 0;
+            uint32_t last_word_slot = UINT32_MAX;
+            for (uint32_t s = 0; s < tree.n_slots; ++s)
+                if (tree.slots[s].kind == SPFY_SK_WORD) last_word_slot = s;
             for (uint32_t s = 0; s < tree.n_slots; ++s) {
-                if (tree.slots[s].kind == SPFY_SK_WORD)
-                    word_post_to_parsed[s] = wc++;
+                if (tree.slots[s].kind != SPFY_SK_WORD) continue;
+                if (!seen_first_word) {
+                    seen_first_word = 1;
+                    continue;
+                }
+                if (s == last_word_slot) continue;
+                word_post_to_parsed[s] = wc++;
             }
+            /* Fill the offsets the FE left unspecified, ONCE, before
+             * anything keyed on them reads. */
+            /* The accessor hands back a const view; this is the single
+             * place that writes back into it, and only to fill a field the
+             * FE itself left unspecified. */
+            fe_fill_char_starts((void *)(uintptr_t)spfy_fe_get_parsed(v->fe),
+                                text);
             const fe_parsed_t *parsed_ro =
                 (const fe_parsed_t *)spfy_fe_get_parsed(v->fe);
             if (parsed_ro) {
@@ -2007,6 +3540,47 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                         if (pi != UINT32_MAX && (int)pi < parsed_ro->n_words) {
                             hp_pitch_st[hp] = parsed_ro->words[pi].pitch_st;
                             hp_rate_pct[hp] = parsed_ro->words[pi].rate_pct;
+                            /* \![ToBI:] rides the SAME word mapping as the
+                             * per-word pitch offset, including its
+                             * off-by-one fix, rather than re-deriving word
+                             * identity. */
+                            {
+                                int cs = parsed_ro->words[pi].char_start;
+                                /* STRESSED SYLLABLE ONLY. */
+                                int stressed = 1;
+                                {
+                                    uint32_t sp2 = hp_to_post[hp];
+                                    uint32_t syp = (sp2 < tree.n_slots)
+                                                 ? tree.slots[sp2].parent_idx
+                                                 : UINT32_MAX;
+                                    if (syp < tree.n_slots
+                                        && tree.slots[syp].kind
+                                           == SPFY_SK_SYLLABLE
+                                        && fe_utt.syl_stress) {
+                                        uint32_t sh = tree.slots[syp].fe_shared;
+                                        if (sh >= 1 && (sh - 1) < fe_utt.n_syls)
+                                            stressed =
+                                                (fe_utt.syl_stress[
+                                                    spfy_syl_effective(
+                                                        &fe_utt, sh - 1)] == 1);
+                                    }
+                                }
+                                if (cs >= 0 && (size_t)cs < etag_maps_n
+                                    && stressed) {
+                                    if (hp_tobi && etag_acc)
+                                        hp_tobi[hp] = etag_acc[cs];
+                                    /* \!rp / \!rd were parsed into a map
+                                     * that nothing ever read -- allocated,
+                                     * filled, freed. */
+                                    if (etag_rate && etag_rate[cs]
+                                        && etag_rate[cs] != 100u) {
+                                        int rp = (int)etag_rate[cs] - 100;
+                                        if (rp < -100) rp = -100;
+                                        if (rp >  100) rp =  100;
+                                        hp_rate_pct[hp] = (int8_t)rp;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2017,22 +3591,22 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
 
     /* Per-syllable volume map for the \!vp/\!vd embedded tags, keyed by
      * fe_shared-1 (the reliable HP -> syllable id that hp_btone also uses;
-     * the tree-word -> parsed-word count drifts when adjacent words merge).
-     * fe_utt content words (index 1..N) are this phrase's parsed words in
-     * order; each carries char_start into the FE-fed text the etag_vol map
-     * is aligned to. */
+     * the tree-word -> parsed-word count drifts when adjacent words merge). */
     if (syl_vol && etag_vol) {
         const fe_parsed_t *pv = (const fe_parsed_t *)spfy_fe_get_parsed(v->fe);
         if (pv) {
-            uint32_t fw = 1;                 /* fe_utt content word index */
+            uint32_t fw = 1;
             for (int wi = 0; wi < pv->n_words; ++wi) {
                 if (pv->words[wi].phrase_id != (int)phrase_idx) continue;
                 int cs = pv->words[wi].char_start;
                 uint16_t vol = (cs >= 0 && (size_t)cs < etag_maps_n)
                                ? etag_vol[cs] : 0;
+                if (spfy_env("SPFY_ETAG_DUMP"))
+                    fprintf(stderr, "[etag] vol word wi=%d fw=%u "
+                            "char_start=%d -> vol=%u\n", wi, fw, cs, vol);
                 if (vol && fw < fe_utt.n_words && fe_utt.word_syls[fw]) {
                     for (uint32_t j = 0; j < fe_utt.word_n_syls[fw]; ++j) {
-                        uint32_t sh = fe_utt.word_syls[fw][j];   /* shared id */
+                        uint32_t sh = fe_utt.word_syls[fw][j];
                         if (sh >= 1 && (sh - 1) < fe_utt.n_syls)
                             syl_vol[sh - 1] = vol;
                     }
@@ -2043,48 +3617,91 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     }
 
     uint32_t total_cands = 0, n_empty = 0;
-    int verbose = (getenv("SPFY_SYNTH_DEBUG") != NULL);
+    int verbose = (spfy_env("SPFY_SYNTH_DEBUG") != NULL);
     for (uint32_t hp = 0; hp < n_hp; ++hp) {
         uint32_t s = hp_to_post[hp];
         const uint32_t *ctx5 = slice_ctx.ctx[s];
         const uint32_t *sp5  = sp_tab.sp[s];
         uint32_t q5 = q5_per_slot[s];
 
-        /* PRSL pool query: triphone context = ctx[1]*10000+ctx[2]*100+ctx[3].
-         *
-         * Engine fallback on exact-key miss (empirical 2026-05-14,
-         * project_prsl_92_fallback): substitute the boundary marker for
-         * the side that represents "same phone, other half" — for a
-         * LEFT-half slot (side 0), substitute right; for a RIGHT-half
-         * slot (side 1), substitute left. Verified across all 20 pool_n=0
-         * cases in phn_001/003/023/039 + mp_031/038: every engine-returned
-         * UID-set is exactly the contents of the substituted key.
-         *
-         * The marker is one past the last hp_class, i.e. n_phones*2 — 92
-         * for Tom's 46 phones, which is where the old hardcoded 92 came
-         * from. It is 62 for the 31-phone es-MX voices, so the literal
-         * pointed at a nonexistent class for them.
-         * SPFY_NO_PRSL_92_FALLBACK=1 disables. */
+        /* PRSL pool query: triphone context = ctx[1]*10000+ctx[2]*100+ctx[3]. */
         uint32_t hp_bound = v->phone_order.n_phones
                               ? v->phone_order.n_phones * 2u : 92u;
         uint32_t ck = spfy_prsl_context_key(ctx5[1], ctx5[2], ctx5[3]);
         /* Two possible pool provenances, kept apart because they differ in
          * alignment: PRSL hands back a u32[] aliasing the VIN buffer at an
          * arbitrary offset (read via spfy_prsl_cand), while the hp-bucket
-         * fallback below is an owned, naturally-aligned array. Exactly one
-         * is non-NULL; see pool_cand(). */
+         * fallback below is an... */
         const uint8_t  *pool       = NULL;
         const uint32_t *pool_bucket = NULL;
         uint32_t pool_n = 0;
+        /* ⚠ A PHRASE'S FIRST AND LAST HALF-PHONE ARE PINNED, NOT PRESELECTED.
+         *
+         * The engine hands those two slots a pool of exactly ONE unit: index
+         * 0 at the front and index n_units-1 at the back. Measured on the
+         * engine's own prsl_slot records over 983 phrases and five voices --
+         * tom 323, jill 306, javier 120, paulina 120, felix 114 -- with ZERO
+         * exceptions, and the pinned uid is n_units-1 for every one of them
+         * (tom 169578, jill 185474, javier 219500, paulina 663409, felix
+         * 259659).
+         *
+         * We were running the ordinary triphone lookup there instead, which
+         * usually returns a group of one anyway -- that is why only felix
+         * showed it, on the 11 slots where the group holds 2 or 3. The extra
+         * units are real pauses from mid-recording; the pinned one is the
+         * recording-boundary pau, and its phone_ctx carries the 255 sentinel
+         * on the missing side (uid 0: `255 255 43 35`).
+         *
+         * SPFY_NO_BOUNDARY_PIN=1 restores the lookup. */
+        static int no_pin = -1;
+        if (no_pin < 0) no_pin = (spfy_env("SPFY_NO_BOUNDARY_PIN") != NULL);
+        uint32_t pin_uid = 0;
+        if (!no_pin && n_hp > 0 && (hp == 0 || hp == n_hp - 1u)
+            && v->units.n_units > 0) {
+            pin_uid     = (hp == 0) ? 0u : (v->units.n_units - 1u);
+            pool_bucket = &pin_uid;
+            pool_n      = 1u;
+            goto pool_ready;
+        }
         spfy_prsl_lookup(&v->prsl, ck, &pool, &pool_n);
-        if (pool_n == 0 && !getenv("SPFY_NO_PRSL_92_FALLBACK")) {
+        if (pool_n == 0 && !spfy_env("SPFY_NO_PRSL_92_FALLBACK")) {
             uint32_t side = ctx5[2] & 1u;
             uint32_t l_fb = side ? hp_bound : ctx5[1];
             uint32_t r_fb = side ? ctx5[3] : hp_bound;
             uint32_t ck_fb = spfy_prsl_context_key(l_fb, ctx5[2], r_fb);
             spfy_prsl_lookup(&v->prsl, ck_fb, &pool, &pool_n);
+            /* ⚠ THE SUBSTITUTION ESCALATES. When the one-sided key misses
+             * too, the engine drops BOTH contexts and takes the group keyed
+             * on the centre class alone.
+             *
+             * aicraig nat_049 hp 78 (`airplane`, eh, left half) is the case:
+             * ctx [72,42,24,66,62], so (42,24,66) -> miss and the one-sided
+             * (42,24,92) -> miss as well, leaving our pool EMPTY while the
+             * engine had 2174 candidates. Key (92,24,92) returns exactly
+             * 2174, which is what named this. An empty pool is not a cost
+             * problem: the engine's own uid was unreachable at any price.
+             *
+             * SPFY_NO_PRSL_BOTH_FALLBACK=1 stops at the one-sided level. */
+            static int no_both = -1;
+            if (no_both < 0)
+                no_both = (spfy_env("SPFY_NO_PRSL_BOTH_FALLBACK") != NULL);
+            if (pool_n == 0 && !no_both) {
+                uint32_t ck_both = spfy_prsl_context_key(hp_bound, ctx5[2],
+                                                         hp_bound);
+                spfy_prsl_lookup(&v->prsl, ck_both, &pool, &pool_n);
+            }
         }
-        if (pool_n > MAX_CANDS_PER_SLOT) pool_n = MAX_CANDS_PER_SLOT;
+    pool_ready:
+        /* NO clamp by default. */
+        {
+            static long cap = -1;
+            if (cap < 0) {
+                const char *cap_env = spfy_env("SPFY_MAX_CANDS");
+                cap = (cap_env && *cap_env) ? strtol(cap_env, NULL, 10) : 0;
+                if (cap < 1) cap = 0;
+            }
+            if (cap > 0 && pool_n > (uint32_t)cap) pool_n = (uint32_t)cap;
+        }
 
         /* Build a tiny adapter slot for the cart_feat callback (it expects
          * spfy_fe_slot_t.ctx + .sp). */
@@ -2096,12 +3713,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
 
         if (verbose) {
             float dm_dbg = 0, dv_dbg = 0, fm_dbg = 0, fv_dbg = 0;
-            /* Plan 03-04: silence-pad CART traversal for the debug-JSON
-             * emit path. The audit harness reads this output;
-             * SPFY_NO_SILENCE_CART=1 reverts to old skip-on-silence. */
+            /* Plan 03-04: silence-pad CART traversal for the debug-JSON emit path. */
             int silence_slot_dbg = ctx_is_silence(v, ctx5[2]);
             cart_feat_ctx_t cfc_dbg = { &adapter, q5, v, 0 };
-            if (!silence_slot_dbg || !getenv("SPFY_NO_SILENCE_CART")) {
+            if (!silence_slot_dbg || !spfy_env("SPFY_NO_SILENCE_CART")) {
                 uint32_t didx = phone_to_labl(v, ctx5[2] >> 1);
                 if (didx < v->durt_cart.n_trees)
                     spfy_cart_traverse(&v->durt_cart, didx, cart_feat, &cfc_dbg,
@@ -2127,32 +3742,34 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     pool_n);
             fprintf(stderr, ",\"cands\":[");
             /* Cap at 16 for the audit output (matches master_compare's
-             * legacy expectation). SPFY_FULL_POOL_DUMP=1 emits the
-             * entire pool for pool-overlap diagnostics. */
-            uint32_t cand_cap = getenv("SPFY_FULL_POOL_DUMP") ? pool_n : 16u;
+             * legacy expectation). */
+            uint32_t cand_cap = spfy_env("SPFY_FULL_POOL_DUMP") ? pool_n : 16u;
             uint32_t dump_n = pool_n < cand_cap ? pool_n : cand_cap;
             for (uint32_t i = 0; i < dump_n; ++i) {
+                /* ⚠ Must go through pool_cand(), which knows about BOTH
+                 * provenances. Printing SILENCE_SENTINEL_UID whenever the
+                 * PRSL pointer is NULL reported a uid the synth never used
+                 * for every bucket-fallback and pinned slot -- and the audit
+                 * reads this line, so it scored a divergence that was only in
+                 * the dump. */
                 fprintf(stderr, "%s%u", i ? "," : "",
-                        pool ? spfy_prsl_cand(pool, i) : SILENCE_SENTINEL_UID);
+                        (unsigned)pool_cand(pool, pool_bucket, i));
             }
             fprintf(stderr, "]}\n");
         }
         if (pool_n == 0) ++n_empty;
 
-        /* Triphone miss: fall back to all v->units with this phone_center+side. */
         uint32_t fb_hp = ctx5[2];
         if (pool_n == 0 && fb_hp < v->hpc_buckets && v->bucket_n[fb_hp] > 0) {
-            pool        = NULL;          /* switch provenance; see pool_cand */
+            pool        = NULL;
             pool_bucket = v->bucket[fb_hp];
             pool_n = v->bucket_n[fb_hp];
             if (pool_n > MAX_CANDS_PER_SLOT) pool_n = MAX_CANDS_PER_SLOT;
         }
 
         /* [live-trace] slot header: the half-phone target and its final
-         * candidate-pool size (after PRSL, 92-fallback, and bucket fallback).
-         * `phone` is the hp-class centre byte; the viz labels the slot from
-         * the eventual pick's VIN metadata. Per-candidate `cand` events for
-         * this slot follow once scoring completes. */
+         * candidate-pool size (after PRSL, 92-fallback, and bucket
+         * fallback). */
         spfy_trace_eventf("slot",
             "{\"slot\":%u,\"phone\":%u,\"pool_n\":%u}",
             hp, ctx5[2], pool_n);
@@ -2161,7 +3778,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             cbuf[hp] = (uint32_t *)calloc(1, sizeof **cbuf);
             tbuf[hp] = (float    *)calloc(1, sizeof **tbuf);
             if (!cbuf[hp] || !tbuf[hp]) { rc = SPFY_E_NOMEM; goto fail; }
-            cbuf[hp][0] = SILENCE_SENTINEL_UID;
+            cbuf[hp][0] = SILENCE_UID(v);
             tbuf[hp][0] = 0.0f;
             vslots[hp].cands = cbuf[hp];
             vslots[hp].target_cost = tbuf[hp];
@@ -2179,6 +3796,31 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             || !cand_c70[hp] || !cand_c78[hp]) {
             rc = SPFY_E_NOMEM; goto fail;
         }
+        /* SPFY_UID_DUMP — see spfy_uid_dump_fp(). One NDJSON record per
+         * half-phone slot listing EVERY candidate the DP was allowed to
+         * consider. The matching "pick" record is emitted after the DP, and
+         * the two join on (phrase, slot).
+         *
+         * Emitted here, where the pool is built, rather than after the DP:
+         * these buffers are phrase-scoped and this avoids any assumption
+         * about how long they stay alive. Diagnostics must not be able to
+         * introduce a lifetime bug into the shipped path.
+         *
+         * ⚠ ENV-GATED AND SIDE-EFFECT FREE. Unset, this costs one getenv per
+         * phrase and changes nothing — the byte-exact audit must stay
+         * 226/226 with it absent AND present. */
+        if (spfy_uid_dump_fp()) {
+            FILE *uf = spfy_uid_dump_fp();
+            fprintf(uf, "{\"t\":\"cands\",\"phrase\":%u,\"slot\":%u,"
+                        "\"phone\":%u,\"n\":%u,\"uids\":[",
+                    (unsigned)phrase_idx, (unsigned)hp,
+                    (unsigned)ctx5[2], (unsigned)pool_n);
+            for (uint32_t i = 0; i < pool_n; ++i)
+                fprintf(uf, "%s%u", i ? "," : "",
+                        (unsigned)pool_cand(pool, pool_bucket, i));
+            fprintf(uf, "]}\n");
+        }
+
         for (uint32_t i = 0; i < pool_n; ++i) {
             uint32_t cand_uid = pool_cand(pool, pool_bucket, i);
             cbuf[hp][i] = cand_uid;
@@ -2200,16 +3842,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
 
         cart_feat_ctx_t cfc = { &adapter, q5, v, 0 };
         spfy_anchor_cart_t cart = {0};
-        /* Silence-pad CART traversal: engine emits durt-CART leaf statistics
-         * for silence slots (ctx5[2] in {64, 65} = HP_PAU_L/R) the same way
-         * it does for non-silence; we used to skip these slots and emit
-         * (0, 0), which produced 174 leaf_diff records in 03-FE-AUDIT
-         * (engine emits the silence-tree leaf (192.5106, 0.097); we emit
-         * None). Plan 03-03/03-04 removes the gate so spfy_cart_traverse
-         * runs on silence slots too. SPFY_NO_SILENCE_CART=1 reverts to the
-         * old behaviour for diagnostic isolation. */
+        /* Silence-pad CART traversal: engine emits durt-CART leaf
+         * statistics for silence slots (ctx5[2] in {64, 65} = HP_PAU_L/R)
+         * the same way it does for non-silence; we used to skip these slots
+         * and emit (0, 0), which... */
         int silence_slot = ctx_is_silence(v, ctx5[2]);
-        if (!silence_slot || !getenv("SPFY_NO_SILENCE_CART")) {
+        if (!silence_slot || !spfy_env("SPFY_NO_SILENCE_CART")) {
             uint32_t durt_idx = phone_to_labl(v, ctx5[2] >> 1);
             if (durt_idx < v->durt_cart.n_trees) {
                 if (spfy_cart_traverse(&v->durt_cart, durt_idx, cart_feat, &cfc,
@@ -2222,79 +3860,69 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                                        &cart.f0tr_mean, &cart.f0tr_var) == SPFY_OK) {
                     cart.f0tr_valid = 1;
                     /* Pitch shift via unit-selection bias — see
-                     * spfy_synth_set_pitch_semitones(). f0tr_mean is Hz;
-                     * multiplying by 2^(semitones/12) shifts the target
-                     * Viterbi matches against. scale == 1.0 is exact
-                     * IEEE identity → audit-invariant. */
+                     * spfy_synth_set_pitch_semitones(). */
                     cart.f0tr_mean *= v->pitch_scale;
                 }
                 cfc.is_f0tr = 0;
             }
-            /* SSML / Balabolka per-word prosody overrides. Both default
-             * to 0 which collapses the scale factors to exact identity
-             * so the audit-corpus path stays bit-stable. */
+            /* SSML / Balabolka per-word prosody overrides. */
             if (cart.durt_valid && hp_rate_pct[hp]) {
-                /* +N% rate = durations shrink by 100/(100+N). */
                 cart.durt_mean *= 100.0f
                     / (100.0f + (float)hp_rate_pct[hp]);
             }
-            if (cart.f0tr_valid && hp_pitch_st[hp]) {
+            /* SPFY_PROSODY_WORD_PITCH_NOSEL=1 keeps a per-word pitch tag
+             * out of SELECTION so it acts only through the prosody stage's
+             * contour. */
+            static int no_sel_pitch = -1;
+            if (no_sel_pitch < 0)
+                no_sel_pitch = (spfy_env("SPFY_PROSODY_WORD_PITCH_NOSEL") != NULL);
+            if (cart.f0tr_valid && hp_pitch_st[hp] && !no_sel_pitch) {
                 cart.f0tr_mean *= powf(2.0f,
                     (float)hp_pitch_st[hp] / 12.0f);
             }
-            /* Global scale on durt CART target. SPFY_DURT_SCALE=N
-             * multiplies the per-slot duration target before USel cost
-             * is computed; values > 1.0 bias toward longer units (slower
-             * speech), < 1.0 toward shorter. Default 1.0 = exact
-             * IEEE identity (audit-invariant). Empirically the curve
-             * saturates around 1.08-1.10 — past that, USel hits poor
-             * Pareto fronts and viterbi cost spikes without further
-             * duration gain. Use 1.05-1.07 as a soft slowdown knob;
-             * for stronger slowdown, a post-WSOLA time-stretch is the
-             * cleaner architectural lever (see spfy_dsp/time_stretch). */
+            /* Global scale on durt CART target. */
             if (cart.durt_valid) {
                 static float dscale = -1.0f;
                 if (dscale < 0.0f) {
-                    const char *e = getenv("SPFY_DURT_SCALE");
+                    const char *e = spfy_env("SPFY_DURT_SCALE");
                     dscale = (e && *e) ? (float)atof(e) : 1.0f;
                     if (dscale < 0.1f) dscale = 0.1f;
                     if (dscale > 5.0f) dscale = 5.0f;
                 }
                 if (dscale != 1.0f) cart.durt_mean *= dscale;
             }
-            /* Option A: boundary-tone F0 target bias. Shift the per-slot
-             * F0 target by the syllable's boundary tone so the unit-
-             * selection target cost prefers naturally-contoured units
-             * (no DSP — the chosen units are real recorded speech).
-             * Gated by SPFY_PROSODY_REALIZE; zero btone is identity, so
-             * the audit-corpus path stays bit-stable. SPFY_PROSODY_BT_GAIN
-             * scales the nominal ToBI depth into applied semitones
-             * (default 1.0 = use the depth directly). */
+            /* Option A: boundary-tone F0 target bias. */
             if (cart.f0tr_valid && hp_btone[hp]
-                && getenv("SPFY_PROSODY_REALIZE")) {
+                && spfy_env("SPFY_PROSODY_REALIZE")) {
                 float gain = 1.0f;
-                const char *g = getenv("SPFY_PROSODY_BT_GAIN");
+                const char *g = spfy_env("SPFY_PROSODY_BT_GAIN");
                 if (g) { float f = (float)atof(g); if (f >= 0.0f) gain = f; }
                 cart.f0tr_mean *= powf(2.0f,
                     (float)hp_btone[hp] * gain / 12.0f);
             }
-            /* Speechify-4 accent-height (F0-range) compression. spfy realizes
-             * pitch accents (H*) too HIGH vs Speechify-4 (per-phrase peak F0 is
-             * ~+1 st median, up to +6 st, higher than the v4 NWR refs). Pull the
-             * f0tr target toward Tom's modal F0 so the unit-selection cost prefers
-             * flatter units (selection-driven; no DSP pitch-shift). r<1 flattens,
-             * r=1 widens. Gated: SPFY_SPFY4_F0_RANGE unset -> factor 1.0 -> the
-             * compression is skipped entirely, so the 3.0.5 audit path stays
-             * bit-identical. SPFY_SPFY4_F0_BASE sets the modal-F0 anchor in Hz
-             * (default 120 = Tom). See reveng/spfy4/08_accent_height_findings.md. */
+            /* Accent-TYPE F0 target bias. */
+            if (cart.f0tr_valid && hp_acctype[hp]) {
+                static float atgain = -1.0f;
+                if (atgain < 0.0f) {
+                    const char *g = spfy_env("SPFY_SPFY4_ACCTYPE_GAIN");
+                    atgain = (g && *g) ? (float)atof(g) : 0.0f;
+                    if (atgain < 0.0f) atgain = 0.0f;
+                    if (atgain > 3.0f) atgain = 3.0f;
+                }
+                if (atgain > 0.0f) {
+                    cart.f0tr_mean *= powf(2.0f,
+                        (float)hp_acctype[hp] * atgain / 12.0f);
+                }
+            }
+            /* Speechify-4 accent-height (F0-range) compression. */
             if (cart.f0tr_valid) {
                 static float f0range = -1.0f, f0base = -1.0f;
                 if (f0range < 0.0f) {
-                    const char *e = getenv("SPFY_SPFY4_F0_RANGE");
+                    const char *e = spfy_env("SPFY_SPFY4_F0_RANGE");
                     f0range = (e && *e) ? (float)atof(e) : 1.0f;
                     if (f0range < 0.05f) f0range = 0.05f;
                     if (f0range > 3.0f)  f0range = 3.0f;
-                    const char *b = getenv("SPFY_SPFY4_F0_BASE");
+                    const char *b = spfy_env("SPFY_SPFY4_F0_BASE");
                     f0base = (b && *b) ? (float)atof(b) : 120.0f;
                     if (f0base < 50.0f)  f0base = 50.0f;
                     if (f0base > 400.0f) f0base = 400.0f;
@@ -2306,11 +3934,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
         }
 
-        /* SPFY_HP_COMP_DUMP marker: emit a per-slot header so the
-         * follow-on hp_comp lines can be associated with this hp/slot.
-         * The hp_innerscorer's hp_comp emits don't carry the slot
-         * context themselves. */
-        if (getenv("SPFY_HP_COMP_DUMP")) {
+        /* SPFY_HP_COMP_DUMP marker: emit a per-slot header so the follow-on
+         * hp_comp lines can be associated with this hp/slot. */
+        if (spfy_env("SPFY_HP_COMP_DUMP")) {
             fprintf(stderr,
                 "{\"hp_comp_slot\":1,\"hp\":%u,\"post\":%u,\"pool_n\":%u}\n",
                 hp, s, pool_n);
@@ -2322,7 +3948,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             tbuf[hp][i] = (rcs != SPFY_OK || isnan(c) || isinf(c)) ? 1e9f : c;
             /* [live-trace] one event per scored candidate — the raw search
              * space the viz shows filling in and then getting pruned by the
-             * Viterbi. Compiled out entirely when SPFY_TRACE is off. */
+             * Viterbi. */
             spfy_trace_eventf("cand",
                 "{\"slot\":%u,\"uid\":%u,\"tc\":%.4f}",
                 hp, cbuf[hp][i], (double)tbuf[hp][i]);
@@ -2355,13 +3981,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          *
          * SPFY_NO_HP_EARLY_EXIT=1 disables; SPFY_HP_EARLY_EXIT_VAL
          * overrides the slack for A/B work. */
-        if (!getenv("SPFY_NO_HP_EARLY_EXIT")) {
+        if (!spfy_env("SPFY_NO_HP_EARLY_EXIT")) {
             float slack = v->hp_prune_thresh;
-            const char *eev = getenv("SPFY_HP_EARLY_EXIT_VAL");
+            const char *eev = spfy_env("SPFY_HP_EARLY_EXIT_VAL");
             if (eev && *eev) slack = (float)atof(eev);
 
-            float running_min = 10000.0f;   /* engine local_30 */
-            float bound       = 10000.0f;   /* engine local_50 */
+            float running_min = 10000.0f;
+            float bound       = 10000.0f;
             for (uint32_t i = 0; i < pool_n; ++i) {
                 float t = tbuf[hp][i];
                 if (t <= bound) {
@@ -2376,10 +4002,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         }
 
         /* SPFY_TC_DUMP — per-cand target cost dump (post-inner-scorer,
-         * pre-hist-prune). Used to A/B-compare against engine's
-         * viterbi_dp cand+0x2c (= pre-DP cost) per (slot, uid). Emits
-         * to stderr as one JSON line per HP slot. */
-        if (getenv("SPFY_TC_DUMP")) {
+         * pre-hist-prune). */
+        if (spfy_env("SPFY_TC_DUMP")) {
             fprintf(stderr, "{\"tc_dump\":1,\"hp\":%u,\"post\":%u,\"pool_n\":%u,\"uids\":[", hp, s, pool_n);
             for (uint32_t i = 0; i < pool_n; ++i)
                 fprintf(stderr, "%s%u", i ? "," : "", cbuf[hp][i]);
@@ -2411,15 +4035,28 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         /* NB: a "skip the prune for pools smaller than N" guard was tested
          * 2026-07-20 (engine traces show large kept-deltas at small pool
          * sizes on both voices) and REJECTED: N=3 already costs Tom
-         * 8532->8525 while gaining Jill only 1983->1988, and larger N is
-         * far worse (N=13: Tom 95.1%). Whatever the engine does at small
-         * pools, a flat pool-size cutoff is not it. */
-        if (pool_n > 1 && !getenv("SPFY_NO_HP_PRUNE")) {
+         * 8532->8525 while gaining Jill... */
+        if (pool_n > 1 && !spfy_env("SPFY_NO_HP_PRUNE")) {
             const float HP_THRESH    = v->hp_prune_thresh;
             const float HP_SLOPE     = v->hp_prune_slope;
             const float HP_BIN_WIDTH = 0.025f;
             const float HP_SCALE     = 40.0f;
-            const uint32_t HP_MAX    = 50u;
+            /* ⚠ NOT a hardcoded 50. That is the config CONSTRUCTOR's default
+             * (0x08e90e64 `mov [esi+0x48], 0x32`); the VCF's
+             * HALFPHONE_CAND_MAX_UNITS overrides it, and FUN_08e88de0 pushes
+             * it into the prune alongside THRESH and SLOPE at 0x08e8938b.
+             * Every SpeechWorks voice here omits the key, so the literal was
+             * right for all of them and wrong for aimara2, which sets 200 --
+             * we pruned four times harder than the engine and could drop the
+             * unit it went on to choose. SPFY_HP_MAX=<n> overrides. */
+            uint32_t HP_MAX = v->hp_prune_max ? v->hp_prune_max : 50u;
+            {
+                const char *mx = spfy_env("SPFY_HP_MAX");
+                if (mx && *mx) {
+                    long o = strtol(mx, NULL, 10);
+                    if (o >= 1) HP_MAX = (uint32_t)o;
+                }
+            }
 
             float best = tbuf[hp][0];
             for (uint32_t i = 1; i < pool_n; ++i)
@@ -2445,13 +4082,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 int bidx;
                 if (diff >= (float)HP_SCALE) {
                     bidx = 39;
-                } else if (getenv("SPFY_HP_BIN_LROUND")) {
+                } else if (spfy_env("SPFY_HP_BIN_LROUND")) {
                     bidx = (int)lroundf(diff);
                     if (bidx < 0) bidx = 0;
                     if (bidx > 39) bidx = 39;
                 } else {
-                    /* Truncation (floor for positive). diff is always
-                     * >= 0 since tc[i] >= best by construction. */
+                    /* Truncation (floor for positive). */
                     bidx = (int)diff;
                     if (bidx < 0) bidx = 0;
                     if (bidx > 39) bidx = 39;
@@ -2460,19 +4096,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
             int cum = 0;
             float bin_dist = 40.0f * HP_BIN_WIDTH;
-            /* Engine uses local_c8 starting at 2 (not 1), so bin_dist
-             * for iteration k is (k+1)*HP_BIN_WIDTH not k*HP_BIN_WIDTH.
-             * After break: threshold = bin_dist + best.
-             *
-             * Precision history (superseded 2026-07-20): a 2026-05-14 fix
-             * stored the LHS to a float local before comparing, on the
-             * theory that the engine compared at 32-bit precision. The
-             * disassembly (08e888c6..08e888ee) shows otherwise -- BOTH
-             * sides stay in x87 registers and only the final
-             * `bd + best` is rounded, by a single FSTP. The old fix and
-             * its SPFY_PRUNE_X87 escape hatch are gone; see below. */
-            /* Bin index the scan broke at; 40 == ran to completion. The
-             * engine gates the whole filter on this (see below). */
+            /* Engine uses local_c8 starting at 2 (not 1), so bin_dist for
+             * iteration k is (k+1)*HP_BIN_WIDTH not k*HP_BIN_WIDTH. */
+            /* Bin index the scan broke at; 40 == ran to completion. */
             int break_k = 40;
             /* Both sides of the break test are evaluated at x87 EXTENDED
              * precision in the engine and never rounded to 32-bit floats
@@ -2502,10 +4128,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     bd_x = cur_bd; break_k = k; break;
                 }
             }
-            bin_dist = (float)bd_x;   /* for the debug dump only */
-            /* Engine: FADD best onto the still-extended bd, then ONE
-             * FSTP to a 32-bit float. Rounding bd first and then adding
-             * would round twice. */
+            bin_dist = (float)bd_x;
+            /* Engine: FADD best onto the still-extended bd, then ONE FSTP
+             * to a 32-bit float. */
             float thresh = (float)(bd_x + (long double)best);
             /* The engine gates the entire threshold filter on the break
              * bin: `if (iVar7 < 0x27)` in FUN_08e88830. If the scan broke
@@ -2534,7 +4159,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
              * the missing early exit. SPFY_NO_HP_PRUNE_BIN39_GUARD=1
              * reverts to the old always-filter behaviour for A/B. */
             uint32_t kept;
-            if (break_k < 39 || getenv("SPFY_NO_HP_PRUNE_BIN39_GUARD")) {
+            if (break_k < 39 || spfy_env("SPFY_NO_HP_PRUNE_BIN39_GUARD")) {
                 kept = 0;
                 for (uint32_t i = 0; i < pool_n; ++i) {
                     if (tbuf[hp][i] <= thresh) {
@@ -2567,7 +4192,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
              * shell sort regardless of algorithm, since uids are unique
              * within a pool so no two entries compare equal.
              * SPFY_NO_HP_SORT_UID_TIE=1 reverts to cost-only for A/B. */
-            int sort_uid_tie = (getenv("SPFY_NO_HP_SORT_UID_TIE") == NULL);
+            int sort_uid_tie = (spfy_env("SPFY_NO_HP_SORT_UID_TIE") == NULL);
             for (uint32_t a = 0; a + 1 < kept; ++a) {
                 uint32_t mn = a;
                 for (uint32_t b = a + 1; b < kept; ++b) {
@@ -2598,7 +4223,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 }
             }
             if (kept > HP_MAX) kept = HP_MAX;
-            if (getenv("SPFY_PRUNE_DEBUG")) {
+            if (spfy_env("SPFY_PRUNE_DEBUG")) {
                 fprintf(stderr, "{\"prune\":1,\"hp\":%u,\"pool_n_in\":%u,"
                                 "\"kept\":%u,\"best\":%.9f,\"bin_dist\":%.6f,"
                                 "\"thresh\":%.9f,\"break_k\":%d,"
@@ -2625,56 +4250,42 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                         "(%u slots had empty pools)\n",
                 total_cands, n_hp, n_empty);
 
-    /* PostScoringAdj (Word + Syl level): for each Word/Syl in the slot tree,
-     * call spfy_anchor_score on the cklx postings keyed by the word text,
-     * then inject the surviving anchor cands' UIDs into the corresponding
-     * halfphone-leaf cand pools. Each anchor cand spans contiguous UIDs
-     * [ss..se] across [first_hp..last_hp]; we add UID (ss + (hp-first_hp))
-     * to leaf-slot[hp]'s pool with a target cost equal to anchor.pre_dp /
-     * span_length. The same-rec join cost of 0 between consecutive injected
-     * UIDs lets the linear Viterbi find an engine-style continuous-recording
-     * path naturally. */
+    /* PostScoringAdj (Word + Syl level): for each Word/Syl in the slot
+     * tree, call spfy_anchor_score on the cklx postings keyed by the word
+     * text, then inject the surviving anchor cands' UIDs into the
+     * corresponding... */
     /* For Syl-level PSA, re-syllabify phonemes left-to-right using
      * max-onset principle: each vowel is a syl nucleus; consonants split
-     * between previous-coda and next-onset (last consonant goes to onset
-     * if more than one consonant, all go to onset if just one). The
-     * baked dict emits all of a multi-syl word's phonemes under a single
-     * syl_id, so we can't trust phons[i].syl_id for syllable structure;
-     * re-derive from ARPAbet vowel-class instead. */
+     * between previous-coda and next-onset (last consonant goes to onset if
+     * more than one... */
     uint32_t *psa_syl_start = NULL;
     uint32_t  psa_n_syls    = 0;
     if (n_segs_arr > 2) {
         psa_syl_start = (uint32_t *)calloc(n_segs_arr,
                                            sizeof *psa_syl_start);
     }
-    if (psa_syl_start && !getenv("SPFY_PSA_SYL_FROM_RESYL")) {
+    if (psa_syl_start && !spfy_env("SPFY_PSA_SYL_FROM_RESYL")) {
         /* 2026-05-14: derive syllable boundaries from the slot tree's
-         * SK_SYLLABLE nodes (engine FE output). The previous
-         * re-syllabifier used max-onset with single-consonant onsets
-         * only, missing engine's multi-consonant onsets like "pre" in
-         * "representative" (SYL CKLX key `p_r_ix`) and "glish" in
-         * "English" (key `g_l_ih_sh`). Engine's FE syllabifies these
-         * correctly, and we already walk the tree to attach anchor
-         * cands to SK_SYLLABLE slots downstream — use the same tree
-         * here. SPFY_PSA_SYL_FROM_RESYL=1 reverts to the re-syllabifier.
-         */
+         * SK_SYLLABLE nodes (engine FE output). */
         for (uint32_t s = 0; s < tree.n_slots; ++s) {
             if (tree.slots[s].kind != SPFY_SK_SYLLABLE) continue;
+            /* A fr-CA liaison syllable is one node here, so its leftmost
+             * leaf is the true syllable onset and no boundary opens
+             * mid-span. */
             uint32_t cur = s;
             while (tree.slots[cur].n_children > 0)
                 cur = tree.slots[cur].child_idx[0];
             uint32_t hp_idx = post_to_hp[cur];
             if (hp_idx == UINT32_MAX) continue;
             uint32_t phon_idx = hp_idx / 2u;
-            if (phon_idx == 0) continue;          /* leading pau */
-            if (phon_idx >= n_segs_arr - 1) continue;  /* trailing pau */
+            if (phon_idx == 0) continue;
+            if (phon_idx >= n_segs_arr - 1) continue;
             if (psa_n_syls == 0
                 || phon_idx > psa_syl_start[psa_n_syls - 1])
                 psa_syl_start[psa_n_syls++] = phon_idx;
         }
     } else if (psa_syl_start) {
-        /* Legacy max-onset re-syllabifier (SPFY_PSA_SYL_FROM_RESYL=1). */
-        int seen_vowel = !getenv("SPFY_NO_SYL_INITIAL_VOWEL")
+        int seen_vowel = !spfy_env("SPFY_NO_SYL_INITIAL_VOWEL")
                          && is_arpa_vowel(seg_names[1]);
         uint32_t last_v = 1;
         psa_syl_start[psa_n_syls++] = 1;
@@ -2690,15 +4301,32 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         }
     }
 
-    if (!getenv("SPFY_NO_PSA")) {
+    if (!spfy_env("SPFY_NO_PSA")) {
         uint32_t psa_words = 0, psa_syls = 0;
-        /* First: tree-Word iteration (existing path). Then a second pass
-         * for psa-derived syllables. */
+        /* Utterance-wide SP targets by ABSOLUTE half-phone. */
+        spfy_anchor_sp_target_t *sp_all = (spfy_anchor_sp_target_t *)
+            calloc(n_hp, sizeof *sp_all);
+        if (sp_all) {
+            for (uint32_t hp = 0; hp < n_hp; ++hp) {
+                for (int i = 0; i < 5; ++i)
+                    sp_all[hp].sp[i] = sp_tab.sp[hp_to_post[hp]][i];
+            }
+        }
+        /* Utterance-wide durt forest index per absolute half-phone -- the
+         * same `didx` the per-HP loop below computes. */
+        uint8_t *phone_all = (uint8_t *)calloc(n_hp, sizeof *phone_all);
+        if (phone_all) {
+            for (uint32_t hp = 0; hp < n_hp; ++hp) {
+                uint32_t p = hp_to_post[hp];
+                phone_all[hp] =
+                    (uint8_t)phone_to_labl(v, slice_ctx.ctx[p][2] >> 1);
+            }
+        }
+        /* First: tree-Word iteration (existing path). */
         for (uint32_t s = 0; s < tree.n_slots; ++s) {
             spfy_slot_kind_t kind = tree.slots[s].kind;
             if (kind != SPFY_SK_WORD) continue;
 
-            /* Word: cklx key = lowercased word name. */
             char lc_key[128];
             int   anchor_type = 4;
             uint32_t group_idx = SPFY_CHUNK_GROUP_WORD;
@@ -2722,19 +4350,17 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             uint32_t n_postings = 0;
             int hit = spfy_cklx_lookup(&v->chunks.cklx[group_idx],
                                        lc_key, &postings, &n_postings);
-            if (getenv("SPFY_PSA_DEBUG"))
+            if (spfy_env("SPFY_PSA_DEBUG"))
                 fprintf(stderr, "  PSA[%s] key=%-30s hit=%d n_postings=%u\n",
                         kind == SPFY_SK_WORD ? "WORD" : "SYL ",
                         lc_key, hit, n_postings);
             if (hit <= 0) continue;
             if (n_postings == 0) continue;
 
-            /* Find the slot's HP span via post-order halfphone descendants. */
             int32_t first_hp_post = -1;
             uint32_t first_hp_idx = 0, last_hp_idx = 0;
             for (uint32_t hp = 0; hp < n_hp; ++hp) {
                 uint32_t post = hp_to_post[hp];
-                /* Walk parents until we hit slot s OR fall off. */
                 uint32_t cur = post;
                 int matches = 0;
                 while (cur != UINT32_MAX && cur < tree.n_slots) {
@@ -2750,7 +4376,6 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             if (first_hp_post < 0) continue;
             uint32_t span_n = last_hp_idx - first_hp_idx + 1;
 
-            /* Build per-HP cart + sp_target arrays for this word. */
             spfy_anchor_cart_t      *cart_per = (spfy_anchor_cart_t *)
                 calloc(span_n, sizeof *cart_per);
             spfy_anchor_sp_target_t *sp_per   = (spfy_anchor_sp_target_t *)
@@ -2774,10 +4399,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 }
                 cfc.slot = &adapter;
                 /* Plan 03-04: silence-pad CART traversal — see primary
-                 * spfy_cart_traverse call site for rationale.
-                 * SPFY_NO_SILENCE_CART=1 reverts. */
+                 * spfy_cart_traverse call site for rationale. */
                 int silence = ctx_is_silence(v, slice_ctx.ctx[post][2]);
-                if (!silence || !getenv("SPFY_NO_SILENCE_CART")) {
+                if (!silence || !spfy_env("SPFY_NO_SILENCE_CART")) {
                     uint32_t didx = phone_to_labl(v, slice_ctx.ctx[post][2] >> 1);
                     if (didx < v->durt_cart.n_trees) {
                         if (spfy_cart_traverse(&v->durt_cart, didx, cart_feat, &cfc,
@@ -2832,30 +4456,46 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 aslot.last_ctx.ctx[i] =
                     (int32_t)slice_ctx.ctx[hp_to_post[last_hp_idx]][i];
             }
-            aslot.anchor_type = anchor_type;   /* 4=Word, 2=Syl */
+            aslot.anchor_type = anchor_type;
             aslot.cart_per_hp = cart_per;
             aslot.sp_per_hp   = sp_per;
             aslot.syl_idx_per_hp = syl_idx_per;
+            aslot.sp_all_hp   = sp_all;
+            aslot.n_all_hp    = (int32_t)n_hp;
+            aslot.phone_all_hp = phone_all;
             aslot.durt_cart   = &v->durt_cart;
             aslot.hp_feat     = hp_feat_per;
 
-            spfy_anchor_cand_t out_cands[64];
+            /* Sized to the posting count, not a fixed 64. The old cap cut the
+             * candidate list in POSTING order before cost order, so it dropped
+             * candidates cheaper than ones it kept -- on paulina, 132 anchors
+             * were truncated, one losing 179 candidates cheaper than its
+             * dearest survivor. The engine's own buffers in FUN_08e8ce60 are
+             * afStack_13880[10000] / local_9c40[9999], and it never caps below
+             * that; the surviving count cannot exceed n_postings. */
+            uint32_t cand_cap = n_postings ? n_postings : 1u;
+            spfy_anchor_cand_t *out_cands = (spfy_anchor_cand_t *)
+                calloc(cand_cap, sizeof *out_cands);
+            if (!out_cands) {
+                free(cart_per); free(sp_per); free(syl_idx_per);
+                free(hp_feat_per);
+                continue;
+            }
             uint32_t out_n = 0;
             int rcs = spfy_anchor_score(&v->av, &aslot, postings, n_postings,
                                          &v->chunks.ckls[group_idx],
-                                         out_cands, 64, &out_n);
+                                         out_cands, cand_cap, &out_n);
             free(cart_per); free(sp_per); free(syl_idx_per); free(hp_feat_per);
-            if (rcs != SPFY_OK || out_n == 0) continue;
+            if (rcs != SPFY_OK || out_n == 0) { free(out_cands); continue; }
             ++psa_words;
 
-            /* Store anchor cands per tree slot for DAG Viterbi. cand uid =
-             * ss (head); join_key = se (tail uid). Filter cands whose span
-             * doesn't match the slot's HP-span. */
+            /* Store anchor cands per tree slot for DAG Viterbi. */
             uint32_t *cands_buf = (uint32_t *)calloc(out_n, sizeof *cands_buf);
             uint32_t *jks_buf   = (uint32_t *)calloc(out_n, sizeof *jks_buf);
             float    *tgt_buf   = (float    *)calloc(out_n, sizeof *tgt_buf);
             if (!cands_buf || !jks_buf || !tgt_buf) {
-                free(cands_buf); free(jks_buf); free(tgt_buf); continue;
+                free(cands_buf); free(jks_buf); free(tgt_buf);
+                free(out_cands); continue;
             }
             uint32_t kept = 0;
             for (uint32_t c = 0; c < out_n; ++c) {
@@ -2863,20 +4503,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 uint32_t se = out_cands[c].se;
                 if (se < ss) continue;
                 if (se >= v->units.n_units) continue;
-                /* 2026-05-14: removed `se-ss+1 != span_n` filter.
-                 * Engine accepts "partial" anchors where the UID range
-                 * (se-ss+1) is SHORTER than the HP span (n_hp). For
-                 * nat_037 the engine's Word anchor at hp=32-39 (span=8)
-                 * has uid range 42444..42449 (6 UIDs); our DP needs
-                 * this cand to match engine's path choice. Path
-                 * expansion (`range(uid, jk+1)`) yields the 6 UIDs and
-                 * the resulting path is shorter than n_hp by 2, which
-                 * is exactly the DIFF_PL pattern.
-                 *
-                 * SPFY_ANCHOR_STRICT_SPAN=1 restores the strict filter
-                 * for A/B audit. */
-                if (!getenv("SPFY_ANCHOR_RELAX_SPAN_OFF")
-                    && getenv("SPFY_ANCHOR_STRICT_SPAN")
+                /* 2026-05-14: removed `se-ss+1 != span_n` filter. */
+                if (!spfy_env("SPFY_ANCHOR_RELAX_SPAN_OFF")
+                    && spfy_env("SPFY_ANCHOR_STRICT_SPAN")
                     && se - ss + 1 != span_n) continue;
                 cands_buf[kept] = ss;
                 jks_buf  [kept] = se;
@@ -2887,10 +4516,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             anchor_jks   [s] = jks_buf;
             anchor_target[s] = tgt_buf;
             anchor_n     [s] = kept;
-            /* Engine reads anchor cand+0x68/+0x6c/+0x70 from the
-             * RUN-TAIL unit (= se = jks_buf[c]). Initialize parallel
-             * state arrays from se's f0_end/f0_mid/f0_start bytes so
-             * the F0-curve gate sees the correct trailing pitch. */
+            /* Engine reads anchor cand+0x68/+0x6c/+0x70 from the RUN-TAIL
+             * unit (= se = jks_buf[c]). */
             uint8_t *aC68 = (uint8_t *)calloc(kept, sizeof *aC68);
             uint8_t *aC6c = (uint8_t *)calloc(kept, sizeof *aC6c);
             uint8_t *aC70 = (uint8_t *)calloc(kept, sizeof *aC70);
@@ -2911,7 +4538,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                      * exists.
                      * SPFY_NO_ANCHOR_HEAD_C6C=1 reverts to legacy
                      * tail-based init. */
-                    int legacy = getenv("SPFY_NO_ANCHOR_HEAD_C6C") != NULL;
+                    int legacy = spfy_env("SPFY_NO_ANCHOR_HEAD_C6C") != NULL;
                     if (legacy) {
                         spfy_unit_record_t ur;
                         if (spfy_unit_record_get(&v->units, jks_buf[c], &ur)
@@ -2933,7 +4560,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                      * weight_90 must be non-zero for the init code path.
                      * Treat all v->units as voiced. SPFY_ANCHOR_VOICING_GATE=1
                      * re-enables the gate. */
-                    int do_gate = getenv("SPFY_ANCHOR_VOICING_GATE") != NULL;
+                    int do_gate = spfy_env("SPFY_ANCHOR_VOICING_GATE") != NULL;
                     for (uint32_t u = cands_buf[c]; u <= jks_buf[c]; ++u) {
                         spfy_unit_record_t ur;
                         if (spfy_unit_record_get(&v->units, u, &ur) != SPFY_OK)
@@ -2957,9 +4584,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     aC6c[c] = v6c;
                     aC70[c] = v70;
                     /* c78 is a 16-bit accumulator engine-side; our slot
-                     * struct holds it as a uint8_t. Clamp to 0xff. */
+                     * struct holds it as a uint8_t. */
                     aC78[c] = (v78 > 255u) ? 255u : (uint8_t)v78;
-                    if (getenv("SPFY_ANCHOR_STATE_DUMP")) {
+                    if (spfy_env("SPFY_ANCHOR_STATE_DUMP")) {
                         fprintf(stderr, "{\"anchor_state\":1,\"slot\":%u,"
                                 "\"key\":\"%s\",\"ss\":%u,\"se\":%u,"
                                 "\"c68\":%u,\"c6c\":%u,\"c70\":%u,"
@@ -2975,18 +4602,18 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             } else {
                 free(aC68); free(aC6c); free(aC70); free(aC78);
             }
-            if (getenv("SPFY_PSA_DEBUG")) {
+            if (spfy_env("SPFY_PSA_DEBUG")) {
                 fprintf(stderr, "  WORD anchor slot=%u key=%s n=%u "
                                 "first_hp=%u last_hp=%u\n",
                         s, lc_key, kept, first_hp_idx, last_hp_idx);
-                for (uint32_t c = 0; c < kept && c < 5; ++c)
-                    fprintf(stderr, "    cand[%u] ss=%u se=%u pre_dp=%.4f\n",
+                for (uint32_t c = 0; c < kept; ++c)
+                    fprintf(stderr, "    cand[%u] ss=%u se=%u pre_dp=%.6f\n",
                             c, cands_buf[c], jks_buf[c], (double)tgt_buf[c]);
             }
-        }   /* end tree-Word loop */
+            free(out_cands);
+        }
 
-        /* Second pass: psa-derived syllables. Walk psa_syl_start[] groups,
-         * build cklx[SYL] key, run anchor_score, inject. */
+        /* Second pass: psa-derived syllables. */
         for (uint32_t g = 0; g < psa_n_syls; ++g) {
             uint32_t start_p = psa_syl_start[g];
             uint32_t end_p = (g + 1 < psa_n_syls)
@@ -2996,12 +4623,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             if (end_p >= n_segs_arr) continue;
 
             /* 2026-05-14 INVESTIGATED: SYL CKLX contains onset+first-vowel
-             * keys for many syllables ("d_ao" hits, "d_ao_g" misses).
-             * Tried using engine-faithful onset+vowel key build → +hits on
-             * cklx but corpus UID regressed 95.7%→94.6%. Engine apparently
-             * doesn't materialize anchors for every syllable the cklx has
-             * keys for — there's a separate selection layer we haven't
-             * found. Reverted; the 787 engine-only Syl anchors deferred. */
+             * keys for many syllables ("d_ao" hits, "d_ao_g" misses). */
             char lc_key[128];
             size_t pos = 0;
             lc_key[0] = 0;
@@ -3023,14 +4645,17 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             uint32_t n_postings = 0;
             int hit = spfy_cklx_lookup(&v->chunks.cklx[SPFY_CHUNK_GROUP_SYL],
                                        lc_key, &postings, &n_postings);
-            if (getenv("SPFY_PSA_DEBUG"))
-                fprintf(stderr, "  PSA[SYL ] key=%-30s hit=%d n_postings=%u\n",
-                        lc_key, hit, n_postings);
+            /* first_hp/last_hp are printed so this line can be JOINED
+             * against the engine's anchor_components frames, which report
+             * the same span. */
+            if (spfy_env("SPFY_PSA_DEBUG"))
+                fprintf(stderr, "  PSA[SYL ] key=%-30s hit=%d n_postings=%u "
+                                "first_hp=%u last_hp=%u\n",
+                        lc_key, hit, n_postings,
+                        2u * start_p, 2u * end_p + 1u);
             if (hit <= 0 || n_postings == 0) continue;
 
-            /* HP span: phoneme i (in seg_names) -> HP slots 2*i .. 2*i+1.
-             * (FE pad has leading pau at i=0 -> HPs 0,1; first content
-             * phoneme at i=1 -> HPs 2,3; etc.) */
+            /* HP span: phoneme i (in seg_names) -> HP slots 2*i .. */
             uint32_t first_hp_idx = 2u * start_p;
             uint32_t last_hp_idx  = 2u * end_p + 1u;
             if (last_hp_idx >= n_hp) continue;
@@ -3059,10 +4684,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 }
                 cfc.slot = &adapter;
                 /* Plan 03-04: silence-pad CART traversal — see primary
-                 * spfy_cart_traverse call site for rationale.
-                 * SPFY_NO_SILENCE_CART=1 reverts. */
+                 * spfy_cart_traverse call site for rationale. */
                 int silence = ctx_is_silence(v, slice_ctx.ctx[post][2]);
-                if (!silence || !getenv("SPFY_NO_SILENCE_CART")) {
+                if (!silence || !spfy_env("SPFY_NO_SILENCE_CART")) {
                     uint32_t didx = phone_to_labl(v, slice_ctx.ctx[post][2] >> 1);
                     if (didx < v->durt_cart.n_trees) {
                         if (spfy_cart_traverse(&v->durt_cart, didx, cart_feat, &cfc,
@@ -3117,36 +4741,41 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 aslot.last_ctx.ctx[i] =
                     (int32_t)slice_ctx.ctx[hp_to_post[last_hp_idx]][i];
             }
-            aslot.anchor_type = 2;             /* Syl */
+            aslot.anchor_type = 2;
             aslot.cart_per_hp = cart_per;
             aslot.sp_per_hp   = sp_per;
             aslot.syl_idx_per_hp = syl_idx_per;
+            aslot.sp_all_hp   = sp_all;
+            aslot.n_all_hp    = (int32_t)n_hp;
+            aslot.phone_all_hp = phone_all;
             aslot.durt_cart   = &v->durt_cart;
             aslot.hp_feat     = hp_feat_per;
 
-            spfy_anchor_cand_t out_cands[64];
+            uint32_t cand_cap = n_postings ? n_postings : 1u;
+            spfy_anchor_cand_t *out_cands = (spfy_anchor_cand_t *)
+                calloc(cand_cap, sizeof *out_cands);
+            if (!out_cands) {
+                free(cart_per); free(sp_per); free(syl_idx_per);
+                free(hp_feat_per);
+                continue;
+            }
             uint32_t out_n = 0;
             int rcs = spfy_anchor_score(&v->av, &aslot, postings, n_postings,
                                          &v->chunks.ckls[SPFY_CHUNK_GROUP_SYL],
-                                         out_cands, 64, &out_n);
+                                         out_cands, cand_cap, &out_n);
             free(cart_per); free(sp_per); free(syl_idx_per); free(hp_feat_per);
-            if (rcs != SPFY_OK) continue;
+            if (rcs != SPFY_OK) { free(out_cands); continue; }
             ++psa_syls;
 
             /* Store Syl anchor cands keyed by the SLOT POST_IDX of the
-             * matching Syl in the tree (engine attaches anchor cands to
-             * the Syl tree-slot, and LinkGraph routes the DAG through
-             * them). We use first_hp_idx to find which Syl slot this is.
-             * If we can't find a matching Syl slot in the tree, we still
-             * preserve the (legacy) leaf-injection so something happens. */
+             * matching Syl in the tree (engine attaches anchor cands to the
+             * Syl tree-slot, and LinkGraph routes the DAG through them). */
             int32_t syl_slot_post = -1;
             for (uint32_t s2 = 0; s2 < tree.n_slots; ++s2) {
                 if (tree.slots[s2].kind != SPFY_SK_SYLLABLE) continue;
-                /* Find leftmost-leaf HP under s2; compare to first_hp_idx. */
                 uint32_t cur = s2;
                 while (tree.slots[cur].n_children > 0)
                     cur = tree.slots[cur].child_idx[0];
-                /* cur is leftmost HP descendant; map to hp index. */
                 uint32_t hp_lookup = post_to_hp[cur];
                 if (hp_lookup == first_hp_idx) {
                     syl_slot_post = (int32_t)s2; break;
@@ -3172,10 +4801,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 if (se < ss) continue;
                 uint32_t span_uid_n = se - ss + 1;
                 /* 2026-05-14: removed strict span filter — see WORD-pass
-                 * comment for rationale. Engine accepts partial anchors
-                 * (uid range < n_hp) which our DP needs to consider for
-                 * DIFF_PL phrases. */
-                if (getenv("SPFY_ANCHOR_STRICT_SPAN")
+                 * comment for rationale. */
+                if (spfy_env("SPFY_ANCHOR_STRICT_SPAN")
                     && span_uid_n != span_n) continue;
                 if (cands_s && jks_s && tgt_s) {
                     cands_s[kept_s] = ss;
@@ -3184,9 +4811,22 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     ++kept_s;
                 }
             }
+            /* The SYL pass had no visibility at all: the WORD pass prints
+             * its kept count, this one printed nothing, so "felix builds
+             * zero anchors" could not be attributed to the lookup, the
+             * scorer, or the tree-slot resolve. */
+            if (spfy_env("SPFY_PSA_DEBUG")) {
+                fprintf(stderr, "  SYL  anchor key=%-22s out_n=%u kept=%u "
+                                "syl_slot=%d first_hp=%u last_hp=%u\n",
+                        lc_key, out_n, kept_s, syl_slot_post,
+                        first_hp_idx, last_hp_idx);
+                /* Print the candidates the same way the WORD branch does. */
+                for (uint32_t c = 0; c < kept_s; ++c)
+                    fprintf(stderr, "    cand[%u] ss=%u se=%u pre_dp=%.6f\n",
+                            c, cands_s[c], jks_s[c], (double)tgt_s[c]);
+            }
             if (syl_slot_post >= 0 && kept_s > 0
                 && cands_s && jks_s && tgt_s) {
-                /* Replace any prior storage at this slot (rare). */
                 free(anchor_cands [syl_slot_post]);
                 free(anchor_jks   [syl_slot_post]);
                 free(anchor_target[syl_slot_post]);
@@ -3206,7 +4846,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 uint8_t *aC70 = (uint8_t *)calloc(kept_s, sizeof *aC70);
                 uint8_t *aC78 = (uint8_t *)calloc(kept_s, sizeof *aC78);
                 if (aC68 && aC6c && aC70 && aC78) {
-                    int legacy = getenv("SPFY_NO_ANCHOR_HEAD_C6C") != NULL;
+                    int legacy = spfy_env("SPFY_NO_ANCHOR_HEAD_C6C") != NULL;
                     for (uint32_t c = 0; c < kept_s; ++c) {
                         if (legacy) {
                             spfy_unit_record_t ur;
@@ -3221,7 +4861,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                         }
                         uint8_t v68 = 0, v6c = 0, v70 = 0;
                         uint16_t v78 = 0;
-                        int do_gate = getenv("SPFY_ANCHOR_VOICING_GATE")
+                        int do_gate = spfy_env("SPFY_ANCHOR_VOICING_GATE")
                                       != NULL;
                         for (uint32_t u = cands_s[c]; u <= jks_s[c]; ++u) {
                             spfy_unit_record_t ur;
@@ -3262,13 +4902,16 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             } else {
                 free(cands_s); free(jks_s); free(tgt_s);
             }
-        }   /* end psa-syl loop */
+            free(out_cands);
+        }
 
         if (synth_is_verbose())
             fprintf(stdout, "PostScoringAdj: %u words + %u syls processed\n",
                     psa_words, psa_syls);
+        free(sp_all);
+        free(phone_all);
     }
-    free(seg_names);   /* no longer needed after PSA */
+    free(seg_names);
     free(psa_syl_start);
 
     /* Engine-faithful DAG Viterbi (FUN_08e8b620 semantics): every tree
@@ -3279,12 +4922,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     join_ctx_t jc;
     jc.hash = &v->hash; jc.units = &v->units;
     /* miss_default is only used when the hist curve fails to load
-     * (degenerate fallback). Engine never hits this path. */
+     * (degenerate fallback). */
     jc.miss_default = 0.0f;
-    /* F0-prob curve (VIN hist chunk + voice+0xc8). Tom's curve is
-     * V-shaped (100 entries, sub_off=-50, min at idx 49, max ~10.96). */
+    /* F0-prob curve (VIN hist chunk + voice+0xc8). */
     load_f0_hist_curve(&v->vin, &jc);
-    /* Tom 0.6; Jill 1.5, Felix 0.9, Javier 0.1, Paulina 0.5. */
     jc.f0_edge_change_weight =
         spfy_vcf_f32(&v->vcf, "F0_EDGE_CHANGE_WEIGHT", 0.6f);
     /* MISSING_JOIN_COST = 1000.0 from FE-init default (FUN_08e90dc0
@@ -3293,7 +4934,46 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * exclusively use same-rec runs and v->hash hits. */
     jc.missing_join_cost     =
         spfy_vcf_f32(&v->vcf, "MISSING_JOIN_COST", 1000.0f);
-    if (getenv("SPFY_NO_F0_CURVE")) jc.curve = NULL;
+    /* Hash-hit join weighting, off by default (see the note at dag_join_cb). */
+    /* SPFY_POW_CONT_W energy-continuity term. */
+    jc.pow           = unit_pow;
+    jc.pow_n         = unit_pow_n;
+    jc.pow_cont_w    = pow_join_w;
+    jc.pow_cont_dead = pow_join_dead;
+    jc.apply_join_w = (spfy_env("SPFY_JOIN_W_APPLY") != NULL);
+    /* Fallbacks are the ENGINE's built-in defaults, read out of
+     * SWIttsUSel.dll FUN_08e90dc0: the constructor stores 0x3e800000 (0.25)
+     * at +0x2c and 0x3e4ccccd (0.2) at +0x30, and a failed config lookup
+     * (`test eax,eax` / `jne` past the store) leaves them untouched. The
+     * weight fallback used to be 0.7f, which is TOM's VCF value, not a
+     * default -- latent, since all eight shipped voices define the param,
+     * but it would silently mis-weight any voice that omitted it. */
+    jc.join_w   = spfy_vcf_f32(&v->vcf, "JOIN_COST_WEIGHT", 0.25f);
+    jc.join_off = spfy_vcf_f32(&v->vcf, "JOIN_COST_OFFSET", 0.2f);
+    jc.f0           = dp_f0_on ? dp_f0.f0 : NULL;
+    jc.f0_n         = dp_f0_on ? dp_f0.n_units : 0u;
+    jc.f0_cont_w    = dp_f0_w;
+    jc.f0_cont_dead  = dp_f0_dead;
+    jc.f0_cont_up    = dp_f0_up;
+    jc.f0_cont_break = dp_f0_break;
+    jc.f0_cont_slope = dp_f0_slope;
+    jc.f0_cont_scope = dp_f0_scope;
+    jc.f0_cont_seam  = dp_f0_seam;
+    {
+        const char *e = spfy_env("SPFY_JOIN_W");
+        if (e && *e) jc.join_w = (float)atof(e);
+        e = spfy_env("SPFY_JOIN_OFF");
+        if (e && *e) jc.join_off = (float)atof(e);
+        /* SPFY_MISSING_JOIN sweeps MISSING_JOIN_COST, which no shipped VCF
+         * carries (so vcf_variant.py cannot reach it -- adding unknown
+         * names makes the server exit rc=5). */
+        e = spfy_env("SPFY_MISSING_JOIN");
+        if (e && *e) jc.missing_join_cost = (float)atof(e);
+    }
+    if (jc.apply_join_w && synth_is_verbose())
+        fprintf(stdout, "join weighting ON: cost = %.3f*cell + %.3f\n",
+                (double)jc.join_w, (double)jc.join_off);
+    if (spfy_env("SPFY_NO_F0_CURVE")) jc.curve = NULL;
     if (jc.curve) {
         if (synth_is_verbose())
             fprintf(stdout, "F0-curve loaded: %d bins, sub_off=%d, "
@@ -3301,7 +4981,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     jc.curve_max_idx, jc.curve_sub_off,
                     (double)jc.f0_edge_change_weight,
                     (double)jc.missing_join_cost);
-        if (getenv("SPFY_DUMP_F0_CURVE")) {
+        if (spfy_env("SPFY_DUMP_F0_CURVE")) {
             fprintf(stderr, "{\"f0_curve\":1,\"n\":%d,\"sub_off\":%d,\"vals\":[",
                     jc.curve_max_idx, jc.curve_sub_off);
             for (int i = 0; i < jc.curve_max_idx; ++i)
@@ -3311,18 +4991,21 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         }
     }
     n_slots = n_hp;
-    uint32_t *path_uids = (uint32_t *)calloc(n_slots, sizeof *path_uids);
+    /* ONE allocation, TWO arrays. */
+    uint32_t *path_uids = (uint32_t *)calloc((size_t)n_slots * 2u,
+                                             sizeof *path_uids);
     if (!path_uids) { rc = SPFY_E_NOMEM; goto fail; }
-    /* Default-fill with silence sentinel so any HP slot not covered by
-     * the path (shouldn't happen in a correct DAG) plays as silence. */
-    for (uint32_t i = 0; i < n_slots; ++i) path_uids[i] = SILENCE_SENTINEL_UID;
+    uint32_t *path_extra = path_uids + n_slots;
+    /* Default-fill with silence sentinel so any HP slot not covered by the
+     * path (shouldn't happen in a correct DAG) plays as silence. */
+    for (uint32_t i = 0; i < n_slots; ++i) path_uids[i] = SILENCE_UID(v);
     float total = 0.0f;
 
     {
-        /* Build dag_slots[tree.n_slots]: HP slots get the PRSL pools
-         * (cands == join_keys for leaves), Word/Syl slots get anchor
-         * cands (cands = ss array, join_keys = se array), all slots get
-         * preds from spfy_link_graph. */
+        /* Build dag_slots[tree.n_slots]: HP slots get the PRSL pools (cands
+         * == join_keys for leaves), Word/Syl slots get anchor cands (cands
+         * = ss array, join_keys = se array), all slots get preds from
+         * spfy_link_graph. */
         dag_slots = (spfy_viterbi_dag_slot_t *)
                     calloc(tree.n_slots, sizeof *dag_slots);
         if (!dag_slots) { rc = SPFY_E_NOMEM; free(path_uids); goto fail; }
@@ -3330,9 +5013,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             dag_slots[s].preds   = preds_tab.per_slot[s].preds;
             dag_slots[s].n_preds = preds_tab.per_slot[s].n_preds;
         }
-        /* HP-leaf slots: copy from vslots[]. cbuf[hp] is the cand UID
-         * array (also serves as join_keys since for leaves uid == join
-         * key); tbuf[hp] is target_cost. */
+        /* HP-leaf slots: copy from vslots[]. */
         for (uint32_t hp = 0; hp < n_hp; ++hp) {
             uint32_t s = hp_to_post[hp];
             dag_slots[s].cands       = vslots[hp].cands;
@@ -3344,7 +5025,6 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             dag_slots[s].c70         = cand_c70[hp];
             dag_slots[s].c78         = cand_c78[hp];
         }
-        /* Word/Syl slots: anchor cands (already populated by PSA above). */
         for (uint32_t s = 0; s < tree.n_slots; ++s) {
             spfy_slot_kind_t k = tree.slots[s].kind;
             if (k != SPFY_SK_WORD && k != SPFY_SK_SYLLABLE) continue;
@@ -3368,10 +5048,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             rc = SPFY_E_NOMEM; free(path_uids); goto fail;
         }
         uint32_t path_len = 0;
+        /* cfg+0x94, per voice. */
+        int path_f0_flag =
+            (spfy_vcf_f32(&v->vcf, "GET_RID_OF_PATH_F0", 0.0f) != 0.0f);
         int rc_v = spfy_viterbi_run_dag(dag_slots, tree.n_slots,
                                          dag_join_cb, &jc,
                                          path_slots_buf, path_uids_buf,
-                                         &path_len, &total);
+                                         &path_len, &total, path_f0_flag);
         if (rc_v != SPFY_OK) {
             fprintf(stderr, "viterbi-dag failed: %s\n", spfy_strerror(rc_v));
             free(path_slots_buf); free(path_uids_buf);
@@ -3382,18 +5065,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                             "(of %u tree slots; %u HP)\n",
                     (double)total, path_len, tree.n_slots, n_hp);
 
-        /* [live-trace] DP done: total path cost + lengths. Individual `pick`
-         * events (below) carry the chosen UID per half-phone as the path is
-         * expanded. */
+        /* [live-trace] DP done: total path cost + lengths. */
         spfy_trace_eventf("viterbi",
             "{\"phrase\":%u,\"total\":%.4f,\"path_len\":%u,\"n_slots\":%u}",
             phrase_idx, (double)total, path_len, tree.n_slots);
 
-        /* Expand multi-UID anchor cands into per-HP UIDs. For an HP
-         * slot in the path, write the chosen UID directly. For a
-         * Word/Syl slot, find its leftmost HP descendant and the
-         * matching anchor cand (by ss); write UIDs ss..se across the
-         * span. */
+        /* Expand multi-UID anchor cands into per-HP UIDs. */
         uint32_t expand_anchors = 0, expand_hps = 0;
         for (uint32_t i = 0; i < path_len; ++i) {
             uint32_t s   = path_slots_buf[i];
@@ -3412,7 +5089,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
             if (k != SPFY_SK_WORD && k != SPFY_SK_SYLLABLE) continue;
 
-            /* Find this slot's HP span: leftmost-leaf .. rightmost-leaf. */
+            /* Find this slot's HP span: leftmost-leaf .. */
             uint32_t leftmost = s;
             while (tree.slots[leftmost].n_children > 0)
                 leftmost = tree.slots[leftmost].child_idx[0];
@@ -3425,7 +5102,6 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             uint32_t last_hp  = post_to_hp[rightmost];
             if (first_hp >= n_slots || last_hp >= n_slots) continue;
 
-            /* Find the chosen anchor cand: cands[c] == uid (= ss). */
             uint32_t se = uid;
             for (uint32_t c = 0; c < anchor_n[s]; ++c) {
                 if (anchor_cands[s][c] == uid) {
@@ -3442,17 +5118,63 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
             /* For partial anchors (uid range < hp span), mark the
              * "overshoot" HPs (consumed by the anchor but with no
-             * corresponding UID) with UINT32_MAX so the path dump and
-             * audio decode can skip them. Engine emits exactly
-             * span_n UIDs for the anchor's hp_span_n HPs; we mirror
-             * that. */
+             * corresponding UID) with UINT32_MAX so the path dump and audio
+             * decode can skip them. */
             for (uint32_t k2 = fill_n; k2 < hp_span_n; ++k2) {
                 if (first_hp + k2 < n_slots)
                     path_uids[first_hp + k2] = 0xFFFFFFFFu;
             }
+            /* ⚠ THE OTHER DIRECTION IS ALSO REAL: span_n > hp_span_n.
+             *
+             * `fill_n` is a min, and path_uids is indexed by half-phone, so an
+             * anchor holding MORE units than half-phones silently lost its
+             * tail -- the units simply had nowhere to live. The engine emits
+             * the whole ss..se range regardless of how many half-phones it
+             * spans (the same asymmetry the anchor durt walk hits, where it
+             * clamps its own index at last_hp rather than dropping the tail).
+             *
+             * paulina es_014: the engine's wsola_in run head 599500 carries
+             * lp=14 over a 12-half-phone anchor, and the two dropped units are
+             * exactly the 62-vs-60 emitted-unit gap the gate reports.
+             *
+             * Record the remainder on the anchor's LAST half-phone; the concat
+             * loop appends it to that run. SPFY_ANCHOR_NO_TAIL=1 reverts. */
+            static int no_tail = -1;
+            if (no_tail < 0)
+                no_tail = (spfy_env("SPFY_ANCHOR_NO_TAIL") != NULL);
+            if (span_n > hp_span_n && !no_tail
+                && first_hp + hp_span_n - 1u < n_slots)
+                path_extra[first_hp + hp_span_n - 1u] = span_n - hp_span_n;
             ++expand_anchors;
         }
-        if (getenv("SPFY_DUMP_PATH")) {
+        /* --- SPFY_DP_F0_CONT diagnostic
+         * ------------------------------------ What the term is SUPPOSED to
+         * minimise, measured on the path it actually chose: total |dF0| in
+         * semitones over consecutive voiced slots, plus how many... */
+        if (dp_f0_on) {
+            double sum_st = 0.0, max_st = 0.0;
+            uint32_t n_pair = 0, n_break = 0;
+            uint32_t prev = 0xFFFFFFFFu;
+            for (uint32_t k = 0; k < n_slots; ++k) {
+                uint32_t u = path_uids[k];
+                float f = (u < dp_f0.n_units) ? dp_f0.f0[u] : 0.0f;
+                if (f <= 0.0f) { prev = 0xFFFFFFFFu; ++n_break; continue; }
+                if (prev != 0xFFFFFFFFu) {
+                    double st = fabs(12.0 * log2((double)f
+                                                 / (double)dp_f0.f0[prev]));
+                    sum_st += st;
+                    if (st > max_st) max_st = st;
+                    ++n_pair;
+                }
+                prev = u;
+            }
+            spfy_log_warn("dp-f0: path[%u] total |dF0| = %.1f st over %u "
+                          "voiced pair(s) (mean %.2f, max %.2f), %u unvoiced "
+                          "slot(s)",
+                          phrase_idx, sum_st, n_pair,
+                          n_pair ? sum_st / n_pair : 0.0, max_st, n_break);
+        }
+        if (spfy_env("SPFY_DUMP_PATH")) {
             fprintf(stdout, "  dag path: %u HP-slot hops, %u anchor hops "
                             "(span expanded into %u HP slots)\n",
                     expand_hps, expand_anchors, n_hp);
@@ -3471,56 +5193,89 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                         dag_slots[s].n_preds, dag_slots[s].n_cands);
             }
             for (uint32_t hp = 0; hp < n_hp; ++hp) {
-                /* Skip partial-anchor overshoot positions — engine's
-                 * path doesn't emit these either. */
+                /* Skip partial-anchor overshoot positions — engine's path
+                 * doesn't emit these either. */
                 if (path_uids[hp] == 0xFFFFFFFFu) continue;
                 fprintf(stdout, "  hp %2u: uid=%u\n", hp, path_uids[hp]);
+                /* An anchor holding more units than half-phones continues
+                 * past its last slot; those units ARE emitted, so the dump
+                 * -- and the gate's EMITTED-UNIT audit, which reads it --
+                 * must list them or it disagrees with the audio... */
+                for (uint32_t e = 1; e <= path_extra[hp]; ++e)
+                    fprintf(stdout, "  hp %2u: uid=%u\n", hp,
+                            path_uids[hp] + e);
             }
         }
         free(path_slots_buf); free(path_uids_buf);
     }
 
-    /* (Was: SPFY_NO_FORCE_END_SILENCE / force-set last UID to silence
-     * sentinel. The DP now picks the sentinel naturally at the end of
-     * an utterance — verified 93.6%→93.6% with and without the
-     * post-DP override, so the defensive force-fix was redundant.) */
+    /* SPFY_PATH_DUMP — the chosen UID per half-phone slot, one JSON line
+     * per phrase. */
+    if (spfy_env("SPFY_PATH_DUMP")) {
+        fprintf(stderr, "{\"path_dump\":1,\"phrase\":%u,\"uids\":[",
+                phrase_idx);
+        for (uint32_t hp = 0; hp < n_slots; ++hp)
+            fprintf(stderr, "%s%d", hp ? "," : "",
+                    path_uids[hp] == 0xFFFFFFFFu ? -1 : (int)path_uids[hp]);
+        fprintf(stderr, "]}\n");
+    }
 
-    /* Decode chosen v->units to audio via WSOLA streamer. WAV+streamer
-     * are set up once outside the per-phrase loop; this section just
-     * pushes audio for the current phrase. */
+    /* SPFY_UID_DUMP, pick half — the DP's winner per half-phone. */
+    if (spfy_uid_dump_fp()) {
+        FILE *uf = spfy_uid_dump_fp();
+        for (uint32_t hp = 0; hp < n_slots; ++hp)
+            fprintf(uf, "{\"t\":\"pick\",\"phrase\":%u,\"slot\":%u,"
+                        "\"uid\":%d}\n",
+                    (unsigned)phrase_idx, (unsigned)hp,
+                    path_uids[hp] == 0xFFFFFFFFu ? -1 : (int)path_uids[hp]);
+    }
+
+    /* SPFY_UID_OVERRIDE — substitute chosen units and hear the result. */
+    uid_override_apply(phrase_idx, path_uids, n_slots);
+
+    /* (Was: SPFY_NO_FORCE_END_SILENCE / force-set last UID to silence
+     * sentinel. */
+
+    /* Decode chosen v->units to audio via WSOLA streamer. */
     int      prev_have = 0;
     uint16_t prev_file_idx = 0, prev_local_pos = 0, prev_dur_like = 0;
-    /* F0 at the trailing edge of the last emitted span — fed into WSOLA
-     * for PSOLA voiced-join detection. 0 = unvoiced/unknown (which
-     * forces plain WSOLA on the next push). */
+    /* F0 at the trailing edge of the last emitted span — fed into WSOLA for
+     * PSOLA voiced-join detection. */
     uint8_t  prev_f0_end = 0;
     /* Inter-word silence: engine inserts visible breathing gaps between
-     * words (clearly audible in waveform A/B). Our FE only adds leading +
-     * trailing pau pads, no inter-word silence, so the audio rushes.
-     * sp[3] = wordInPhrase per the engine schema; when it changes between
-     * slots we've crossed a word boundary. Insert a small silence chunk
-     * (~40 ms @ 8 kHz = 320 samples) so the output paces like the engine. */
+     * words (clearly audible in waveform A/B). */
     uint32_t prev_word_idx = 0xFFFFFFFFu;
 #ifdef SPFY_TRACE
-    /* [live-trace] previous word_post for the global-word tagger; resets per
-     * phrase so the first content word of each phrase ticks g_wseq. */
+    /* [live-trace] previous word_post for the global-word tagger; resets
+     * per phrase so the first content word of each phrase ticks g_wseq. */
     uint32_t g_wprev = 0xFFFFFFFFu;
 #endif
-    static const int16_t SILENCE_BUF[320] = {0};
-    /* Inter-word silence injection: default OFF (0ms). Engine does
-     * NOT inject inter-word silences — speech runs continuously,
-     * pacing is handled by DP-selected pause v->units only. Verified
-     * 2026-05-15 by comparing pangram oracle (engine output via
-     * spfy_dumpwav.exe) against our output: oracle has ONE leading
-     * silence region (28ms), zero inter-word silences. v4 had eight
-     * 22-24ms inter-word silences that the user perceived as faintly
-     * stuttery. Removing them brings our total length from +219ms vs
-     * oracle to +9ms vs oracle.
-     *
-     * SPFY_INTERWORD_MS=N (N in [0..200]) restores legacy behavior. */
+    /* Set up below, once silence_n is known — the contour's timeline has to
+     * account for inter-word silence. */
+    prosody_stage_t pros;
+    memset(&pros, 0, sizeof pros);
+
+    /* Inter-word gap fill. */
+    static int16_t SILENCE_BUF[1024];
+    {
+        int floor_amp = 24;
+        const char *fe_ = spfy_env("SPFY_INTERWORD_FLOOR");
+        if (fe_ && *fe_) floor_amp = atoi(fe_);
+        if (floor_amp < 0)   floor_amp = 0;
+        if (floor_amp > 512) floor_amp = 512;
+        uint32_t rng = 0x13579BDFu;
+        for (size_t i = 0; i < sizeof SILENCE_BUF / sizeof *SILENCE_BUF; ++i) {
+            rng = rng * 1664525u + 1013904223u;
+            SILENCE_BUF[i] = floor_amp
+                ? (int16_t)((int32_t)((rng >> 16) % (uint32_t)(2 * floor_amp + 1))
+                            - floor_amp)
+                : (int16_t)0;
+        }
+    }
+    /* Inter-word silence injection: default OFF (0ms). */
     int env_silence_ms = 0;
     {
-        const char *e = getenv("SPFY_INTERWORD_MS");
+        const char *e = spfy_env("SPFY_INTERWORD_MS");
         if (e) env_silence_ms = atoi(e);
         if (env_silence_ms < 0)   env_silence_ms = 0;
         if (env_silence_ms > 200) env_silence_ms = 200;
@@ -3528,35 +5283,548 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     size_t silence_n = (size_t)env_silence_ms * (size_t)v->vdb.sample_rate / 1000u;
     if (silence_n > sizeof SILENCE_BUF / sizeof *SILENCE_BUF)
         silence_n = sizeof SILENCE_BUF / sizeof *SILENCE_BUF;
+    /* Gap-fade width. */
+    uint32_t gap_fade_n = 0;
+    if (silence_n > 0) {
+        const char *gf = spfy_env("SPFY_GAP_FADE_MS");
+        double gms = (gf && *gf) ? atof(gf) : 28.0;
+        if (gms < 0.0) gms = 0.0;
+        if (gms > 40.0) gms = 40.0;
+        gap_fade_n = (uint32_t)(gms * (double)v->vdb.sample_rate / 1000.0);
+        spfy_wsola_set_gap_ola(&ws, gap_fade_n);
+    }
     size_t played = 0, skipped = 0, paired_same = 0, paired_cross = 0,
            interword_pauses = 0;
 
-    /* Phrase-start boundary event: fires before this phrase's first unit
-     * is pushed, at the current output sample count. */
-    if (cb && cb->phrase_cb)
-        cb->phrase_cb(cb->ctx, phrase_idx, sink->n_samples_written);
+    /* --- optional prosody stage (PLAN_PROSODY_STAGE.md) ------------------
+     * OFF unless SPFY_PROSODY_STAGE is set, so the byte-exact audit is
+     * unaffected. */
+    {
+        spfy_contour_params_t cp;
+        /* Lazy S4-mode application for callers that never went through
+         * main() -- the SAPI DLL builds this file with SPFY_SYNTH_NO_MAIN,
+         * so exporting SPFY_4_MODE would otherwise do nothing there. */
+        spfy4_mode_apply(NULL, 0);
+        const char *pm_stem = spfy_env("SPFY_PROSODY_PM");
+        if (spfy_contour_env(&cp) && pm_stem && *pm_stem) {
+            if (spfy_pmarks_load(pm_stem, &pros.marks) != SPFY_OK) {
+                spfy_log_warn("prosody: no marks at '%s'; stage disabled",
+                              pm_stem);
+            } else {
+                /* pau lookup for the getPitchMarks-faithful skip above. */
+                pros.pau_label   = 0xFFFFu;
+                pros.phone_center = NULL;
+                pros.phone_stride = 0;
+                pros.n_units      = v->units.n_units;
+                /* SPFY_PROSODY_F0_TABLE=<path> — every unit's F0 by the
+                 * engine's own definition, written once per process. */
+                {
+                    static int f0_table_done = 0;
+                    const char *ft = spfy_env("SPFY_PROSODY_F0_TABLE");
+                    if (ft && *ft && !f0_table_done) {
+                        f0_table_done = 1;
+                        FILE *tf = fopen(ft, "wb");
+                        if (!tf) {
+                            spfy_log_warn("prosody: cannot write F0 table "
+                                          "'%s'", ft);
+                        } else {
+                            uint32_t nu = v->units.n_units;
+                            if (pros.marks.n_units < nu)
+                                nu = pros.marks.n_units;
+                            /* file_idx and the halfphone class travel with
+                             * the F0 so an offline ceiling can price the
+                             * JOIN the same three ways spfy_reselect_find
+                             * does -- consecutive (free), same recording,
+                             * elsewhere. */
+                            for (uint32_t u = 0; u < nu; ++u) {
+                                spfy_unit_record_t ur;
+                                float f = spfy_reselect_unit_f0(
+                                    &pros.marks, u, pros.marks.rate);
+                                if (f <= 0.0f) continue;
+                                if (spfy_unit_record_get(&v->units, u, &ur)
+                                    != SPFY_OK) continue;
+                                fprintf(tf, "%u %.2f %u %u %u\n", u, (double)f,
+                                        (unsigned)ur.file_idx,
+                                        (unsigned)ur.phone_center,
+                                        (unsigned)(ur.is_first_half ? 1u : 0u));
+                            }
+                            fclose(tf);
+                            spfy_log_warn("prosody: wrote F0 table for %u "
+                                          "unit(s) to %s", nu, ft);
+                        }
+                    }
+                }
+                if (!env_flag_off("SPFY_PROSODY_PM_PAU")) {
+                    uint8_t ph = spfy_phone_order_index(&v->phone_order, "pau");
+                    if (ph != SPFY_PHONE_NONE
+                        && ph < v->phone_order.n_phones
+                        && v->phone_order.feat_to_labl) {
+                        uint8_t lab = v->phone_order.feat_to_labl[ph];
+                        if (lab != SPFY_PHONE_NONE && v->units.data) {
+                            pros.pau_label = lab;
+                            pros.phone_center = v->units.data
+                                              + v->units.off_phone_center;
+                            pros.phone_stride = v->units.rec_size;
+                        }
+                    }
+                    if (pros.pau_label == 0xFFFFu)
+                        spfy_log_warn("prosody: no 'pau' phone; pau marks "
+                                      "will be read (engine skips them)");
+                }
+                uint32_t  n_c  = n_slots;
+                uint32_t *cdur = (uint32_t *)calloc(n_c ? n_c : 1,
+                                                    sizeof *cdur);
+                /* The ToBI arrays are sized n_hp; the timeline is sized n_slots. */
+                uint8_t *acc = (uint8_t *)calloc(n_c ? n_c : 1, sizeof *acc);
+                int8_t  *typ = (int8_t  *)calloc(n_c ? n_c : 1, sizeof *typ);
+                int8_t  *bto = (int8_t  *)calloc(n_c ? n_c : 1, sizeof *bto);
+                /* Per-word <prosody pitch="Nst"> offsets. */
+                int8_t  *pst = (int8_t  *)calloc(n_c ? n_c : 1, sizeof *pst);
+                /* Syllable id on the same timeline, so accent runs can be
+                 * cut where the syllable changes. */
+                uint32_t *syl = (uint32_t *)calloc(n_c ? n_c : 1, sizeof *syl);
+                uint8_t  *nuc = (uint8_t *)calloc(n_c ? n_c : 1, sizeof *nuc);
+                if (cdur && acc && typ && bto && pst && syl && nuc) {
+                    uint32_t n_copy = (n_hp < n_c) ? n_hp : n_c;
+                    memcpy(acc, hp_accent,  n_copy * sizeof *acc);
+                    memcpy(typ, hp_acctype, n_copy * sizeof *typ);
+                    memcpy(bto, hp_btone,   n_copy * sizeof *bto);
+                    if (hp_pitch_st)
+                        memcpy(pst, hp_pitch_st, n_copy * sizeof *pst);
+                    if (hp_syl)
+                        memcpy(syl, hp_syl, n_copy * sizeof *syl);
+                    if (hp_nuc)
+                        memcpy(nuc, hp_nuc, n_copy * sizeof *nuc);
+                    /* \![ToBI:] overrides the FE's accent decision per word. */
+                    if (hp_tobi) {
+                        uint32_t n_ov = 0;
+                        for (uint32_t k = 0; k < n_copy; ++k) {
+                            uint8_t on = 0;
+                            int8_t  bias = 0;
+                            if (!hp_tobi[k]) continue;
+                            if (!spfy_tobi_by_code(hp_tobi[k], &on, &bias))
+                                continue;
+                            acc[k] = on;
+                            if (on) typ[k] = bias;
+                            ++n_ov;
+                        }
+                        if (n_ov)
+                            spfy_log_warn("prosody: ToBI override on %u "
+                                          "halfphone(s)", n_ov);
+                    }
+                    prosody_slot_out_dur(v, path_uids, n_slots, hp_to_post,
+                                         (const uint32_t (*)[5])slice_ctx.ctx,
+                                         hp_word_idx, silence_n,
+                                         spfy_env("SPFY_NO_RUN_BATCH") != NULL,
+                                         cdur);
+                    if (spfy_contour_build(&pros.contour, &cp, cdur,
+                                           (int)n_c, acc, typ, syl, nuc, bto,
+                                           pst,
+                                           (int)v->vdb.sample_rate) == 0) {
+                        pros.on       = 1;
+                        pros.out0     = sink->n_samples_written;
+                        pros.slot_dur = cdur;
+                        /* SPFY_TIMELINE_DUMP=1 — the authoritative map from
+                         * half-phone to OUTPUT SAMPLES, on the same axis
+                         * the mark dump's `wpos` uses. */
+                        /* The contour's OWN accent positions, in nominal
+                         * samples -- the same axis [tl] uses. */
+                        if (spfy_env("SPFY_TIMELINE_DUMP")) {
+                            for (int ai = 0; ai < pros.contour.n_acc; ++ai)
+                                fprintf(stderr, "[acc] %u %d %.1f %.4f\n",
+                                        phrase_idx, ai,
+                                        pros.contour.pos[ai],
+                                        pros.contour.height[ai]);
+                        }
+                        if (spfy_env("SPFY_TIMELINE_DUMP")) {
+                            /* TWO AXES, both emitted, because they are NOT
+                             * the same and joining the wrong one is the
+                             * mistake this dump exists to prevent. */
+                            unsigned long acc_s = 0UL;
+                            for (uint32_t k = 0; k < n_c; ++k) {
+                                uint32_t s2 = (k < n_hp) ? hp_to_post[k] : 0u;
+                                const char *pn = "?";
+                                unsigned half = 0;
+                                if (k < n_hp && s2 < tree.n_slots
+                                    && v->phone_order.phone_names) {
+                                    uint32_t hc = slice_ctx.ctx[s2][2];
+                                    if ((hc >> 1) < v->phone_order.n_phones)
+                                        pn = v->phone_order.phone_names[hc >> 1];
+                                    half = hc & 1u;
+                                }
+                                int stress = -1;
+                                if (k < n_hp && hp_syl && hp_syl[k] >= 1
+                                    && fe_utt.syl_stress
+                                    && (hp_syl[k] - 1) < fe_utt.n_syls)
+                                    stress =
+                                        (int)fe_utt.syl_stress[hp_syl[k] - 1];
+                                fprintf(stderr,
+                                        "[tl] %u %u %lu %lu %lu %s %u %u %d %u "
+                                        "%u %u\n",
+                                        phrase_idx, k, acc_s,
+                                        acc_s + (unsigned long)cdur[k],
+                                        (unsigned long)pros.out0,
+                                        pn, half,
+                                        (k < n_hp && hp_syl) ? hp_syl[k] : 0u,
+                                        stress,
+                                        (k < n_c) ? acc[k] : 0u,
+                                        (k < n_c) ? nuc[k] : 0u,
+                                        (k < n_hp) ? hp_word_idx[k] : 0u);
+                                acc_s += (unsigned long)cdur[k];
+                            }
+                        }
+                        cdur          = NULL;
+                        spfy_log_warn("prosody: ON — total %.0f smp, %d accent(s), "
+                                      "base %.1f Hz, accent %.2f st, "
+                                      "fall %.2f st%s",
+                                      pros.contour.total, pros.contour.n_acc,
+                                      (double)cp.base_hz,
+                                      (double)cp.accent_st,
+                                      (double)cp.fall_st,
+                                      pros.contour.have_fall ? " (L-L%)" : "");
+                        /* SPFY_PROSODY_SLOT_DUMP=1 — SELECTION against the
+                         * contour, which nothing emitted before.
+                         *
+                         * The mark dump answers "what did the warp do"; it
+                         * cannot answer "was the unit a good starting point",
+                         * because by the time marks exist the unit is fixed.
+                         * This is the only point where the chosen uid and the
+                         * contour coexist, so it is where the question is
+                         * answerable at all.
+                         *
+                         * `nat` is the engine's own unit F0 (the expression
+                         * spfy_reselect_find would score with), `st` the
+                         * contour at the slot's CENTRE, and `land` where this
+                         * unit ends up once the relative warp is applied:
+                         * nat * 2^(st/12). In relative mode `land` is the only
+                         * one of the three that selection can move -- st is a
+                         * function of time alone -- so it is the quantity any
+                         * selection change has to be judged on.
+                         *
+                         * Joins to SPFY_UID_DUMP's "cands" records on
+                         * (phrase, slot), which is what supplies the CEILING:
+                         * the best `land` reachable from the pool the DP was
+                         * actually given.
+                         *
+                         * ⚠ EMITTED AFTER THE RESELECT PASS, not here. Placed
+                         * here it recorded the path BEFORE any substitution,
+                         * so a working reselect would have measured as inert. */
+                        /* Where the FE actually put the accents. */
+                        /* Per-word pitch offsets actually installed in the
+                         * contour, collapsed to runs. */
+                        if (synth_is_verbose() && pros.contour.n_seg) {
+                            int k = 0;
+                            while (k < pros.contour.n_seg) {
+                                int j = k;
+                                while (j + 1 < pros.contour.n_seg
+                                       && pros.contour.seg_off[j + 1]
+                                          == pros.contour.seg_off[k]) ++j;
+                                if (pros.contour.seg_off[k] != 0.0f)
+                                    spfy_log_warn("prosody:   word offset "
+                                                  "%+.1f st over slots %d..%d "
+                                                  "(%.0f..%.0f smp)",
+                                                  (double)pros.contour.seg_off[k],
+                                                  k, j,
+                                                  k ? pros.contour.seg_end[k-1] : 0.0,
+                                                  pros.contour.seg_end[j]);
+                                k = j + 1;
+                            }
+                        }
+                        if (synth_is_verbose())
+                            for (int k = 0; k < pros.contour.n_acc; ++k)
+                                spfy_log_warn("prosody:   accent %d at %.0f "
+                                              "smp (%.1f%% of phrase), "
+                                              "%.2f st",
+                                              k, pros.contour.pos[k],
+                                              100.0 * pros.contour.pos[k]
+                                                    / pros.contour.total,
+                                              pros.contour.height[k]);
+                    }
+                }
+                free(cdur); free(acc); free(typ); free(bto); free(pst);
+                free(syl); free(nuc);
 
+                /* --- F0-aware re-selection (SPFY_PROSODY_RESELECT) ---
+                 * Take the accent from SELECTION where a unit at the wanted
+                 * pitch exists (free, no artifacts) and leave only the
+                 * residual to PSOLA. */
+                if (pros.on && spfy_env("SPFY_PROSODY_RESELECT")) {
+                    spfy_reselect_t rs;
+                    spfy_reselect_params_t rp;
+                    spfy_reselect_defaults(&rp);
+                    {
+                        const char *g = spfy_env("SPFY_PROSODY_RESELECT_GAIN");
+                        if (g && *g) rp.min_gain_st = (float)atof(g);
+                        const char *x = spfy_env("SPFY_PROSODY_RESELECT_CROSS");
+                        if (x && *x) rp.cross_rec_st = (float)atof(x);
+                        const char *cx = spfy_env("SPFY_PROSODY_RESELECT_CTX");
+                        if (cx && *cx) rp.ctx_strict = atoi(cx);
+                    }
+                    if (spfy_reselect_build(&rs, &v->units, &pros.marks)
+                        == SPFY_OK) {
+                        uint32_t n_c2 = (n_hp < n_slots) ? n_hp : n_slots;
+                        /* Target is RELATIVE to each unit: "find a unit
+                         * like this one, but N semitones higher", N from
+                         * the contour. */
+                        double tpos = 0.0;
+                        int n_sub = 0, n_free = 0, n_same = 0, n_cross = 0;
+                        /* BAND mode. */
+                        const int band_mode =
+                            spfy_env("SPFY_PROSODY_RESELECT_BAND") != NULL;
+                        /* Default to the knee's own bounds so the two are
+                         * aimed at the same thing. */
+                        const float band_lo =
+                            env_f("SPFY_PROSODY_RESELECT_BAND_LO",
+                                  env_f("SPFY_PROSODY_F0_FLOOR_HZ", 0.0f));
+                        const float band_hi =
+                            env_f("SPFY_PROSODY_RESELECT_BAND_HI",
+                                  env_f("SPFY_PROSODY_F0_CEIL_HZ", 0.0f));
+                        if (band_mode && band_lo <= 0.0f && band_hi <= 0.0f)
+                            spfy_log_warn("prosody: RESELECT_BAND set but no "
+                                          "F0_FLOOR_HZ/F0_CEIL_HZ — inert");
+                        for (uint32_t k = 0; k < n_c2; ++k) {
+                            uint32_t uid0 = path_uids[k];
+                            uint32_t dur_s = pros.slot_dur[k];
+                            /* SPFY_PROSODY_RESELECT_ALL lifts the accented-only gate. */
+                            static int resel_all = -1;
+                            if (resel_all < 0)
+                                resel_all = (spfy_env("SPFY_PROSODY_RESELECT_ALL")
+                                             != NULL);
+                            /* Band mode scores every voiced slot: the slots
+                             * that land out of band are phrase-final, and
+                             * the accented-only gate excludes exactly
+                             * those. */
+                            if ((hp_accent[k] || resel_all || band_mode)
+                                && uid0 != 0xFFFFFFFFu
+                                && uid0 < rs.n_units && rs.f0[uid0] > 0.0f) {
+                                uint16_t nb = UINT16_MAX;
+                                if (k > 0 && path_uids[k - 1] != 0xFFFFFFFFu
+                                    && path_uids[k - 1] < rs.n_units)
+                                    nb = rs.file_idx[path_uids[k - 1]];
+                                uint32_t pv = (k > 0) ? path_uids[k - 1]
+                                                      : 0xFFFFFFFFu;
+                                uint32_t nu;
+                                if (band_mode) {
+                                    double stv = (double)spfy_contour_st_at(
+                                        &pros.contour, tpos + dur_s * 0.5);
+                                    nu = spfy_reselect_find_band(
+                                        &rs, &rp, uid0, pow(2.0, stv / 12.0),
+                                        band_lo, band_hi, nb, pv);
+                                } else {
+                                    float tgt = spfy_contour_at(
+                                        &pros.contour, tpos + dur_s * 0.5,
+                                        rs.f0[uid0]);
+                                    nu = spfy_reselect_find(&rs, &rp, uid0,
+                                                            tgt, nb, pv);
+                                }
+                                if (nu != uid0) {
+                                    /* Join tier of each substitution. */
+                                    if (pv != 0xFFFFFFFFu && nu == pv + 1u)
+                                        ++n_free;
+                                    else if (nb != UINT16_MAX
+                                             && nu < rs.n_units
+                                             && rs.file_idx[nu] == nb)
+                                        ++n_same;
+                                    else
+                                        ++n_cross;
+                                    path_uids[k] = nu; ++n_sub;
+                                }
+                            }
+                            tpos += (double)dur_s;
+                        }
+                        spfy_log_warn("prosody: reselect substituted %d unit(s)"
+                                      " — %d free join, %d same recording,"
+                                      " %d CROSS recording",
+                                      n_sub, n_free, n_same, n_cross);
+                        spfy_reselect_free(&rs);
+                    }
+                }
+                /* SPFY_PROSODY_SLOT_DUMP — see the note at the contour build. */
+                if (pros.on && spfy_env("SPFY_PROSODY_SLOT_DUMP")) {
+                    double sp = 0.0;
+                    for (uint32_t k = 0; k < n_slots; ++k) {
+                        uint32_t su = path_uids[k];
+                        double dur = (double)pros.slot_dur[k];
+                        double ctr = sp + 0.5 * dur;
+                        double stv = (double)spfy_contour_st_at(&pros.contour,
+                                                                ctr);
+                        float nat = (su != 0xFFFFFFFFu)
+                            ? spfy_reselect_unit_f0(&pros.marks, su,
+                                                    pros.marks.rate)
+                            : 0.0f;
+                        fprintf(stderr,
+                                "[slot] %u %u %d %.2f %.4f %.2f %.0f %.0f %d\n",
+                                phrase_idx, k,
+                                su == 0xFFFFFFFFu ? -1 : (int)su,
+                                (double)nat, stv,
+                                nat > 0.0f
+                                    ? (double)nat * pow(2.0, stv / 12.0) : 0.0,
+                                sp, dur, (int)(k < n_hp ? hp_accent[k] : 0));
+                        sp += dur;
+                    }
+                }
+                if (!pros.on) spfy_pmarks_free(&pros.marks);
+            }
+        }
+    }
+
+    /* Phrase-start boundary event: fires before this phrase's first unit is
+     * pushed, at the current output sample count. */
+    if (cb && cb->phrase_cb)
+        cb->phrase_cb(cb->ctx, phrase_idx,
+                      out_pos(sink, sink->n_samples_written));
+
+    /* Position on the prosody contour's timeline. */
+    uint64_t nom_pos = 0;
+    /* Target duration (ms) for this phrase's pau pad slots.
+     *
+     * FUN_08ee2960 sizes every sub-unit before handing it to the OLA:
+     *
+     *     pau  -> scale * (float)sub[0x18]     <- the FE's target
+     *     else -> scale * (int)  sub[0x08]     <- the unit table's dur
+     *
+     * So a pause plays for as long as the FE ASKED, not for the length of
+     * whatever recorded silence the unit search happened to pick. Tom's pau
+     * units carry dur_like 118-203 ms while the FE typically asks for
+     * 12.5-50 ms, which is why sizing them from dur_like made every render
+     * open and close far too long -- ~62% of our total excess samples were
+     * in the leading pad alone.
+     *
+     * The slot builder emits two leading and two trailing pau pads per
+     * phrase ((n_phons + 2) * 2 slots), and a live capture of the engine's
+     * unit loads shows it loading exactly those four, with the same target
+     * on each side. Target ms = p/2; see FE_PAU_DEFAULT_P for `?d`.
+     *
+     * SPFY_PAU_FULL_DUR=1 restores dur_like sizing. */
+    static int pau_full = -1;
+    if (pau_full < 0) pau_full = (spfy_env("SPFY_PAU_FULL_DUR") != NULL);
+    uint32_t pau_smp_lead = 0, pau_smp_trail = 0;
+    if (!pau_full && parsed && phrase_idx < FE_PARSE_MAX_PHRASES) {
+        int pb = parsed->phrase_pau_p_before[phrase_idx];
+        int pa = parsed->phrase_pau_p_after [phrase_idx];
+        if (pb <= 0) pb = FE_PAU_DEFAULT_P;
+        if (pa <= 0) pa = FE_PAU_DEFAULT_P;
+        /* target_ms = ROUND(p/2), then whole milliseconds -> samples.
+         *
+         * ⚠ NOT p*sps/2. FUN_08ee1ee0 resolves the target through
+         * FUN_08ee8828 (an ST0 -> int converter) and writes the result back
+         * into sub[0x08] as WHOLE MILLISECONDS, with sub[0x0c] = ms << shift.
+         * Read straight out of the engine at a join: f=12.5 -> dur=13,
+         * smp=104 (not 100); f=25.0 -> 25/200; f=50.0 -> 50/400. Half rounds
+         * UP, so (p + 1) / 2 in integer arithmetic. Getting this wrong costs
+         * 4 samples on every p25 pause. */
+        uint32_t sps = v->vdb.sample_rate / 1000u;
+        if (sps == 0) sps = 1u;
+        pau_smp_lead  = (((uint32_t)pb + 1u) / 2u) * sps;
+        pau_smp_trail = (((uint32_t)pa + 1u) / 2u) * sps;
+    }
+    /* --- pause-length knobs, every one identity by default ---------------
+     * MEASURED AXIS: S4's median phrase pause runs ~50 ms longer than ours,
+     * and no VCF parameter lengthens a pause in either direction -- the
+     * reachable... */
+    if (pau_smp_lead || pau_smp_trail) {
+        static double pau_scale = -1.0, pau_extra = 0.0,
+                      pau_lead_extra = 0.0, pau_trail_extra = 0.0;
+        if (pau_scale < 0.0) {
+            const char *e;
+            pau_scale = ((e = spfy_env("SPFY_PAUSE_SCALE")) && *e)
+                        ? atof(e) : 1.0;
+            if (pau_scale < 0.0) pau_scale = 0.0;
+            if (pau_scale > 8.0) pau_scale = 8.0;
+            pau_extra = ((e = spfy_env("SPFY_PAUSE_EXTRA_MS")) && *e)
+                        ? atof(e) : 0.0;
+            pau_lead_extra = ((e = spfy_env("SPFY_PAUSE_LEAD_EXTRA_MS")) && *e)
+                             ? atof(e) : 0.0;
+            pau_trail_extra = ((e = spfy_env("SPFY_PAUSE_TRAIL_EXTRA_MS")) && *e)
+                              ? atof(e) : 0.0;
+        }
+        if (pau_scale != 1.0 || pau_extra != 0.0
+            || pau_lead_extra != 0.0 || pau_trail_extra != 0.0) {
+            /* Samples per ms, taken from the voice rather than the `sps`
+             * macro, which is not in scope this early in the function. */
+            double per_ms = (double)v->vdb.sample_rate / 1000.0;
+            if (per_ms <= 0.0) per_ms = 1.0;
+            if (pau_smp_lead) {
+                double ms = (double)pau_smp_lead / per_ms * pau_scale
+                            + pau_extra + pau_lead_extra;
+                if (ms < 0.0)    ms = 0.0;
+                if (ms > 2000.0) ms = 2000.0;
+                pau_smp_lead = (uint32_t)(ms * per_ms + 0.5);
+            }
+            if (pau_smp_trail) {
+                double ms = (double)pau_smp_trail / per_ms * pau_scale
+                            + pau_extra + pau_trail_extra;
+                if (ms < 0.0)    ms = 0.0;
+                if (ms > 2000.0) ms = 2000.0;
+                pau_smp_trail = (uint32_t)(ms * per_ms + 0.5);
+            }
+        }
+    }
+    #define PAU_TARGET_SMP(si) \
+        ((pau_full || n_slots < 4u) ? 0u \
+         : ((si) < 2u ? pau_smp_lead \
+            : ((si) >= n_slots - 2u ? pau_smp_trail : 0u)))
     uint32_t s = 0;
     while (s < n_slots) {
         uint32_t u = path_uids[s];
         if (u == 0xFFFFFFFFu) {
-            /* Partial-anchor overshoot — audio for these HPs is
-             * supplied by the anchor's UID range above; don't emit
-             * silence here. */
+            /* Partial-anchor overshoot — audio for these HPs is supplied by
+             * the anchor's UID range above; don't emit silence here. */
+            if (pros.on) nom_pos += pros.slot_dur[s];
             ++s; continue;
         }
-        if (u == 0 || u == SILENCE_SENTINEL_UID || u >= v->units.n_units) {
+        /* ⚠ uid 0 AND 169578 ARE REAL UNITS, NOT MARKERS.
+         *
+         * The VIN holds 169579 units indexed 0..169578, so "SILENCE_SENTINEL"
+         * is the LAST valid index, and uid 0 resolves to file_idx 0,
+         * local_pos 0, dur_like 203, phone_center 32 = Tom's `pau`. Both are
+         * addressable audio, and the engine plays them: FUN_08ee2960 reads
+         * every sub-unit's samples from the speech DB through the provider
+         * vtable, and there is NO silence generator anywhere on that path.
+         * Its only mention of "pau" is a strncmp inside the
+         * apply_target_prosody branch, which is off.
+         *
+         * ⚠ BUT EMITTING THEM IN FULL IS ALSO WRONG, so this is OFF by
+         * default until the amount is understood. Tested: letting uid 0
+         * through moved the FIRST DIFFERING SAMPLE from index 0 to index 2 on
+         * every corpus text — samples 0 and 1 then match the engine exactly,
+         * which confirms the engine really does open on this unit — but the
+         * length ratio went the wrong way, 1.27 -> 1.85 median, because uid 0
+         * carries dur_like 203 (1624 samples) and the engine emits only ~65-80
+         * of them. It uses the pau to PRIME THE CROSSFADE TAIL, not as body.
+         *
+         * ✅ RESOLVED -- "how much" is the FE's target, not dur_like. The
+         * engine's own answer is readable at sub+0x18 (see PAU_TARGET_MS
+         * above), so these units are now emitted at that length and no
+         * longer skipped. Skipping was costing the leading pad entirely and
+         * sizing the survivors from dur_like was costing the rest.
+         *
+         * SPFY_PAU_SKIP=1 restores the old skip, for A/B only. */
+        static int pau_skip = -1;
+        if (pau_skip < 0) pau_skip = (spfy_env("SPFY_PAU_SKIP") != NULL);
+        static int skip_trace = -1;
+        if (skip_trace < 0)
+            skip_trace = (spfy_env("SPFY_WSOLA_TRACE") != NULL);
+        if (u >= v->units.n_units
+            || (pau_skip && (u == 0 || u == SILENCE_UID(v)))) {
+            if (skip_trace)
+                fprintf(stderr, "[wsolask] slot=%u uid=%u reason=%s "
+                        "n_units=%u\n", s, u,
+                        (u >= v->units.n_units) ? "oob" : "pau_skip",
+                        v->units.n_units);
+            if (pros.on) nom_pos += pros.slot_dur[s];
             ++skipped; ++s; prev_have = 0; prev_f0_end = 0; continue;
         }
         spfy_unit_record_t r1;
         if (spfy_unit_record_get(&v->units, u, &r1) != SPFY_OK) {
+            if (skip_trace)
+                fprintf(stderr, "[wsolask] slot=%u uid=%u reason=record_get\n",
+                        s, u);
+            if (pros.on) nom_pos += pros.slot_dur[s];
             ++skipped; ++s; prev_have = 0; prev_f0_end = 0; continue;
         }
 
-        /* Inter-word silence injection. We track the slot's parent-word
-         * post-index (computed from the slot tree) and insert a small
-         * silence chunk when it changes between consecutive non-silence
-         * halfphone slots. */
+        /* Inter-word silence injection. */
         uint32_t this_post = hp_to_post[s];
         const uint32_t (*ctx_arr)[5] = (const uint32_t (*)[5])slice_ctx.ctx;
         int this_is_silence = ctx_is_silence(v, ctx_arr[this_post][2]);
@@ -3567,30 +5835,37 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             && !this_is_silence) {
             /* Push with align=1 so the OLA blend Hann-fades the previous
              * voiced tail down to zero across the OLA region (10 ms),
-             * rather than one-sample-cutting it to zero. The latter
-             * produces an audible click at the voicing-to-silence
-             * boundary; WAV analysis at the Tom pangram's t≈1335ms and
-             * t≈1473ms (between "the"/"lazy" and "lazy"/"dog") showed
-             * one-sample drops of ±7676 → 0 that the user identified as
-             * stutter. SPFY_WSOLA_NO_SILENCE_FADE=1 reverts. */
-            int sil_align = (getenv("SPFY_WSOLA_NO_SILENCE_FADE") != NULL)
+             * rather than one-sample-cutting it to zero. */
+            int sil_align = (spfy_env("SPFY_WSOLA_NO_SILENCE_FADE") != NULL)
                             ? 0 : 1;
-            (void)spfy_wsola_push_unit(&ws, SILENCE_BUF, silence_n,
+            /* ENTRY side of the gap: the tail is real speech but the chunk
+             * going in is fill, so the low-NCC guard would otherwise
+             * collapse the fade-OUT to 2 ms exactly as it did the fade-in. */
+            spfy_wsola_mark_next_push_synthetic(&ws);
+            /* Chunk length must host the whole blend, or do_ola_blend takes
+             * its degraded short-chunk path and swallows the held tail:
+             * [eff_ola blend] [body = the actual gap] [save_n held tail]
+             * The blend REPLACES the tail the... */
+            size_t push_n = silence_n;
+            if (gap_fade_n > 0) {
+                spfy_wsola_request_tail_save(&ws, gap_fade_n);
+                push_n = (size_t)gap_fade_n * 2u + silence_n;
+                if (push_n > sizeof SILENCE_BUF / sizeof *SILENCE_BUF)
+                    push_n = sizeof SILENCE_BUF / sizeof *SILENCE_BUF;
+            }
+            (void)spfy_wsola_push_unit(&ws, SILENCE_BUF, push_n,
                                        sil_align);
+            /* The held tail is now gap fill, not speech. */
+            spfy_wsola_mark_tail_synthetic(&ws);
             ++interword_pauses;
-            prev_have = 0;     /* break alignment chain after silence */
-            prev_f0_end = 0;   /* unvoiced gap — disable PSOLA on next push */
+            prev_have = 0;
+            prev_f0_end = 0;
         }
-        /* Fire the SAPI/CLI word-event callback at every non-silence
-         * slot whose parent word differs from the previous one. The
-         * callback receives the current PCM sample offset (post-WSOLA),
-         * so word/sentence boundaries land at the audible word start.
-         * Used by both the CLI (writes SPFY_WORD_EVENTS_FILE sidecar)
-         * and the SAPI shim (emits SPEI_WORD_BOUNDARY for Balabolka /
-         * Narrator / etc. word highlighting). */
+        /* Fire the SAPI/CLI word-event callback at every non-silence slot
+         * whose parent word differs from the previous one. */
         if (cb && cb->word_cb && !this_is_silence
             && this_word_idx != prev_word_idx) {
-            cb->word_cb(cb->ctx, sink->n_samples_written);
+            cb->word_cb(cb->ctx, out_pos(sink, sink->n_samples_written));
         }
         if (!this_is_silence) prev_word_idx = this_word_idx;
         /* Engine-faithful batching: SWIttsWsolaConcat receives a pre-
@@ -3608,21 +5883,26 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * matching engine), eliminating the ±100ms local timing drift
          * from mismatched OLA placement. SPFY_NO_RUN_BATCH=1 reverts to
          * pair-only legacy. */
-        int no_run = (getenv("SPFY_NO_RUN_BATCH") != NULL);
+        int no_run = (spfy_env("SPFY_NO_RUN_BATCH") != NULL);
         uint32_t run_n = 1;
         if (!no_run) {
             while (s + run_n < n_slots) {
                 uint32_t v_prev = path_uids[s + run_n - 1];
                 uint32_t v_next = path_uids[s + run_n];
-                if (v_next == 0 || v_next == SILENCE_SENTINEL_UID
+                if (v_next == 0 || v_next == SILENCE_UID(v)
                     || v_next >= v->units.n_units) break;
-                if (v_next != v_prev + 1u) break;          /* engine rule */
+                if (v_next != v_prev + 1u) break;
+                /* A uid+1 run can STRADDLE A WORD BOUNDARY (the live-trace
+                 * block below documents the same thing: "a run straddling a
+                 * word boundary — e.g. */
+                if (silence_n > 0
+                    && hp_word_idx[s + run_n] != hp_word_idx[s + run_n - 1])
+                    break;
                 spfy_unit_record_t rn, rp;
                 if (spfy_unit_record_get(&v->units, v_next, &rn) != SPFY_OK) break;
                 if (spfy_unit_record_get(&v->units, v_prev, &rp) != SPFY_OK) break;
                 /* Sanity: uid+1 should always imply same file_idx and
-                 * contiguous local_pos in a well-formed VDB. Guard so a
-                 * malformed record doesn't smear a span across files. */
+                 * contiguous local_pos in a well-formed VDB. */
                 if (rn.file_idx != rp.file_idx) break;
                 if (rn.local_pos < rp.local_pos
                     || rn.local_pos > rp.local_pos + rp.dur_like + 64u) break;
@@ -3639,17 +5919,16 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 if (syl_post < tree.n_slots
                     && tree.slots[syl_post].kind == SPFY_SK_SYLLABLE) {
                     uint32_t sh = tree.slots[syl_post].fe_shared;
-                    if (sh >= 1 && (sh - 1) < fe_utt.n_syls && syl_vol[sh - 1])
-                        vol_gain = (float)syl_vol[sh - 1] / 100.0f;
+                    if (sh >= 1 && (sh - 1) < fe_utt.n_syls) {
+                        uint32_t si = spfy_syl_effective(&fe_utt, sh - 1);
+                        if (syl_vol[si])
+                            vol_gain = (float)syl_vol[si] / 100.0f;
+                    }
                 }
             }
         }
 #ifdef SPFY_TRACE
-        /* [live-trace] per-slot global word index for this WSOLA push. Advances
-         * g_wseq across EVERY slot of the run (even ones the run-batch skips),
-         * so a run straddling a word boundary — e.g. the two identical "tea"
-         * halves of "TTS" batched into one span — still records both words. The
-         * frontend splits the slice's colour at these boundaries. -1 = silence. */
+        /* [live-trace] per-slot global word index for this WSOLA push. */
         char ws_buf[1024];
         {
             const uint32_t (*cxg)[5] = (const uint32_t (*)[5])slice_ctx.ctx;
@@ -3664,33 +5943,125 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             ws_buf[wo++] = ']'; ws_buf[wo] = '\0';
         }
 #endif
-        if (run_n >= 2) {
+        /* Look ahead: if the slot right after this run starts a new word, a
+         * gap is about to be inserted, so make this push hold back enough
+         * real speech for the widened fade to work on. */
+        if (gap_fade_n > 0 && s + run_n < n_slots
+            && hp_word_idx[s + run_n] != hp_word_idx[s + run_n - 1])
+            spfy_wsola_request_tail_save(&ws, gap_fade_n);
+
+        /* Units an anchor carries past its half-phone span (see path_extra
+         * at the expansion). */
+        uint32_t extra_n = path_extra[s + run_n - 1u];
+        {
+            uint32_t last_uid = path_uids[s + run_n - 1u];
+            if (last_uid >= v->units.n_units
+                || last_uid + extra_n >= v->units.n_units)
+                extra_n = 0;
+        }
+        uint32_t emit_n = run_n + extra_n;
+        if (emit_n >= 2) {
+            /* Output offset where this run's audio starts, captured before
+             * the push so intra-run word events can be placed within it. */
+            const uint32_t run_out_start = sink->n_samples_written;
             spfy_unit_record_t r_last;
-            (void)spfy_unit_record_get(&v->units, path_uids[s + run_n - 1],
+            (void)spfy_unit_record_get(&v->units,
+                                       path_uids[s + run_n - 1] + extra_n,
                                        &r_last);
             uint32_t span = (uint32_t)r_last.local_pos
                           + (uint32_t)r_last.dur_like
                           - (uint32_t)r1.local_pos;
+            /* A uid+1 run can END on a pau pad -- e.g. */
+            /* Scan the WHOLE run: the pau can sit at either end. */
+            pau_resize_t run_pau[4];
+            uint32_t     n_run_pau = 0;
+            {
+                uint32_t sps = v->vdb.sample_rate / 1000u;
+                if (sps == 0) sps = 1u;
+                for (uint32_t k = 0; k < run_n
+                                  && n_run_pau < (uint32_t)(sizeof run_pau
+                                                            / sizeof *run_pau);
+                     ++k) {
+                    uint32_t tsmp = PAU_TARGET_SMP(s + k);
+                    if (!tsmp) continue;
+                    spfy_unit_record_t rk;
+                    if (spfy_unit_record_get(&v->units, path_uids[s + k], &rk)
+                            != SPFY_OK) continue;
+                    uint32_t nsmp = (uint32_t)rk.dur_like * sps;
+                    if (tsmp == nsmp) continue;
+                    run_pau[n_run_pau].off = ((uint32_t)rk.local_pos
+                                              - (uint32_t)r1.local_pos) * sps;
+                    run_pau[n_run_pau].nom = nsmp;
+                    run_pau[n_run_pau].tgt = tsmp;
+                    ++n_run_pau;
+                }
+            }
             int align = !prev_have || prev_file_idx != r1.file_idx;
-            /* [live-trace] emitted span (a run of consecutive UIDs collapsed
-             * into one WSOLA push). `t` is the output sample offset where
-             * this unit's audio begins; the viz maps it onto the waveform.
-             * Flask enriches uid -> phone/half/rec_name during relay. */
+            /* [live-trace] emitted span (a run of consecutive UIDs
+             * collapsed into one WSOLA push). */
             spfy_trace_eventf("unit",
                 "{\"slot\":%u,\"uid\":%u,\"lp\":%u,\"dur\":%u,\"t\":%u,\"align\":%d,\"run\":%u,\"ws\":%s}",
                 s, u, (unsigned)r1.local_pos, span,
                 sink->n_samples_written, align, run_n, ws_buf);
+            uid_dump_emit(v, phrase_idx, s, path_uids, run_n,
+                          r1.local_pos, run_out_start, sink);
             rc = append_recording_span(&ws, r1.file_idx, r1.local_pos,
                                        span, &v->feat, &v->vdb, &v->lookup, align,
                                        prev_f0_end, r1.f0_start,
-                                       v->vdb.sample_rate, vol_gain);
+                                       v->vdb.sample_rate, vol_gain,
+                                       &pros, &(unit_ref_t){ path_uids[s],
+                                             emit_n, nom_pos },
+                                       run_pau, n_run_pau);
             if (rc != SPFY_OK) { free(path_uids); goto fail; }
-            ++paired_same; played += run_n;
+            ++paired_same; played += emit_n;
             prev_have = 1;
             prev_file_idx = r_last.file_idx;
             prev_local_pos = r_last.local_pos;
             prev_dur_like  = r_last.dur_like;
             prev_f0_end    = r_last.f0_end;
+            if (pros.on)
+                for (uint32_t k = 0; k < run_n; ++k)
+                    nom_pos += pros.slot_dur[s + k];
+            /* Catch up word events for slots INSIDE the run. The per-slot
+             * callback above only sees the run's first slot, so a run that
+             * straddles a word boundary silently swallowed one event --
+             * measured as exactly one missing word per phrase ("cloudy",
+             * "Weather") against the engine's dumpwav --phonemes marks.
+             * The live-trace block does this already for its own counter;
+             * the SAPI/CLI callback did not.
+             *
+             * Offset: the whole run went out as ONE push starting at
+             * `run_out_start`, so slot k's audio begins about
+             * (local_pos_k - local_pos_first) into it. Approximate because
+             * WSOLA's crossfade shortens the real output slightly, but far
+             * better than reporting the run's start for every word in it.
+             *
+             * ⚠ local_pos is MILLISECONDS, not samples — this added the raw
+             * delta and so placed intra-run word events at 1/8 of their true
+             * offset (at 8 kHz), i.e. essentially back at the run start,
+             * which is the very failure the block exists to fix. Scale by
+             * the VDB's own rate rather than a literal 8, so a 16 kHz voice
+             * is right too. Found while adding uid_dump_emit(), which needs
+             * the identical arithmetic. */
+            if (cb && cb->word_cb) {
+                const uint32_t (*cxw)[5] =
+                    (const uint32_t (*)[5])slice_ctx.ctx;
+                uint32_t sps = v->vdb.sample_rate / 1000u;
+                if (sps == 0) sps = 1;
+                for (uint32_t k = s + 1; k < s + run_n; ++k) {
+                    uint32_t kp = hp_to_post[k];
+                    if (ctx_is_silence(v, cxw[kp][2])) continue;
+                    if (hp_word_idx[k] == prev_word_idx) continue;
+                    spfy_unit_record_t rk;
+                    uint32_t off = run_out_start;
+                    if (spfy_unit_record_get(&v->units, path_uids[k], &rk)
+                            == SPFY_OK && rk.local_pos >= r1.local_pos)
+                        off += ((uint32_t)rk.local_pos
+                                - (uint32_t)r1.local_pos) * sps;
+                    cb->word_cb(cb->ctx, out_pos(sink, off));
+                    prev_word_idx = hp_word_idx[k];
+                }
+            }
             s += run_n;
         } else {
             int align = !prev_have || prev_file_idx != r1.file_idx
@@ -3705,25 +6076,78 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     ++paired_cross;
                 }
             }
-            /* [live-trace] single-UID push (run of 1). See run>=2 note above. */
             spfy_trace_eventf("unit",
                 "{\"slot\":%u,\"uid\":%u,\"lp\":%u,\"dur\":%u,\"t\":%u,\"align\":%d,\"run\":1,\"ws\":%s}",
                 s, u, (unsigned)r1.local_pos, (unsigned)r1.dur_like,
                 sink->n_samples_written, align, ws_buf);
+            uid_dump_emit(v, phrase_idx, s, path_uids, 1u,
+                          r1.local_pos, sink->n_samples_written, sink);
+            pau_resize_t one_pau; uint32_t n_one_pau = 0;
+            {
+                uint32_t sps = v->vdb.sample_rate / 1000u;
+                if (sps == 0) sps = 1u;
+                uint32_t tsmp = PAU_TARGET_SMP(s);
+                uint32_t nsmp = (uint32_t)r1.dur_like * sps;
+                if (tsmp && tsmp != nsmp) {
+                    one_pau.off = 0u;
+                    one_pau.nom = nsmp;
+                    one_pau.tgt = tsmp;
+                    n_one_pau   = 1u;
+                }
+            }
             rc = append_recording_span(&ws, r1.file_idx, r1.local_pos,
                                        r1.dur_like, &v->feat, &v->vdb, &v->lookup, align,
                                        prev_f0_end, r1.f0_start,
-                                       v->vdb.sample_rate, vol_gain);
+                                       v->vdb.sample_rate, vol_gain,
+                                       &pros, &(unit_ref_t){ u, 1u, nom_pos },
+                                       &one_pau, n_one_pau);
             if (rc != SPFY_OK) { free(path_uids); goto fail; }
             ++played; prev_have = 1;
             prev_file_idx = r1.file_idx;
             prev_local_pos = r1.local_pos;
             prev_dur_like  = r1.dur_like;
             prev_f0_end    = r1.f0_end;
+            if (pros.on) nom_pos += pros.slot_dur[s];
             ++s;
         }
     }
-    /* End of one phrase. Accumulate stats. */
+    #undef PAU_TARGET_SMP
+    /* The contour is built on the cumulative sum of pros.slot_dur[] and
+     * sampled at nom_pos, which walks that same array. */
+    if (pros.on) {
+        double nominal = pros.contour.total;
+        if ((double)nom_pos != nominal)
+            spfy_log_warn("prosody: timeline walk ended at %llu, contour "
+                          "total is %.0f — accents are displaced; "
+                          "prosody_slot_out_dur() is out of sync with the "
+                          "concat loop",
+                          (unsigned long long)nom_pos, nominal);
+        else if (synth_is_verbose())
+            spfy_log_warn("prosody: timeline %.0f smp closed exactly; "
+                          "%.0f smp real output (%.1f%% OLA overlap)",
+                          nominal,
+                          (double)(sink->n_samples_written - pros.out0),
+                          100.0 * (nominal
+                                   - (double)(sink->n_samples_written
+                                              - pros.out0)) / nominal);
+    }
+
+    /* END OF PHRASE = end of one Wsola::process.
+     *
+     * The engine runs FUN_08ee3aa0 once PER PHRASE, not once per utterance:
+     * its unit loop finishes by emitting `hop` samples from the history
+     * buffer, and the next phrase starts over with unit 0 on the no-join
+     * path. A live capture of "Hello, world." shows exactly that -- phrase
+     * 1's first unit emits 360 = content - hop, the first-unit formula, not
+     * a blended join.
+     *
+     * Carrying one streamer across phrases instead cost 102 samples at every
+     * phrase boundary (the missing flush, less the lag the spurious join
+     * consumed). Flushing here emits the held tail and clears the history,
+     * so the next phrase's first push takes the no-join path by itself. */
+    rc = spfy_wsola_flush(&ws);
+    if (rc != SPFY_OK) goto fail;
+
     total_played += played;
     total_skipped += skipped;
     total_paired_same += paired_same;
@@ -3731,7 +6155,6 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     total_interword_pauses += interword_pauses;
     free(path_uids); path_uids = NULL;
 
-    /* Free per-phrase state so next iteration starts fresh. */
     if (vslots) {
         for (uint32_t i = 0; i < n_slots; ++i) {
             if (cbuf) free(cbuf[i]);
@@ -3757,7 +6180,17 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     free(hp_pitch_st);
     free(hp_rate_pct);
     free(syl_vol);
+    if (pros.on) {
+        spfy_pmarks_free(&pros.marks);
+        spfy_contour_free(&pros.contour);
+        free(pros.slot_dur); pros.slot_dur = NULL;
+        pros.on = 0;
+    }
     free(hp_btone); hp_btone = NULL;
+    free(hp_acctype); hp_acctype = NULL;
+    free(hp_accent); hp_accent = NULL;
+    free(hp_syl); hp_syl = NULL;
+    free(hp_nuc); hp_nuc = NULL;
     free(dag_slots); dag_slots = NULL;
     if (anchor_cands) {
         for (uint32_t i = 0; i < tree.n_slots; ++i) {
@@ -3788,16 +6221,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     fe_utt = (spfy_fe_utt_t){0};
     n_slots = 0;
 
-    /* Inter-phrase silence — DEFAULT OFF (rely on FE pad slots).
-     * Re-enable by setting SPFY_INTERPHRASE_MS=<N>. See big comment
-     * above the inter_phrase_ms_override declaration for rationale. */
+    /* Inter-phrase silence — DEFAULT OFF (rely on FE pad slots). */
     if (phrase_idx + 1 < n_phrases) {
         int sil_ms = (inter_phrase_ms_override > 0) ? inter_phrase_ms_override : 0;
         /* User `\!pN` pause before the NEXT phrase, threaded from the FE
          * parser's phrase_lead_pause_ms (set from `pau(uN)` markers that
-         * build_inline_mixed_tagged emits for embedded pause tags). The FE
-         * pipeline does not size silence from structural `pau(pN)` tokens,
-         * so this is where an explicit pause duration becomes real silence. */
+         * build_inline_mixed_tagged emits for embedded pause tags). */
         int npid = (int)phrase_idx + 1;
         if (npid < FE_PARSE_MAX_PHRASES
             && parsed->phrase_lead_pause_ms[npid] > sil_ms)
@@ -3806,13 +6235,17 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             static const int16_t INTER_PHRASE_SILENCE[16000] = {0};
             size_t cap = sizeof INTER_PHRASE_SILENCE / sizeof *INTER_PHRASE_SILENCE;
             size_t remain = (size_t)sil_ms * (size_t)v->vdb.sample_rate / 1000u;
-            int sil_align = (getenv("SPFY_WSOLA_NO_SILENCE_FADE") != NULL) ? 0 : 1;
-            while (remain > 0) {                 /* chunked: pauses can exceed 1 s */
+            int sil_align = (spfy_env("SPFY_WSOLA_NO_SILENCE_FADE") != NULL) ? 0 : 1;
+            while (remain > 0) {
                 size_t n = remain > cap ? cap : remain;
+                if (sil_align) spfy_wsola_mark_next_push_synthetic(&ws);
                 (void)spfy_wsola_push_unit(&ws, INTER_PHRASE_SILENCE, n, sil_align);
                 remain -= n;
-                sil_align = 0;                   /* fade-in only the first chunk */
+                sil_align = 0;
             }
+            /* Same as the inter-word case: the tail is now synthetic, so
+             * the next real unit must not be lag-searched against it. */
+            spfy_wsola_mark_tail_synthetic(&ws);
         }
     }
 
@@ -3832,9 +6265,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         }
     }
 
-    }   /* end for(phrase_idx) */
+    }
 
-    /* Finalize: flush WSOLA + close WAV + summary print. */
     rc = spfy_wsola_flush(&ws);
 
     if (out_stats) {
@@ -3853,6 +6285,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
 
 fail:
 cleanup:
+    /* Undo a `\s4m` before returning, on EVERY exit path -- there are no
+     * early returns in this function, so this label is the only way out. */
+    if (s4_scoped) spfy4_env_restore(&s4_scope);
+    free(split_buf);
     if (vslots) {
         for (uint32_t i = 0; i < n_slots; ++i) {
             if (cbuf) free(cbuf[i]);
@@ -3865,10 +6301,13 @@ cleanup:
     }
     free(vslots); free(cbuf); free(tbuf);
     free(cand_c68); free(cand_c6c); free(cand_c70); free(cand_c78);
-    /* v->voicing_buf is owned by spfy_voice_t (freed by spfy_voice_free). */
     free(q5_per_slot); free(q5_has);
     free(hp_to_post); free(post_to_hp); free(hp_word_idx);
     free(hp_btone);
+    free(hp_acctype);
+    free(hp_accent);
+    free(hp_syl);
+    free(hp_nuc);
     free(dag_slots);
     if (anchor_cands) {
         for (uint32_t i = 0; i < tree.n_slots; ++i) {
@@ -3887,24 +6326,35 @@ cleanup:
     spfy_slot_tree_free(&tree);
     spfy_fe_utt_free(&fe_utt);
     spfy_prosody_hints_free(&hints);
+    spfy_reselect_free(&dp_f0);
+    spfy_pmarks_free(&dp_marks);
+    /* Energy tables; all NULL when both levers were off. */
+    v->av.unit_pow = NULL;
+    v->av.unit_pow_n = 0u;
+    v->av.pow_mean = NULL;
+    v->av.pow_sd = NULL;
+    v->av.pow_rows = 0u;
+    v->av.w_pow_t = 0.0f;
+    free(unit_pow);
+    free(pow_mean);
+    free(pow_sd);
     free(etags_text);
+    free(etag_acc);
+    free(hp_tobi);
     free(etag_vol);
     free(etag_rate);
     /* Everything previously freed here individually (v->bucket, carts,
-     * v->chunks, FE, v->hpc, v->prsl, v->hash, v->pros, v->maps, v->ccos, v->lookup, v->feat,
-     * v->vcf, v->vdb, v->vin, v->voicing_buf) is owned by the spfy_voice_t and
-     * released by spfy_voice_free. */
+     * v->chunks, FE, v->hpc, v->prsl, v->hash, v->pros, v->maps, v->ccos,
+     * v->lookup, v->feat, v->vcf, v->vdb, v->vin, v->voicing_buf) is owned
+     * by the... */
     return rc;
 }
 
 
-/* Word-event sidecar writer used when SPFY_WORD_EVENTS_FILE env is set.
- * Format: one line per word, '<sample_offset>\t<word_idx>\n'.
- * Consumed by the 64-bit SAPI shim to emit SPEI_WORD_BOUNDARY events
- * after the subprocess synth completes. */
+/* Word-event sidecar writer used when SPFY_WORD_EVENTS_FILE env is set. */
 struct spfy_cli_wev_ctx {
-    FILE     *fp;       /* word events (SPFY_WORD_EVENTS_FILE)     */
-    FILE     *pfp;      /* phrase events (SPFY_PHRASE_EVENTS_FILE) */
+    FILE     *fp;
+    FILE     *pfp;
     unsigned *idx;
 };
 void spfy_cli_word_cb(void *ctx, uint32_t sample_offset);
@@ -3927,49 +6377,110 @@ void spfy_cli_phrase_cb(void *ctx, uint32_t phrase_idx,
 }
 
 /* The CLI main() is gated so this same .c file can be compiled into both
- * spfy_synth.exe and spfy_sapi.dll. SAPI defines SPFY_SYNTH_NO_MAIN to
- * exclude main() while keeping the synth core (spfy_synth_to_sink + all
- * its helpers: decode_unit_samples, append_recording_span, dag_join_cb,
- * load_f0_hist_curve) linkable. */
+ * spfy_synth.exe and spfy_sapi.dll. */
 #ifndef SPFY_SYNTH_NO_MAIN
 #include "embedded_assets.h"
+#include "pitch_shift.h"
+/* Reopen a rendered int16-mono WAV, compress its F0 contour toward `base`
+ * by `ratio` via TD-PSOLA, and rewrite it in place. */
+static int spfy_f0_flatten_wav_file(const char *path, float base, float ratio)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    uint8_t hdr[44];
+    if (fread(hdr, 1, 44, f) != 44
+        || memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0) {
+        fclose(f); return -2;
+    }
+    uint32_t sr = (uint32_t)hdr[24] | ((uint32_t)hdr[25] << 8)
+                | ((uint32_t)hdr[26] << 16) | ((uint32_t)hdr[27] << 24);
+    long data_off = -1;
+    uint32_t data_sz = 0;
+    fseek(f, 12, SEEK_SET);
+    for (;;) {
+        uint8_t ch[8];
+        if (fread(ch, 1, 8, f) != 8) break;
+        uint32_t sz = (uint32_t)ch[4] | ((uint32_t)ch[5] << 8)
+                    | ((uint32_t)ch[6] << 16) | ((uint32_t)ch[7] << 24);
+        if (memcmp(ch, "data", 4) == 0) { data_off = ftell(f); data_sz = sz; break; }
+        fseek(f, (long)sz, SEEK_CUR);
+    }
+    if (data_off < 0) { fclose(f); return -3; }
+    size_t n = data_sz / 2u;
+    int16_t *pcm = (int16_t *)malloc(n * sizeof(int16_t));
+    int16_t *out = (int16_t *)malloc(n * sizeof(int16_t));
+    if (!pcm || !out) { free(pcm); free(out); fclose(f); return -4; }
+    fseek(f, data_off, SEEK_SET);
+    if (fread(pcm, sizeof(int16_t), n, f) != n) {
+        free(pcm); free(out); fclose(f); return -5;
+    }
+    fclose(f);
+    if (spfy_f0_retarget_block(pcm, n, out, base, ratio, (int)sr) != 0) {
+        free(pcm); free(out); return -6;
+    }
+    /* Rewrite data payload in place; header/size unchanged (duration is
+     * preserved by the retarget). */
+    FILE *w = fopen(path, "r+b");
+    if (!w) { free(pcm); free(out); return -7; }
+    fseek(w, data_off, SEEK_SET);
+    size_t wr = fwrite(out, sizeof(int16_t), n, w);
+    fclose(w);
+    free(pcm); free(out);
+    return wr == n ? 0 : -8;
+}
 
-/* Resolve a tempdir for asset extraction. Caller doesn't free.
- * On Windows, prefers %TEMP%; on POSIX, $TMPDIR then /tmp.
- * Subdir name keys off the binary's mtime so a re-extract happens
- * automatically when the executable (and thus the bundled assets)
- * change — no stale-asset corner case. */
-static const char *resolve_asset_tempdir(const char *argv0)
+/* Extract the embedded FE assets and report where they landed.
+ *
+ * ⚠ NOT KEYED ON THE BINARY'S MTIME ANY MORE. It used to be, which made every
+ * rebuild a cold start: the directory name changed even though the FE tables
+ * had not, so all 22 parity workers re-extracted 728 files each and a corpus
+ * audit ran ~22 s against a ~10 s floor. The name now carries
+ * SPFY_ASSETS_DIGEST, a hash of the embedded bytes, so it survives rebuilds
+ * that leave the assets alone and necessarily changes when they do.
+ *
+ * Two candidates, in order:
+ *   1. beside the executable — durable, and SHARED with spfy_sapi.dll when
+ *      both are installed in the same directory, so the installer's elevated
+ *      regsvr32 populates it once for every user on the machine;
+ *   2. %TEMP% / $TMPDIR — for a read-only install dir, or a CLI run from a
+ *      location this user cannot write to.
+ *
+ * Returns the directory in use, or NULL if neither candidate worked. */
+static const char *resolve_assets(const char *argv0, spfy_asset_paths_t *out)
 {
     static char dir[1024];
-    const char *base = NULL;
+    char base[1024];
+
+    if (argv0 && *argv0) {
+        size_t n = strlen(argv0);
+        while (n > 0 && argv0[n - 1] != '/' && argv0[n - 1] != '\\') --n;
+        if (n > 1 && n < sizeof base) {
+            memcpy(base, argv0, n - 1);
+            base[n - 1] = '\0';
+            if (spfy_assets_dir(base, dir, sizeof dir) == 0
+                && spfy_assets_extract(dir, out) == 0)
+                return dir;
+        }
+    }
+
+    const char *tmp;
 #ifdef _WIN32
-    base = getenv("TEMP");
-    if (!base) base = getenv("TMP");
-    if (!base) base = "C:\\Windows\\Temp";
+    tmp = spfy_env("TEMP");
+    if (!tmp) tmp = spfy_env("TMP");
+    if (!tmp) tmp = "C:\\Windows\\Temp";
 #else
-    base = getenv("TMPDIR");
-    if (!base) base = "/tmp";
+    tmp = spfy_env("TMPDIR");
+    if (!tmp) tmp = "/tmp";
 #endif
-    /* Best-effort uniqueness key: mtime of argv0. Failing that, just use
-     * a fixed name. The extractor overwrites whatever's there anyway. */
-    long long key = 0;
-    struct stat st;
-    if (argv0 && stat(argv0, &st) == 0) key = (long long)st.st_mtime;
-#ifdef _WIN32
-    snprintf(dir, sizeof dir, "%s\\spfy_assets_%lld", base, key);
-#else
-    snprintf(dir, sizeof dir, "%s/spfy_assets_%lld", base, key);
-#endif
-    return dir;
+    if (spfy_assets_dir(tmp, dir, sizeof dir) == 0
+        && spfy_assets_extract(dir, out) == 0)
+        return dir;
+    return NULL;
 }
 
 /* Read an entire text file into a malloc'd, NUL-terminated buffer, with
  * trailing whitespace stripped (an editor / `echo` newline would otherwise
- * ride into the final phrase). Returns NULL on open/read/OOM failure.
- * Caller frees. Backs the -f/--file CLI option so input text can come from
- * a file instead of a shell-quoted argv — avoids the platform quoting and
- * command-line length limits that bite long inputs. */
+ * ride into the final phrase). */
 static char *read_text_file(const char *path)
 {
     FILE *fp = fopen(path, "rb");
@@ -3983,56 +6494,86 @@ static char *read_text_file(const char *path)
     size_t got = fread(buf, 1, (size_t)sz, fp);
     fclose(fp);
     buf[got] = '\0';
+
+    /* Byte-order marks, the same two spfy_dumpwav's read_file_utf8 accepts. */
+    if (got >= 3 && (unsigned char)buf[0] == 0xEF
+                 && (unsigned char)buf[1] == 0xBB
+                 && (unsigned char)buf[2] == 0xBF) {
+        memmove(buf, buf + 3, got - 3 + 1);
+        got -= 3;
+    } else if (got >= 2 && (unsigned char)buf[0] == 0xFF
+                        && (unsigned char)buf[1] == 0xFE) {
+        /* UTF-16 LE -> UTF-8, hand-rolled so this stays portable to the
+         * wasm and arm64 targets (no Win32 WideCharToMultiByte here). */
+        const unsigned char *p = (const unsigned char *)buf + 2;
+        size_t n_units = (got - 2) / 2;
+        char *u8 = (char *)malloc(n_units * 3 + 1);
+        if (!u8) { free(buf); return NULL; }
+        size_t o = 0;
+        for (size_t i = 0; i < n_units; ++i) {
+            unsigned c = (unsigned)p[i * 2] | ((unsigned)p[i * 2 + 1] << 8);
+            if (c < 0x80) {
+                u8[o++] = (char)c;
+            } else if (c < 0x800) {
+                u8[o++] = (char)(0xC0 | (c >> 6));
+                u8[o++] = (char)(0x80 | (c & 0x3F));
+            } else {
+                /* Surrogate pairs are not reassembled: the FE has no
+                 * astral-plane phonemes, so a lone replacement is more
+                 * honest than a silently mangled pair. */
+                if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD;
+                u8[o++] = (char)(0xE0 | (c >> 12));
+                u8[o++] = (char)(0x80 | ((c >> 6) & 0x3F));
+                u8[o++] = (char)(0x80 | (c & 0x3F));
+            }
+        }
+        u8[o] = '\0';
+        free(buf);
+        buf = u8;
+        got = o;
+    }
+
     while (got > 0 && isspace((unsigned char)buf[got - 1])) buf[--got] = '\0';
     return buf;
 }
 
 int main(int argc, char **argv)
 {
-    /* Two CLI forms:
-     *   5-arg (preferred):   <voice.vin> <voice.vdb> <voice.vcf>
-     *                        "<text>" <out.wav>
-     *     vocab + fe_tables_{a,b} are embedded in the binary (see
-     *     spfy/tools/embed_assets.py) and extracted to a tempdir on
-     *     first invocation; hp_class is derived from the voice's own
-     *     VIN, so this form works for EVERY voice, not just Tom.
-     *   9-arg (legacy):      adds explicit hpclass/vocab/fe_tables_{a,b}
-     *                        paths between the voice triplet and text —
-     *                        kept so audit scripts that pass exact data
-     *                        paths still work. An EMPTY hpclass argument
-     *                        selects VIN derivation, same as the 5-arg
-     *                        form.
-     *
-     * Either form accepts -f/--file <path> anywhere on the command line. It
-     * supplies the input text from a file, in which case the "<text>"
-     * positional is omitted (dropping the arg count to 4 / 8 positionals
-     * plus the flag). */
+    /* Two CLI forms: 5-arg (preferred): <voice.vin> <voice.vdb> <voice.vcf>
+     * "<text>" <out.wav> vocab + fe_tables_{a,b} are embedded in the binary
+     * (see spfy/tools/embed_assets.py) and extracted to a tempdir on
+     * first... */
     const char *vin_path, *vdb_path, *vcf_path;
     /* hpc_path MUST default to NULL: the short form never assigns it, and
      * spfy_voice_load reads paths->hpclass[0] to decide load-vs-derive. */
     const char *hpc_path = NULL;
-    const char *vocab, *tab_a, *tab_b;
+    /* NULL-initialised: both the short and legacy forms assign all three
+     * before use, but the assignments sit in different branches and GCC
+     * cannot prove it once there is a call between them. */
+    const char *vocab = NULL, *tab_a = NULL, *tab_b = NULL;
     const char *text, *out_wav;
     spfy_asset_paths_t embedded_paths = {0};
     char *file_text = NULL;
 
     /* Pull the option flags (-f/--file and its =VALUE variants, -q/--quiet,
-     * -v/--verbose) out of argv, compacting the remaining positionals down so
-     * the argc-based layout below is unchanged apart from the missing
-     * "<text>" slot. -q/-v assign the file-scope verbosity directly
-     * (last flag wins); leaving spfy_synth_verbose at -1 defers to the
-     * SPFY_VERBOSE / SPFY_SYNTH_DEBUG env vars, so an explicit flag always
-     * overrides the environment. */
+     * -v/--verbose) out of argv, compacting the remaining positionals down
+     * so the argc-based layout below is unchanged apart from the missing
+     * "<text>"... */
     const char *file_path_arg = NULL;
-    /* --trace-stream: emit the live NDJSON event stream to stdout. Recognised
-     * and stripped in BOTH builds so the positional layout matches; only the
-     * spfy_synth_trace target (SPFY_TRACE=1) actually installs the sink. */
+    /* --trace-stream: emit the live NDJSON event stream to stdout. */
     int trace_stream = 0;
+    /* --s4 / -4 turn on Speechify 4 mode; --no-s4 forces it off even when
+     * SPFY_4_MODE is exported. */
+    int s4_flag = 0;
     {
         int w = 1;
         for (int r = 1; r < argc; r++) {
             const char *a = argv[r];
-            if (strcmp(a, "-f") == 0 || strcmp(a, "--file") == 0) {
+            if (strcmp(a, "--s4") == 0 || strcmp(a, "-4") == 0) {
+                s4_flag = 1;
+            } else if (strcmp(a, "--no-s4") == 0) {
+                s4_flag = -1;
+            } else if (strcmp(a, "-f") == 0 || strcmp(a, "--file") == 0) {
                 if (r + 1 >= argc) {
                     fprintf(stderr, "%s: %s requires a file path argument\n",
                             argv[0], a);
@@ -4072,7 +6613,13 @@ int main(int argc, char **argv)
             "                      \"<text>\" argument (which is then omitted)\n"
             "  -q, --quiet         suppress per-synth diagnostics, keeping only\n"
             "                      the FE-backend banner (default)\n"
-            "  -v, --verbose       print the full FE/synth pipeline diagnostics\n",
+            "  -v, --verbose       print the full FE/synth pipeline diagnostics\n"
+            "  -4, --s4            Speechify 4 mode: the f95_k1 prosody\n"
+            "                      configuration, equivalent to SPFY_4_MODE=1.\n"
+            "                      Individual SPFY_PROSODY_* variables still\n"
+            "                      override it; see SPFY4_* near the top of\n"
+            "                      spfy_synth.c for the values.\n"
+            "      --no-s4         force the mode off, ignoring SPFY_4_MODE\n",
             argv[0], argv[0]);
         return 2;
     }
@@ -4101,17 +6648,19 @@ int main(int argc, char **argv)
         out_wav  = argv[i++];
     }
 
+    /* Speechify 4 mode. */
+    spfy4_note_vdb_path(vdb_path);
+    spfy4_mode_apply(vdb_path, s4_flag);
+
     if (short_form) {
-        const char *tmpdir = resolve_asset_tempdir(argv[0]);
-        if (spfy_assets_extract(tmpdir, &embedded_paths) != 0) {
-            fprintf(stderr, "failed to extract embedded assets to %s\n", tmpdir);
+        if (resolve_assets(argv[0], &embedded_paths) == NULL) {
+            fprintf(stderr, "failed to extract embedded assets beside %s "
+                            "or into the temp directory\n", argv[0]);
             free(file_text);
             return 1;
         }
         /* hpc_path deliberately stays NULL: spfy_voice_load then derives
-         * the hp_class table from THIS voice's VIN. Baking Tom's table in
-         * here made the short form reject every other voice on the
-         * unit-count check (jill 185475 units vs tom's 169579). */
+         * the hp_class table from THIS voice's VIN. */
         vocab    = embedded_paths.vocab;
         tab_a    = embedded_paths.tables_a;
         tab_b    = embedded_paths.tables_b;
@@ -4122,11 +6671,11 @@ int main(int argc, char **argv)
     spfy_voice_t voice = {0};
     int rc;
 
-    /* All voice tables (voice.vin/voice.vdb/voice.vcf, voice.units/voice.feat/voice.lookup, voice.ccos/voice.maps/voice.pros,
-     * voice.hash/voice.prsl, voice.durt_cart/voice.f0tr_cart, voice.chunks, voice.hpc + voice.bucket index, voice.av
-     * with voicing table, and the FE host) are loaded here in one shot.
-     * The implementation is in spfy/src/synth/spfy_synth_lib.c; this is
-     * the same code that previously lived inline in main(). */
+    /* All voice tables (voice.vin/voice.vdb/voice.vcf,
+     * voice.units/voice.feat/voice.lookup,
+     * voice.ccos/voice.maps/voice.pros, voice.hash/voice.prsl,
+     * voice.durt_cart/voice.f0tr_cart, voice.chunks, voice.hpc +
+     * voice.bucket... */
     {
         spfy_voice_paths_t paths = {
             .vin         = vin_path,
@@ -4145,19 +6694,25 @@ int main(int argc, char **argv)
     }
 
 
-
     /* [live-trace] Route the NDJSON event stream to stdout when
-     * --trace-stream was given. No-op in the normal spfy_synth build
-     * (SPFY_TRACE undefined); only spfy_synth_trace installs the sink. */
+     * --trace-stream was given. */
     if (trace_stream) spfy_trace_set_sink(stdout);
 
-    /* Open output sink (file mode for CLI; SAPI builds a callback sink). */
     spfy_wav_writer_t wav = {0};
     if ((rc = spfy_wav_open(&wav, out_wav, voice.vdb.sample_rate)) != SPFY_OK) {
         fprintf(stderr, "error opening %s: %s\n", out_wav, spfy_strerror(rc));
         spfy_voice_free(&voice);
         free(file_text);
         return 1;
+    }
+    /* SPFY_RATE=N applies a whole-utterance WSOLA time-scale in
+     * spfy_wav_close(): N<1 slows down, N>1 speeds up. */
+    {
+        const char *rv = spfy_env("SPFY_RATE");
+        if (rv && *rv) {
+            double f = atof(rv);
+            if (f > 0.25 && f < 4.0) spfy_wav_set_stretch(&wav, (float)f);
+        }
     }
 
     /* Optional word-events sidecar for the 64-bit SAPI shim, plus an
@@ -4167,9 +6722,9 @@ int main(int argc, char **argv)
     FILE *pev_fp = NULL;
     unsigned wev_word_idx = 0;
     {
-        const char *wev_path = getenv("SPFY_WORD_EVENTS_FILE");
+        const char *wev_path = spfy_env("SPFY_WORD_EVENTS_FILE");
         if (wev_path && *wev_path) wev_fp = fopen(wev_path, "wb");
-        const char *pev_path = getenv("SPFY_PHRASE_EVENTS_FILE");
+        const char *pev_path = spfy_env("SPFY_PHRASE_EVENTS_FILE");
         if (pev_path && *pev_path) pev_fp = fopen(pev_path, "wb");
     }
     struct spfy_cli_wev_ctx wev_ctx = { wev_fp, pev_fp, &wev_word_idx };
@@ -4182,11 +6737,9 @@ int main(int argc, char **argv)
         cbp = &cb;
     }
 
-    /* SPFY_PITCH_SEMITONES — shift target F0 via unit-selection bias.
-     * The synth picks naturally higher/lower-pitched units from the
-     * corpus; useful range is roughly +-3 st for Tom-family voices. */
+    /* SPFY_PITCH_SEMITONES — shift target F0 via unit-selection bias. */
     {
-        const char *pe = getenv("SPFY_PITCH_SEMITONES");
+        const char *pe = spfy_env("SPFY_PITCH_SEMITONES");
         if (pe && *pe) {
             float st = (float)atof(pe);
             spfy_synth_set_pitch_semitones(&voice, st);
@@ -4199,9 +6752,17 @@ int main(int argc, char **argv)
     if (wev_fp) { fclose(wev_fp); wev_fp = NULL; }
     if (pev_fp) { fclose(pev_fp); pev_fp = NULL; }
     spfy_wav_close(&wav);
+    /* Speechify-4 F0-flatten post-process. */
+    if (rc == SPFY_OK && out_wav && spfy_env("SPFY_SPFY4_F0_FLATTEN")) {
+        float ratio = (float)atof(spfy_env("SPFY_SPFY4_F0_FLATTEN"));
+        const char *be = spfy_env("SPFY_SPFY4_F0_FLATTEN_BASE");
+        float base = (be && *be) ? (float)atof(be) : 120.0f;
+        int frc = spfy_f0_flatten_wav_file(out_wav, base, ratio);
+        if (frc != 0 && !trace_stream)
+            fprintf(stderr, "warning: F0-flatten post-process rc=%d\n", frc);
+    }
     if (rc == SPFY_OK) {
-        /* [live-trace] terminal event — lets the viz finalize and fetch the
-         * WAV. No-op without an installed sink. */
+        /* [live-trace] terminal event — lets the viz finalize and fetch the WAV. */
         spfy_trace_eventf("done", "{\"samples\":%u,\"n_phrases\":%u}",
                           stats.samples_emitted, stats.n_phrases);
         /* Keep stdout pure NDJSON in stream mode; the human summary would
@@ -4225,4 +6786,4 @@ int main(int argc, char **argv)
     spfy_voice_free(&voice);
     return rc == SPFY_OK ? 0 : 1;
 }
-#endif /* SPFY_SYNTH_NO_MAIN */
+#endif

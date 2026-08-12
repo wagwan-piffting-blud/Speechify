@@ -10,11 +10,9 @@
 extern "C" {
 #endif
 
-/* Returns the engine's empirically-observed POS for a word in the
- * given context (`prev_word` and `next_word` may be NULL; pass the
- * sentinel "^"/"$" strings for BOS/EOS). Falls through:
- *   triple → bigram → unigram → POS_UNKNOWN.
- * Returns POS_UNKNOWN only when the word was never seen during capture. */
+/* Returns the engine's empirically-observed POS for a word in the given
+ * context (`prev_word` and `next_word` may be NULL; pass the sentinel
+ * "^"/"$" strings for BOS/EOS). */
 spfy_pos_class_t spfy_pos_context_lookup(const char *word_lower,
                                           const char *prev_word_lower,
                                           const char *next_word_lower);
