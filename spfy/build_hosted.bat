@@ -10,8 +10,10 @@ REM  phonemization matches Speechify exactly (e.g. Monday -> ...d ey,
 REM  not the in-house FE's CMUdict-primary ...d iy), then copies it
 REM  into bin/ for the viz (viz/app.py::_trace_exe finds it there).
 REM
-REM  Use build.bat (SPFY_FE_HOSTED=OFF) for the in-house / ARM / WASM
-REM  binaries; use THIS for the viz's engine-faithful tracer.
+REM  Use build.bat (SPFY_FE_HOSTED=OFF) for the in-house FE binary;
+REM  use THIS for the viz's engine-faithful tracer. The WASM and
+REM  Android targets carry their own CMakeLists and default to this
+REM  same emulator-backed FE, not the in-house one.
 REM ============================================================
 setlocal
 if "%MSYS_ROOT%"=="" set "MSYS_ROOT=C:\msys64"

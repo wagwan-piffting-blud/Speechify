@@ -321,10 +321,11 @@ int spfy_fe_open_lang(const char *lang,
     hosted_fe_t *fe = (hosted_fe_t *)calloc(1, sizeof(*fe));
     if (!fe) return -1;
 
-    /* NB: the emulator maps ONE image for the life of the process
-     * (spfy_dll_emu_boot is idempotent and returns 0 if already booted), so
-     * switching language mid-process is not supported on this backend --
-     * the first voice... */
+    /* Booting the image already mapped is a no-op; a DIFFERENT one re-maps
+     * the guest from scratch. That is what makes switching language
+     * mid-process work -- but it invalidates every guest VA, so the previous
+     * FE must already be closed. spfy_voice_free() does that before the next
+     * spfy_voice_load(), which is the only supported order. */
     if (spfy_dll_emu_boot(img->data, (uint32_t)*img->size) != 0) {
         fprintf(stderr, "[fe_host_emu] spfy_dll_emu_boot(%s) failed\n",
                 img->lang);

@@ -9,7 +9,7 @@ integration for live synthesis tracing.
 
 Five tabs, all sharing a voice selector in the top bar:
 
-1. **VIN Explorer** — every chunk in the `.vin` file gets a dedicated viewer:
+1. **VIN Explorer** - every chunk in the `.vin` file gets a dedicated viewer:
    - Unit table with pagination, phone filtering, and sortable columns
    - `feat` filename list (clickable, cross-links to VDB Explorer)
    - `mean` / `hist` statistics
@@ -19,18 +19,18 @@ Five tabs, all sharing a voice selector in the top bar:
    - `cklx` word/syllable entries with group tabs and pagination
    - `ckls` file-id index
    - `LIST`/`INFO` metadata
-2. **Trees** — SVG renderer for the `f0tr` (pitch) and `durt` (duration) CART
+2. **Trees** - SVG renderer for the `f0tr` (pitch) and `durt` (duration) CART
    trees. Leaf-count-weighted layout, viewBox pan/zoom, double-click to reset.
-3. **VDB Explorer** — recording browser. Word search, sortable by
+3. **VDB Explorer** - recording browser. Word search, sortable by
    name/duration/index, waveform view with phone-colored regions, word brackets,
    and a playback cursor.
-4. **Synthesis Tracer** — type a sentence, watch the engine pick units.
+4. **Synthesis Tracer** - type a sentence, watch the engine pick units.
    Timeline, waveform overlay, collapsible per-word halfphone detail tables,
    recording usage chart, per-candidate pruning flags. Batch view, now powered
-   by `spfy_synth_trace.exe` (same binary as tab 5) — **no Frida, no
+   by `spfy_synth_trace.exe` (same binary as tab 5) - **no Frida, no
    `Speechify.exe`, concurrency-safe.** It carries every candidate's target
-   cost, so the "pre-prune ≠ Viterbi" flag reflects genuine join-cost choices.
-5. **Live Tracer** — streamed live from *our* byte-exact reimplementation
+   cost, so the "pre-prune !== Viterbi" flag reflects genuine join-cost choices.
+5. **Live Tracer** - streamed live from *our* byte-exact reimplementation
    (`spfy_synth_trace.exe`) instead of Frida, and animated as the physical
    story of concatenative synthesis. For each chosen unit the canvas shows the
    full **source recording** from the `.vdb`, trims it down to the little
@@ -38,11 +38,11 @@ Five tabs, all sharing a voice selector in the top bar:
    flies that slice down and stitches it into a growing, recording-colored
    **output waveform** you can play back. A supporting lattice strip shows the
    Viterbi candidate search (green = low cost, red = high, gold = the pick),
-   and a ticker logs every core lookup. A **Speed** slider (0.1×–4×) scales the
+   and a ticker logs every core lookup. A **Speed** slider (0.1x-4x) scales the
    animation only; the engine and event stream always run full speed. An
-   **Audio** toggle plays the real `.vdb` samples via the Web Audio API — *Blips*
+   **Audio** toggle plays the real `.vdb` samples via the Web Audio API - *Blips*
    plays each cut slice as it lands, *Walkthrough* plays the whole source
-   recording then the isolated slice (audio-driven pacing) — and the finished
+   recording then the isolated slice (audio-driven pacing) - and the finished
    sentence auto-plays at the end. No Frida, no `Speechify.exe`.
 
 Every tool has its own URL hash (`#vin-explorer`, `#trees`, `#vdb-explorer`,
@@ -64,17 +64,17 @@ Requirements:
 
 - **Python 3.10+** (3.12 is what I use)
 - **Flask 3.0+**
-- **Frida** (Windows only, for the tracer — the rest works without it)
+- **Frida** (Windows only, for the tracer - the rest works without it)
 - The `en-US/` voice directory from the parent repo (e.g. `en-US/tom/tom.vin`
   and `en-US/tom/tom8.vdb`)
 
-If Frida isn't installed, tabs 1–3 work fine; the Synthesis Tracer will tell
+If Frida isn't installed, tabs 1-3 work fine; the Synthesis Tracer will tell
 you it's unavailable.
 
 ## Synthesis tracing mode
 
 Both tracers (tab 4 batch, tab 5 live) are now powered by
-`bin/spfy_synth_trace.exe` — our own byte-exact reimplementation. There is
+`bin/spfy_synth_trace.exe` - our own byte-exact reimplementation. There is
 **nothing to attach**: type text and hit Synthesize / Run. No `Speechify.exe`,
 no Frida, and because the trace binary is a standalone process you can run
 several at once (unlike the single-instance Speechify server).
@@ -99,27 +99,27 @@ reverse-engineering machinery in the loop.
 **How it's wired:**
 
 - `bin/spfy_synth_trace.exe` is `spfy_synth` compiled with `-DSPFY_TRACE=1`
-  (a second CMake target over the *same* source — the shipped engine and the
+  (a second CMake target over the *same* source - the shipped engine and the
   traced engine can never diverge). When run with `--trace-stream`, the
   instrumentation in `spfy/src/cli/spfy_synth.c` emits one NDJSON line per
   core lookup to stdout: `meta`, `phrase`, `slot`, `cand` (every candidate
   scored), `viterbi`, `pick`, `unit`, `done`.
 - In the normal `spfy_synth` build (and the SAPI DLL) `SPFY_TRACE` is
-  undefined, so every emit is a no-op macro that compiles away — the audio
+  undefined, so every emit is a no-op macro that compiles away - the audio
   path stays **byte-identical and full-speed**. (Verified: `spfy_synth.exe`,
   `spfy_synth_trace.exe` with the sink off, and `spfy_synth_trace.exe
   --trace-stream` all produce the same SHA-256 WAV.)
-- `app.py` exposes `GET /api/synth/stream?text=…&voice=…`, spawns the trace
+- `app.py` exposes `GET /api/synth/stream?text=...&voice=...`, spawns the trace
   binary, and relays each NDJSON line to the browser over **SSE**, enriching
   `unit`/`pick` events with phone / half / recording name from the VIN.
 - `live-tracer.js` receives events over `EventSource` into a queue, then plays
   them out on a `requestAnimationFrame` **act player** whose presentation clock
-  = realTime × the **Speed** slider (0.1×–4×). Most acts are quick (a candidate
-  dot, a pick); each `unit` act is a ~900 ms trim → fly → stitch animation on a
+  = realTime x the **Speed** slider (0.1x-4x). Most acts are quick (a candidate
+  dot, a pick); each `unit` act is a ~900 ms trim -> fly -> stitch animation on a
   `<canvas>`, using the source recording's waveform (fetched once per recording
   from `/api/vdb/waveform/<rec>` and cached). Two clocks: compute (C engine +
   relay, full speed, faithful) and presentation (browser-only, adjustable).
-  Slowing the animation never slows synthesis — every event is already in the
+  Slowing the animation never slows synthesis - every event is already in the
   browser; we just reveal it slowly.
 - Audio (Web Audio API): each recording is fetched once from
   `/api/vdb/audio/<rec>.wav` and decoded into an `AudioBuffer`; any slice is
@@ -130,12 +130,14 @@ reverse-engineering machinery in the loop.
   animation stays on the presentation clock.
 
 **Front-end (FE):** the viz binary is built with the **hosted (engine-exact)
-FE** — the real `SWIttsFe-en-US.dll` driven through the `host_emu` software x86
+FE** - the real `SWIttsFe-en-US.dll` driven through the `host_emu` software x86
 CPU ("EMULATED DLL", 100% engine UID match). So the tracers phonemize exactly
-like Speechify — e.g. `Monday` → `… d ey`, not the in-house FE's CMUdict-primary
-`… d iy`. (The default `spfy\build.bat` builds the *in-house* pure-C FE, which
-is what the ARM/WASM/Android targets use; that FE's `-day` weekday bug was also
-fixed in `spfy/tools/cmudict_codegen.py`.)
+like Speechify - e.g. `Monday` → `... d ey`, not the in-house FE's CMUdict-primary
+`... d iy`. (The default `spfy\build.bat` builds the *in-house* pure-C FE; the
+WASM and Android targets default to the same emulator-backed FE the viz uses,
+falling back to the in-house one only under `-DSPFY_WASM_INHOUSE_FE=ON` /
+`-DSPFY_FE_ANDROID_INHOUSE=ON`. That FE's `-day` weekday bug was also fixed in
+`spfy/tools/cmudict_codegen.py`.)
 
 **Rebuilding the binary** (after any engine change):
 
@@ -176,27 +178,27 @@ viz/
         └── live-tracer.js   SSE client + browser-paced event queue (tab 5)
 ```
 
-No build step. Edit any file under `static/` and refresh the browser — the
+No build step. Edit any file under `static/` and refresh the browser - the
 Flask server serves `static/` with `Cache-Control: no-store` so hot-reload
 just works.
 
 ## Troubleshooting
 
-- **"Frida not available"** — `pip install frida` on the machine running the
+- **"Frida not available"** - `pip install frida` on the machine running the
   Flask app (or the remote worker, in remote mode).
-- **Tracer shows results from a different synthesis** — make sure you're on a
+- **Tracer shows results from a different synthesis** - make sure you're on a
   build that does the fresh detach/reattach per request. Concurrent jobs on
   `Speechify.exe` will otherwise contaminate the hook output.
-- **404 on recording audio** — the VDB positional index is *not* the same as
+- **404 on recording audio** - the VDB positional index is *not* the same as
   the VIN `feat` stored_id. All lookups go through recording *name*; if you
   see 404s, you're probably hitting an old code path that used the raw index.
-- **VDB explorer shows wrong data for a recording** — double-check the voice
+- **VDB explorer shows wrong data for a recording** - double-check the voice
   dropdown. Voice data is cached per-name in `_voice_data`; restart the server
   if you've rebuilt a `.vin`/`.vdb` while it was running.
 
 ## Tips
 
-- Every table header is sortable — click to toggle asc/desc.
+- Every table header is sortable - click to toggle asc/desc.
 - Every Play button uses a shared `AudioMgr` so starting one clip stops the
   previous one. The gold playback cursor stays on the waveform through
   pause/resume.

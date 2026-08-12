@@ -2,10 +2,22 @@
 
 **Milestone:** the emulator-backed FE now ships engine-faithful (100%
 PATH UID = 8532/8532, LCS 100%) on **Windows desktop, all 4 Android
-ABIs, and WASM**. Non-x86 platforms auto-select the emulator; 32-bit
-x86 Windows/Linux desktops stay on the fast native PE path by default.
-Fallbacks to the in-house pure-C FE (91.2% audit) are still available
-via `-DSPFY_FE_ANDROID_INHOUSE=ON` / `-DSPFY_WASM_INHOUSE_FE=ON`.
+ABIs, and WASM**. It is the *only* hosted-FE backend on every target:
+the native PE-loader path that used to be the 32-bit x86 default was
+retired 2026-07-22 once the emulator proved byte-exact everywhere,
+costing ~7% wall-clock on i686. Fallbacks to the in-house pure-C FE
+(91.2% audit) are still available via `-DSPFY_FE_ANDROID_INHOUSE=ON` /
+`-DSPFY_WASM_INHOUSE_FE=ON`.
+
+**Language switching works in-process** (2026-08-12). `spfy_dll_emu_boot`
+used to return early whenever anything was already booted, so a second
+voice in another language silently kept running through the FIRST
+voice's front end — wrong phonemes, no error. It now tracks which image
+is mapped and re-boots on a different one; `mem_init` / `cpu_reset` /
+`win32_reset` already reset everything, so only the guard had to go.
+⚠ A re-boot frees all guest memory, so the previous FE must be closed
+first — `spfy_voice_free()` does that, and calling it before the next
+`spfy_voice_load()` is the only supported order.
 
 Startup banner reflects the effective backend, e.g. on a 64-bit
 Windows / Android arm64 / WASM run:
@@ -17,17 +29,33 @@ Windows / Android arm64 / WASM run:
 
 ## Phase 4a — Android (all 4 ABIs)
 
-`D:\Android\Spfy\app\src\main\cpp\` now carries host_emu + fe_host_emu.
-`libspfy.so` sizes (Release):
+`D:\Android\Spfy\app\src\main\cpp\CMakeLists.txt` compiles the engine
+straight out of this repo — `add_subdirectory` per module, plus inline
+`spfy_fe` / `spfy_synth_lib` targets, exactly as `spfy/wasm/` does. The
+repo path arrives as `-DSPFY_ROOT`, which `app/build.gradle.kts` reads
+from `spfy.root` in the (gitignored) `local.properties`.
 
-- arm64-v8a: 27.88 MB
-- armeabi-v7a: 20.92 MB
-- x86: 20.96 MB
-- x86_64: 27.61 MB
+⚠ It used to be a *vendored copy* of `spfy/src/`. That copy fell ~3
+months behind without anyone noticing — it never gained `src/prosody/`,
+so Speechify 4 mode could not link on Android at all — and was dropped
+2026-08-12. Do not reintroduce one.
 
-All 4 built via NDK 28.2.13676358 clang-19 + Ninja. Uses the same
-`embed_dll.py` codegen step as the desktop (SWIttsFe-en-US.dll baked
-into `swittsfe_data.c` at CMake configure time).
+`libspfy.so` sizes, RelWithDebInfo, before packaging strips them, with all
+three FE DLLs embedded:
+
+- arm64-v8a: 32.01 MB
+- armeabi-v7a: 24.65 MB
+- x86: 24.72 MB
+- x86_64: 31.75 MB
+
+All 4 built via NDK 28.2.13676358 clang + Ninja. Uses the same
+`embed_dll.py` codegen the desktop and wasm builds use, generating one
+`swittsfe_<lang>_data.c` per language plus a registry table that maps a
+voice's VCF language tag to its blob. `SPFY_ANDROID_FE_LANGS` embeds
+en-US, fr-CA and es-MX, covering the four shipped voices (Tom and Jill
+en-US, Felix fr-CA, Javier es-MX). Each language costs ~6.3x its DLL
+size in generated C, compiled once per ABI, so trim the list if you cut
+voices.
 
 ## Phase 4b — WASM
 
@@ -35,20 +63,20 @@ into `swittsfe_data.c` at CMake configure time).
 back to `stubs/fe_stub.c` (in-house pure-C, 91.2%) if
 `-DSPFY_WASM_INHOUSE_FE=ON`. Emscripten build outputs:
 
-- `spfy_wasm.wasm` — 11.87 MB (up from ~5 MB previously; now includes
-  the 7.1 MB embedded DLL + emulator core)
-- `spfy_wasm.data` — 89.6 MB (voice data, unchanged)
-- `spfy_wasm.js` — 71 KB (loader)
+- `spfy_wasm.wasm` — 14.33 MB (includes the embedded DLLs + emulator core)
+- `spfy_wasm.js` — 63 KB (loader)
 
-## Phase 5 — auto-select
+There is no `spfy_wasm.data` sidecar any more: voices are staged into
+`dist/voices/` by `tools/stage_voices.py` and fetched on demand at
+runtime, so the page starts on the module alone.
 
-`spfy/src/fe_host/CMakeLists.txt` now sets `SPFY_FE_EMU` default based
-on `CMAKE_SIZEOF_VOID_P`, `CMAKE_SYSTEM_PROCESSOR`, and the
-`ANDROID`/`EMSCRIPTEN` toolchain flags. `SPFY_FE_EMU=1` is promoted
-to a global compile definition (from the top-level `spfy/CMakeLists.txt`)
-so `spfy_synth.c`'s startup banner shows the right label. Explicit
-override still works: `-DSPFY_FE_EMU=OFF` on a 32-bit x86 host to force
-native, or `-DSPFY_FE_EMU=ON` on 32-bit x86 to exercise the emulator.
+## Phase 5 — one backend everywhere
+
+`spfy/src/fe_host/CMakeLists.txt` builds the emulator backend
+unconditionally; there is no `SPFY_FE_EMU` auto-select to get wrong any
+more, because there is nothing to select between. The macro survives
+only as a label for `spfy_synth.c`'s startup banner, and the wasm and
+Android CMakeLists set it on their own targets for that reason.
 
 ## Audit — post-Phase-5 re-run
 
@@ -139,9 +167,9 @@ Diagnostic that found it: `SPFY_ESPLOG=1` env-gated print in
 silent-by-default debug aid for the next time a stack-balance bug
 appears.
 
-## Phase 2 — IN PROGRESS
+## Phase 2 — DONE (original scope, kept for the record)
 
-Goal: wire `spfy/src/fe_host/fe_host.c` to call the DLL via
+Goal was: wire `spfy/src/fe_host/fe_host.c` to call the DLL via
 `spfy_dll_emu_*` (emulator) when `SPFY_FE_EMU=ON`, instead of
 `host_dll_get_proc` (native PE host) which only works on 32-bit Windows.
 
@@ -175,9 +203,10 @@ Useful env knobs:
   `call_nested` (the diagnostic that found the Phase 1 blocker)
 - `EMU_FPUTRACE=lo,hi,max` — x87 state per insn in EIP range
 
-## Reusable scratchpad
+## Triage technique worth repeating
 
-Capstone+pefile disasm scripts of DllMain / `_CRT_INIT` / SEH prolog /
-`__RTC_Initialize` / cookie-init ctor live under
-`AppData\Local\Temp\claude\...\scratchpad\dasm*.py`. Re-run
-if a future bug needs the same kind of walkthrough.
+The Phase 1 blocker was found by disassembling DllMain / `_CRT_INIT` /
+the SEH prolog / `__RTC_Initialize` / the cookie-init ctor with
+capstone + pefile and walking them by hand against the emulator's
+trace. Those throwaway scripts were not kept; the approach is the
+reusable part, together with the `SPFY_ESPLOG=1` knob below.

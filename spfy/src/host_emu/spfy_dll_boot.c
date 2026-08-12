@@ -19,6 +19,11 @@
 #include <string.h>
 
 static int g_booted = 0;
+/* Which blob is currently mapped, so a request for a DIFFERENT language
+ * re-boots instead of silently answering with the one already loaded.
+ * Compared by pointer: the images are static const arrays baked into the
+ * binary, one per language, so identity is the right test. */
+static const uint8_t *g_booted_img = NULL;
 
 int spfy_dll_emu_is_booted(void) { return g_booted; }
 
@@ -54,12 +59,20 @@ void spfy_dll_emu_write(uint32_t guest_va, const void *host_src, uint32_t n) {
 }
 
 int spfy_dll_emu_boot(const uint8_t *dll_bytes, uint32_t dll_len) {
-    if (g_booted) return 0;
+    if (g_booted && dll_bytes == g_booted_img) return 0;
     if (!dll_bytes || dll_len < 0x40) {
         fprintf(stderr, "[spfy_dll_emu] boot: bad blob (ptr=%p len=%u)\n",
                 (const void *)dll_bytes, dll_len);
         return -1;
     }
+
+    /* Re-boot: mem_init() below frees every mapped region, so any guest VA
+     * the caller still holds (an FE object, its vtable) dangles from here
+     * on. Callers MUST spfy_fe_close() the old FE first -- spfy_voice_free()
+     * does. Dropped now so a failure part-way cannot leave us claiming to be
+     * booted on an image that is no longer mapped. */
+    g_booted = 0;
+    g_booted_img = NULL;
 
     mem_init();
     cpu_reset();
@@ -87,6 +100,7 @@ int spfy_dll_emu_boot(const uint8_t *dll_bytes, uint32_t dll_len) {
     }
 
     g_booted = 1;
+    g_booted_img = dll_bytes;
     if (getenv("SPFY_EMU_VERBOSE")) {
         fprintf(stderr, "[spfy_dll_emu] boot: OK  image_base=%#x  entry_rva=%#x  size=%u\n",
                 PE.image_base, PE.entry_rva, PE.size_of_image);

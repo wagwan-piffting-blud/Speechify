@@ -41,6 +41,7 @@ CONFIG = os.path.join(ROOT, "config", "SWIttsConfig.xml")
 CONFIG_BAK = CONFIG + ".gen_demo.bak"
 SERVER_EXE = os.path.join(BIN, "Speechify.exe")
 DUMPWAV_EXE = os.path.join(BIN, "spfy_dumpwav.exe")
+
 # spfy_synth is a build artefact, so it has no fixed home. Resolved from
 # --synth, falling back to PATH; see resolve_synth().
 SYNTH_EXE = None
@@ -81,7 +82,7 @@ LANGS = ("en-US", "es-MX", "fr-CA")
 
 # The clone voices share tom.vin byte for byte and their VDB audio is
 # synthetic -- fine to demo, never admissible as evidence about SpeechWorks.
-SYNTHETIC = {"aicraig", "aimara", "aimara2"}
+SYNTHETIC = {"aicraig", "aimara", "aimara2", "improvedaimara"}
 
 DISPLAY = {
     "tom": "Tom",
@@ -92,28 +93,26 @@ DISPLAY = {
     "aicraig": "Craig",
     "aimara": "Mara",
     "aimara2": "Mara Two",
+    "improvedaimara": "Mara - Improved",
 }
 
 DEMO_TEXT = {
     "en-US": (
         "Hello. My name is {name}. I am a concatenative text to speech voice "
-        "from Speechify three point zero five, by SpeechWorks International.\n"
-        "The National Weather Service has issued a severe thunderstorm warning "
-        "for the following counties.\n"
-        "Highs in the lower 60s, with lows in the mid 40s.\n"
-        "Move to a basement or the most interior room on the lowest floor of a "
-        "building.\n"
+        "for Speechify three point zero point five, by SpeechWorks International.\n"
+        "The National Weather Service in Melburne, has issued \\![.1e] tornado warning "
+        "for. Northern Lake County in east central Florida.\n"
     ),
     "es-MX": (
         "Hola. Me llamo {name}. Soy una voz sintética de Speechify tres punto "
-        "cero cinco, de SpeechWorks International.\n"
+        "cero punto cinco, de SpeechWorks International.\n"
         "El servicio meteorológico nacional ha emitido una advertencia de "
         "tormenta eléctrica severa.\n"
         "Las temperaturas máximas estarán en los veintiocho grados.\n"
     ),
     "fr-CA": (
         "Bonjour. Je m'appelle {name}. Je suis une voix de synthèse vocale de "
-        "Speechify trois point zéro cinq, de SpeechWorks International.\n"
+        "Speechify trois point zéro point cinq, de SpeechWorks International.\n"
         "Environnement Canada a émis un avertissement d'orage violent pour les "
         "régions suivantes.\n"
         "Les températures maximales atteindront vingt-huit degrés.\n"

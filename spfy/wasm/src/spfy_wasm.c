@@ -13,10 +13,10 @@
  *
  *       Reloadable: calling it with a DIFFERENT prefix frees the current
  *       voice and loads the new one; calling it with the SAME prefix that
- *       is already loaded is a no-op that returns SPFY_OK. NB the emulator
- *       backend boots ONE FE DLL per module instance (first voice's
- *       language wins), so switching LANGUAGE must be done by tearing the
- *       whole module down and creating a fresh one — JS handles that.
+ *       is already loaded is a no-op that returns SPFY_OK. Switching
+ *       LANGUAGE works too — freeing the voice closes the FE, and opening
+ *       one whose VCF names another language re-boots the emulator on that
+ *       language's DLL. Tearing the module down is no longer required.
  *
  *   spfy_wasm_free_voice()                 -> void
  *       Drops the loaded voice (frees vin/vdb/vcf state). Same-language
@@ -148,6 +148,17 @@ int spfy_wasm_init(const char *voice_dir, const char *prefix)
     g_state.sample_rate = g_state.voice.vdb.sample_rate;
     g_state.loaded = 1;
     snprintf(g_state.prefix, sizeof g_state.prefix, "%s", prefix);
+    /* ⚠ REQUIRED for Speechify 4 mode, and easy to miss because nothing here
+     * mentions S4. `\!s4m` reaches spfy4_apply_defaults() with no argv to
+     * derive from, so it falls back to the path recorded here; without it
+     * SPFY_PROSODY_PM is never set, spfy_pmarks_load has nothing to open, and
+     * the mode turns on and silently synthesises as plain 3.0.5.
+     *
+     * The CLI calls this from main() and the SAPI shim from its own loader --
+     * both of which the wasm build excludes, which is why the tag worked
+     * everywhere except here. Any other embedder (Android/JNI) must call it
+     * too. */
+    spfy4_note_vdb_path(p_vdb);
     fprintf(stderr,
         "voice loaded: %u units, %u feat entries, sample_rate=%u\n",
         g_state.voice.units.n_units,

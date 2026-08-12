@@ -21,8 +21,10 @@ extern "C" {
 
 /* Boot the emulator and load the embedded SWIttsFe DLL bytes. Runs
  * DllMain(DLL_PROCESS_ATTACH). Returns 0 on success, -1 if anything
- * faults or the bytes don't parse as a PE32. Idempotent: a second call
- * with the same bytes is a no-op (returns 0). */
+ * faults or the bytes don't parse as a PE32. A second call with the SAME
+ * bytes is a no-op (returns 0). A call with DIFFERENT bytes re-maps the
+ * guest from scratch, which is how a language switch works -- and which
+ * invalidates every guest VA handed out so far, so release those first. */
 int      spfy_dll_emu_boot(const uint8_t *dll_bytes, uint32_t dll_len);
 
 int      spfy_dll_emu_is_booted(void);

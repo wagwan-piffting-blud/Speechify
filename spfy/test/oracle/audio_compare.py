@@ -263,7 +263,7 @@ def render_engine(items, out_dir, voice="tom"):
 
     # Speechify fixes its voice at startup, so the server must be serving
     # THIS voice before a single reference byte is rendered.
-    import server_ctl
+    import bin.server_ctl as server_ctl
     if not server_ctl.use(voice):
         ENGINE_PROVENANCE = f"UNAVAILABLE (server would not serve {voice})"
         return set()
@@ -366,7 +366,7 @@ def main():
     # Rendering a reference repoints the server, which rewrites
     # config/SWIttsConfig.xml. Put it back afterwards -- leaving the config on
     # whichever voice ran last is a trap for the next tool.
-    import server_ctl
+    import bin.server_ctl as server_ctl
     orig_voice, _ = server_ctl.read_config()
     print("rendering (engine, batched)...")
     try:

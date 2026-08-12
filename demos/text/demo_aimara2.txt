@@ -1,4 +1,2 @@
-Hello. My name is Mara Two. I am a concatenative text to speech voice from Speechify three point zero five, by SpeechWorks International.
-The National Weather Service has issued a severe thunderstorm warning for the following counties.
-Highs in the lower 60s, with lows in the mid 40s.
-Move to a basement or the most interior room on the lowest floor of a building.
+Hello. My name is Mara Two. I am a concatenative text to speech voice for Speechify three point zero point five, by SpeechWorks International.
+The National Weather Service in Melburne, has issued \![.1e] tornado warning for. Northern Lake County in east central Florida.

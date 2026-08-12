@@ -1,5 +1,5 @@
 {
-  "generated": "2026-08-10T03:31:26",
+  "generated": "2026-08-12T18:15:11",
   "format_khz": 8,
   "renders": [
     {
@@ -13,9 +13,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 159430,
+        "samples": 118910,
         "rate": 8000,
-        "seconds": 19.929
+        "seconds": 14.864
       }
     },
     {
@@ -29,9 +29,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 158664,
+        "samples": 118604,
         "rate": 8000,
-        "seconds": 19.833
+        "seconds": 14.825
       }
     },
     {
@@ -45,9 +45,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 159886,
+        "samples": 120276,
         "rate": 8000,
-        "seconds": 19.986
+        "seconds": 15.034
       }
     },
     {
@@ -61,9 +61,25 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 118514,
+        "samples": 119820,
         "rate": 8000,
-        "seconds": 14.814
+        "seconds": 14.977
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "improvedaimara",
+      "voice": "improvedaimara",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_improvedaimara.txt",
+      "wav": "demos/engine/improvedaimara.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 137040,
+        "rate": 8000,
+        "seconds": 17.13
       }
     },
     {
@@ -77,9 +93,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 148116,
+        "samples": 151276,
         "rate": 8000,
-        "seconds": 18.515
+        "seconds": 18.91
       }
     },
     {
@@ -93,9 +109,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 173554,
+        "samples": 129984,
         "rate": 8000,
-        "seconds": 21.694
+        "seconds": 16.248
       }
     },
     {
@@ -109,9 +125,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 158690,
+        "samples": 162404,
         "rate": 8000,
-        "seconds": 19.836
+        "seconds": 20.3
       }
     },
     {
@@ -125,9 +141,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 159140,
+        "samples": 119176,
         "rate": 8000,
-        "seconds": 19.892
+        "seconds": 14.897
       }
     },
     {
@@ -141,9 +157,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 159430,
+        "samples": 118910,
         "rate": 8000,
-        "seconds": 19.929
+        "seconds": 14.864
       }
     },
     {
@@ -157,9 +173,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 158666,
+        "samples": 118604,
         "rate": 8000,
-        "seconds": 19.833
+        "seconds": 14.825
       }
     },
     {
@@ -173,9 +189,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 159886,
+        "samples": 120276,
         "rate": 8000,
-        "seconds": 19.986
+        "seconds": 15.034
       }
     },
     {
@@ -189,9 +205,25 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 118654,
+        "samples": 119820,
         "rate": 8000,
-        "seconds": 14.832
+        "seconds": 14.977
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "improvedaimara",
+      "voice": "improvedaimara",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_improvedaimara.txt",
+      "wav": "demos/spfy/improvedaimara.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 137040,
+        "rate": 8000,
+        "seconds": 17.13
       }
     },
     {
@@ -205,9 +237,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 148062,
+        "samples": 151276,
         "rate": 8000,
-        "seconds": 18.508
+        "seconds": 18.91
       }
     },
     {
@@ -221,9 +253,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 173850,
+        "samples": 129984,
         "rate": 8000,
-        "seconds": 21.731
+        "seconds": 16.248
       }
     },
     {
@@ -237,9 +269,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 158534,
+        "samples": 162404,
         "rate": 8000,
-        "seconds": 19.817
+        "seconds": 20.3
       }
     },
     {
@@ -253,9 +285,9 @@
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 159140,
+        "samples": 119176,
         "rate": 8000,
-        "seconds": 19.892
+        "seconds": 14.897
       }
     },
     {
@@ -280,7 +312,7 @@
       "voice": "tom",
       "lang": "en-US",
       "synthetic": false,
-      "text_file": "cem.txt",
+      "text_file": "demos/text/cem.txt",
       "wav": "demos/spfy4m/cem_bulletin.wav",
       "rc": 0,
       "ok": true,

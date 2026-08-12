@@ -60,6 +60,20 @@ def voice_files(v):
     return [f"{p}.vin", f"{p}8.vdb", f"{p}.vcf"]
 
 
+def voice_optional_files(v):
+    """Pitch marks: required by Speechify 4 mode, absent for most voices.
+
+    Without these staged, S4 has no effect in the browser at all -- the mode
+    turns on, spfy_pmarks_load finds nothing, and synthesis silently proceeds
+    as 3.0.5. That is the whole reason `\\!s4m` appeared to do nothing in the
+    WASM build.
+
+    OPTIONAL on purpose: only Tom ships marks, and treating them as required
+    would skip every other voice out of the manifest entirely."""
+    p = v["prefix"]
+    return [f"{p}8.pmdata", f"{p}8.pmindex"]
+
+
 def same_size(path, n):
     try:
         return path.is_file() and path.stat().st_size == n
@@ -120,6 +134,14 @@ def stage_voice(v, root, out, threshold):
         print(f"  skip {v['id']}: missing {', '.join(missing)} in {vdir}",
               file=sys.stderr)
         return None
+
+    # Append whichever optional files actually exist, so a voice without
+    # pitch marks still ships and one with them gains S4 support.
+    for name in voice_optional_files(v):
+        src = vdir / name
+        if src.is_file():
+            files.append(name)
+            srcs.append(src)
 
     dst_dir = out / v["lang"] / v["id"]
     dst_dir.mkdir(parents=True, exist_ok=True)

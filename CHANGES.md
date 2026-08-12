@@ -1,5 +1,15 @@
 # Speechify Changelog
 
+2026-08-12:
+
+- Speechify 4 mode now works on **every** platform, not just the Windows CLI and SAPI. In the WASM builds, `\!s4m` used to turn itself on, and then synthesize as plain 3.0.5, which is the worst possible failure mode: no error, just plain, incorrect audio. Two things were missing on both: the loaded VDB's path was never recorded, so the prosody stage had nothing to derive the pitch-mark filenames from, and the pitch marks themselves (`tom8.pmdata` / `tom8.pmindex`) were never shipped with the voice. Both are fixed, and the pitch marks are staged as *optional* files so voices that have none still ship.
+
+- **The emulator can now switch language mid-process.** `spfy_dll_emu_boot` returned early whenever *anything* was already booted, so loading a second voice in another language silently kept running through the **first** voice's front end - Spanish text phonemized by the English FE, no error anywhere. It now records which image is mapped and re-boots on a different one; `mem_init` / `cpu_reset` / `win32_reset` already reset every piece of guest state, so only the guard had to go. A re-boot frees all guest memory, so the previous FE must be closed first - `spfy_voice_free()` does, and that ordering is now the documented contract.
+
+- Add and ship a new and improved AI Mara voice. This is very similar to the existing AI Mara cloned voice, but uses Jill as a base instead of Tom, and has a much more natural and realistic-sounding pitch contour and timbre. The new AI Mara voice is available for both Speechify and spfy usage. Give it a try and let me know what you think! Feedback is always welcome. The old AI Mara voice is still available for use, but it is now considered deprecated.
+
+---
+
 2026-08-11:
 
 - Initial release of the Speechify project changelog. This is similar to other changelogs I maintain in my other repositories (like EAS Tools).

@@ -593,7 +593,7 @@ def main() -> int:
     # config/SWIttsConfig.xml. Put it back: leaving the config on whichever
     # voice happened to be last is a trap for the next tool that assumes it
     # is still serving Tom.
-    import server_ctl
+    import bin.server_ctl as server_ctl
     orig_voice, _orig_lang = server_ctl.read_config()
 
     summaries = []
