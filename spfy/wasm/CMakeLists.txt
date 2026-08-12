@@ -54,6 +54,10 @@ add_subdirectory(${SPFY_ROOT}/src/cart        ${CMAKE_BINARY_DIR}/_cart)
 add_subdirectory(${SPFY_ROOT}/src/usel        ${CMAKE_BINARY_DIR}/_usel)
 add_subdirectory(${SPFY_ROOT}/src/wsola       ${CMAKE_BINARY_DIR}/_wsola)
 add_subdirectory(${SPFY_ROOT}/src/dsp         ${CMAKE_BINARY_DIR}/_dsp)
+# src/cli/spfy_synth.c is compiled into spfy_synth_lib below and calls the
+# Speechify 4 prosody stage (spfy_pmarks_*, spfy_contour_*, spfy_reselect_*),
+# so this is not optional -- without it wasm-ld fails on ~20 undefined symbols.
+add_subdirectory(${SPFY_ROOT}/src/prosody     ${CMAKE_BINARY_DIR}/_prosody)
 add_subdirectory(${SPFY_ROOT}/src/g2p         ${CMAKE_BINARY_DIR}/_g2p)
 add_subdirectory(${SPFY_ROOT}/src/text_norm   ${CMAKE_BINARY_DIR}/_text_norm)
 
@@ -226,7 +230,7 @@ target_include_directories(spfy_synth_lib
 )
 target_link_libraries(spfy_synth_lib
     PUBLIC spfy_voice spfy_usel spfy_cart spfy_wsola spfy_dsp
-           spfy_fe spfy_fe_internal spfy_common
+           spfy_fe spfy_fe_internal spfy_prosody spfy_common
 )
 # spfy_synth.c prints a one-time "[spfy] FE backend: ..." banner keyed off
 # SPFY_FE_EMU / SPFY_FE_HOSTED. The macro drives only that string — the
@@ -257,6 +261,7 @@ target_link_libraries(spfy_wasm PRIVATE
     spfy_usel
     spfy_wsola
     spfy_dsp
+    spfy_prosody
     spfy_g2p
     spfy_text_norm
     spfy_fe_internal
