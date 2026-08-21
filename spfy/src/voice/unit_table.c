@@ -167,13 +167,22 @@ int spfy_unit_record_get(const spfy_unit_table_t *t, uint32_t uid,
     out->phone_center   = p[t->off_phone_center];
     out->is_first_half  = p[t->off_is_first_half];
     /* The byte between is_first_half and phone_ctx[] is a per-voice constant
-     * (Tom 3, Javier 4, Felix 5; Jill 3) -- not exposed. The engine only
-     * tests it for != 0 in FUN_08e89530, so the gate is degenerate: it
-     * always passes, meaning the syl-advance gate is effectively "not first
-     * iter && local_34 < last_hp". The advance walks through
-     * syl_idx_per_hp[] until the value changes from the prior local_10.
-     * Our code previously had an `is_first_half != 0` gate that caused
-     * under-advancing for multi-syllable spans. */
+     * (Tom 3, Javier 4, Felix 5; Jill 3) -- not exposed, and in fact never
+     * even stored: the loader's `puVar16 = puVar7 + 7` steps straight over it,
+     * so nothing can read it and its value cannot matter.
+     *
+     * ⚠ THE FUN_08e89530 SYL-ADVANCE GATE IS NOT THIS BYTE. An earlier note
+     * here claimed the gate tested this per-voice constant and was therefore
+     * degenerate. It tests in-memory +0x15, and the loader fills that from
+     * DISK +0x15 -- is_first_half. usel/anchor_score.c has the full
+     * derivation and implements the gate correctly; only this comment was
+     * stale. The advance walks syl_idx_per_hp[] until the value changes from
+     * the prior local_10.
+     *
+     * What the field means, measured on the shipped voices rather than taken
+     * from its name: tom flags 19.65% of units and jill 19.93%, median gap 4
+     * half-phones and mean 4.8 -- one flag every ~2.4 phones, i.e. a SYLLABLE
+     * START. A half-phone inventory cannot be 20% "first halves". */
 
     if (t->off_phone_ctx == OFF_ABSENT) {
         /* v100005 stores no phone context. */

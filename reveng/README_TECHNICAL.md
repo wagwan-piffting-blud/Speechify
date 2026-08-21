@@ -3276,3 +3276,188 @@ The `name` attribute is the priority (compared against `tts.engine.dictionaryDef
   same-recording preference is the uid adjacency check at `0x8E8B854` (free transition for
   uid == prev_uid + 1). A Frida code cave at this address can add a penalty (Exp 56), but
   the prune threshold (Exp 59) has more impact than penalty magnitude.
+
+---
+
+### `labl` is Festival's `darpa` phoneset (MEASURED 2026-08-16)
+
+`trhd/labl` (175 bytes in both `durt` and `f0tr`) is a length-prefixed string
+table: `u32 count`, then `count` records of `u16 len` + `len` bytes. Tom has
+**47 entries: 46 named phones + one zero-length entry at the end.** It carries
+phone labels only -- no feature names, no symbolic content.
+
+Diffed against `festival/lib/darpa_phones.scm` (the definition is stable across
+Festival versions; checked on 2.5.0):
+
+```
+common        : 44
+VIN only      : ix, xx
+Festival only : axr, em, nx
+```
+
+**Speechify's phoneset is Festival's `darpa` set**, minus three rare allophones,
+plus `ix` (reduced high vowel) and `xx` (the null/unknown symbol). This is the
+first hard confirmation that Festival *data* -- not just Festival architecture --
+is inside the shipped voices.
+
+#### The multi-value `ques` sets are natural classes over the darpa features
+
+Of `durt`'s 154 questions, 23 are multi-value on types 3/4 (`phone_left` /
+`phone_right`). Tested against every class definable from `darpa_phones.scm`
+distinctive features using at most two constraints (`ix` supplied as
+vowel/+/schwa/high/front/-, `xx` as silence):
+
+| set | verdict |
+|-----|---------|
+| 19 phones | **EXACT** `syl=+` (syllabics) |
+| 14 phones | **EXACT** `type=vowel AND length!=schwa` (full vowels) |
+| `k p t` | **EXACT** `manner=stop AND voicing!=+` |
+| `ax ix` | **EXACT** `length=schwa` (reduced vowels) |
+| `hh k p t` | union of two classes |
+| 33 phones | voiced (`syl=+ OR voicing=+`), J=0.94 |
+| `en m n ng` | nasals -- note Festival's table wrongly types `en` as `stop`; Speechify groups it with the nasals, i.e. **they corrected the entry** |
+| `b d dh dx g` | voiced stops + `dh` |
+| `f s sh` / `z zh` | voiceless / voiced sibilants |
+| `ao aw ow` / `ae ay ey oy` | back-round / diphthong-ish, hand-tuned |
+
+Score: **7/23 exact, 2/23 unions, and every remaining set is within one or two
+phones of a feature-defined class.**
+
+Reading: the question inventory was **generated from a distinctive-feature
+phoneset and then hand-tuned**, which is the standard festvox workflow. It is
+therefore largely *derivable* rather than inventable -- a question generator over
+`darpa_phones.scm` plus a small edit list reproduces most of it.
+
+Caveats that bound the win: only 23 of 154 `durt` questions are multi-value (117
+are single-value and trivially enumerable), `f0tr` has **zero** multi-value phone
+questions, and none of this touches the corpus-derived chunks (`hash` 22 MB,
+`prsl` 4.9 MB, `unit` 4.9 MB, `ccos` 1.6 MB).
+
+#### Lineage note: build side Festival, runtime side Flite
+
+None of the runtime's Flite strings (`item_add_daughter: already in relation`,
+`VAL: tried to access %s in %d type val`, `Relation: %s not present in
+utterance`, `ffeature: unknown directive`) appear anywhere in Festival 2.5.0 or
+speech_tools. `daughtern` appears only in Festival docs/testsuite Scheme, i.e. as
+a feature-path name, not as source. Combined with the `cst_val` type registry
+(`wave relation item utterance itemfunc uttfunc features`) found in
+`SWIttsEngine.dll`, the runtime is **Flite-lineage C**, while the build side is
+**Festival Scheme** (`(setup_usel_voice ...)`, `lisp_*` feature functions,
+`meansd`, wagon-shaped CARTs). Build in Festival, compile down for a Flite-style
+runtime -- the standard CMU pattern of that era.
+
+Still open: `lisp_mod_tobi_accent`, `lisp_mod_tobi_endtone`,
+`lisp_stress_and_accent`, `lisp_stress_and_2accents`,
+`lisp_final_boundary_strength`, `lisp_initial_boundary_strength` are **absent
+from Festival 2.5.0**. They may be stock Festival 1.4.x, festvox, or
+SpeechWorks-authored. Checking a 1.4.2/1.4.3 tree would settle it and decide
+whether those feature functions are reusable as-is.
+
+---
+
+### Festival 1.4.2/1.4.3 provenance sweep (MEASURED 2026-08-16)
+
+Source trees: `C:\tmp\fest\{fest1.4.2,fest1.4.3,spch1.2.2,spch1.2.3,doc1.4.2,doc1.4.3}`.
+
+#### Runtime lineage: CLOSED
+
+The five Flite identifiers found in `SWIttsEngine.dll` / `SWIttsUSel.dll` --
+`item_add_daughter`, `item_add_daughter: already in relation`, `VAL: tried to
+access %s in %d type val`, `Relation: %s not present in utterance`, `ffeature:
+unknown directive` -- return **0 files** across Festival 1.4.2, 1.4.3,
+speech_tools 1.2.2 and 1.2.3 (and 2.5.0, checked earlier). The runtime is
+**Flite-lineage C**, not Festival C++, at every version SpeechWorks could have
+used. Build side Festival, runtime side Flite.
+
+#### `feat` is a clunits `feats` dump
+
+`lib/clunits_build.scm`:
+
+```scheme
+(define (acost:dump_features_utype utype uitems utterances params)
+  (let ((fd (fopen ... (get_param 'feats_dir params "feats/") utype
+                       (get_param 'feats_ext params ".feats") "w"))
+        (feats (car (cdr (assoc 'feats params)))))
+    (mapcar (lambda (s)
+              (mapcar (lambda (f) (format fd "%s " (item.feat s f))) feats)
+              (format fd "\n"))
+            uitems)))
+```
+
+The feature list is a **`feats` key inside `clunits_params`**, and each unit's
+row is `item.feat` per feature. Our documented 16-key `feat` table is exactly
+this structure: `name start duration dur_z pitch pitch_z voice voice_z power
+power_z lisp_initial_boundary_strength lisp_final_boundary_strength
+Syllable.stress lisp_mod_tobi_accent lisp_mod_tobi_endtone filename`.
+
+`Syllable.stress` is Festival feature-path syntax and appears verbatim in
+`speech_tools/lib/example_data/wagon.desc` (identical in 1.2.2 and 1.2.3).
+
+#### ToBI values are Festival's, the `lisp_` wrappers are not
+
+`lib/tobi_rules.scm` label inventory (occurrence counts):
+
+```
+L* 180   H* 109   L+H* 90   !H* 84   L+!H* 7   H+!H* 4   L*+!H* 1
+L-L% 65  L-H% 59  H- 59  H-L% 56  L- 55  H-H% 5
+```
+
+from `f2b_int_accent_cart_tree` / `f2b_int_tone_cart_tree` ("A CART tree for
+predicting ToBI accents (learned from f2b)"). **Every real value in our
+documented `lisp_mod_tobi_accent` / `lisp_mod_tobi_endtone` enumerations is in
+that inventory** (the rest are `0`, `NONE`, `OTHER` sentinels).
+
+But the six function names -- `lisp_mod_tobi_accent`, `lisp_mod_tobi_endtone`,
+`lisp_stress_and_accent`, `lisp_stress_and_2accents`,
+`lisp_final_boundary_strength`, `lisp_initial_boundary_strength` -- return
+**0 hits in 1.4.2, 1.4.3 and 2.5.0**. So the *labels* are Festival's; the
+`lisp_` wrappers around them are festvox-era or SpeechWorks-authored. Likewise
+`dur_z`, `pitch_z`, `power_z`, `voice_z`: 0 hits, SpeechWorks-defined.
+
+#### `mean` chunk == EST `meansd`
+
+`speech_tools/include/EST_track_aux.h`:
+
+```cpp
+void meansd(EST_Track &a, float &m, float &sd, int channel);
+void meansd(EST_Track &a, EST_FVector &m, EST_FVector &sd);
+```
+
+This is the utility behind USel's `load_index() - meansd` and the `_z` features:
+per-channel mean and standard deviation over a track, stored and reapplied to
+Z-normalise pitch/power/duration.
+
+#### `clunits_params` key vocabulary (the ancestor of `(setup_usel_voice ...)`)
+
+```
+catalogue_dir  clunit_name_feat  cluster_merge  cluster_prune_limit  db_dir
+disttabs_dir  disttabs_ext  feats  feats_dir  feats_ext  index_name
+join_method  trees_dir  trees_ext  unittype_prune_threshold  utts_dir
+utts_ext  wagon_balance_size  wagon_cluster_size  wagon_field_desc
+wagon_other_params  wagon_progname
+```
+
+`join_method` is the direct ancestor of `tts.voiceCfg.join` and of USel's
+`Must configure a join method` / `*** Using join cache for joincost ***`.
+
+#### Stage -> chunk map
+
+| Festival clunits stage | Speechify chunk |
+|---|---|
+| `acost:db_utts_load` + `find_same_types` + `name_units` | `ckls` / `cklx` |
+| `acost:dump_features` -> `feats/<utype>.feats` | `feat` (134,266 B) |
+| `acost:utts_load_coeffs` + EST `meansd` | `mean` (2,952 B) |
+| `acost:build_disttabs` -> `disttabs/<utype>.disttab` | `hash` (22,100,640 B) |
+| `acost:find_clusters` (wagon cluster trees) | **not used** -- Speechify uses `prsl` preselection + Viterbi instead |
+| `acost:collect_trees` | `durt` / `f0tr` (prosody CARTs, different role) |
+| `acost:save_catalogue` -> `EST_File index` | `unit` (4,917,812 B) |
+
+`src/modules/clunits/cldb.cc` catalogue keys are `name fileid start middle end`;
+ours are `name filename start duration`.
+
+#### Corpus scale, from the vendor's own catalogue
+
+The `feat` table's `filename` key enumerates **8,118 categorical values**
+(`date_001` .. `weather7_082`) -- Tom's corpus is 8,118 utterances recorded in
+**domain blocks** (date, weather, ...). The `name` key has **92 values**
+(`aa1,aa2 .. zh1,zh2`) = 46 phones x 2, confirming half-phone units.

@@ -1059,3 +1059,662 @@ units with durations matching the predicted target.**
 8. **NEW**: How exactly does f0tr data flow into WSOLA pitch mark smoothing? The mode 0 path loads pitch marks per-unit from VDB and uses `FUN_08ee23d0` to process them -- needs further decompilation.
 9. **SOLVED (2026-04-07)**: Emphasis system fully mapped. `FUN_08e8a250` in SWIttsUSel.dll reads `word_prominence` from frontend, maps to 3 emphasis levels, applies F0/DUR offsets to scoring targets. Triggered via SSML `<emphasis>` tags. Never enabled in shipped VCFs but fully functional. See README_TECHNICAL.md for full details.
 10. **SOLVED (2026-04-07)**: SWIttsLex.dll fully mapped. XML dictionary parser using Xerces DOM. DTD embedded in DLL. Entries scored by language match (100=exact, 50=prefix). Registered via `tts.engine.dictionaries` in SWIttsConfig.xml with priority > 10000. See README_TECHNICAL.md.
+
+---
+
+## Build-Tooling Forensics: what MADE Speechify (2026-08-16)
+
+Evidence source is the shipped binaries in `bin/` only (PE headers, Rich headers,
+CodeView PDB paths, CVS `$Id$` keywords, .rdata string tables, import/export
+tables). No voice-data files were used to derive any of this.
+
+### 1. Compiler, linker, build host
+
+Every SpeechWorks-authored module is MSVC 7.1 (Visual C++ .NET 2003),
+compiler build **13.10.3077**, linker **7.10**, `cvtres` 7.10.3052. Uniform
+across the whole tree -- no mixed-toolset modules.
+
+Build-machine source root, from the CodeView PDB paths:
+
+```
+C:\Speechify_3.0.5\Build_5046\i386-win32\Speechify30\<subsystem>\src\build\i386-win32\release\<module>.pdb
+```
+
+The `<config>\i386-win32\<release|ndebug>` shape is a Unix-style recursive
+makefile layout ported to Win32, not a VS solution layout. `Build_NNNN` is an
+automated build counter:
+
+| build | date | contents |
+|-------|------|----------|
+| 5040 | 2005-02-15 | all `SWIttsFe-*` front-ends + `SWIttsRom-ja-JP` (ProductVersion 3.0.5.5040) |
+| 5045 | 2005-02-14 16:08:36Z | the five `Spfy<Voice>8.exe` voice launchers |
+| 5046 | 2005-02-15 21:18:39Z | everything else -- one linker pass, identical stamp on 30+ modules |
+
+**Anomaly worth keeping**: `SWItts.dll` and `SWIttsLogging.dll` carry PE stamp
+`2005-02-18 17:01:37Z` and their PDB root is `C:\Speechify_3.0.5\spfy-Rel3-0-5\`
+-- a *branch checkout*, not a numbered build tree. Those two were rebuilt by hand
+off the release branch three days after the official build, and `utils.c` in the
+first is stamped `2005/02/17 21:15:50` -- i.e. a post-release hotfix that never
+got a build number. Anything that depends on exact `SWItts.dll` behaviour should
+assume it is one revision ahead of the rest of the product.
+
+### 2. Version control: CVS, one dominant committer
+
+The `$Id$`/`$Name$` keywords were left expanded in the shipped `.rdata`.
+150 rows across the binaries, 112 distinct source files. Revision shapes are
+`1.1.2.x` (81) and `1.2.2.x` (46) -- branch numbering, i.e. files added on a
+release branch off 1.1/1.2. `$Name:  $` is empty in all 24 occurrences, so the
+build was made from a **branch head, not a tag**.
+
+Committers visible: `dmeyer` (133), `mpanacci` (9, all `swichar`), `dave` (3),
+`kkujawsk` (2, `ttsDict`), `gnantel` (2), `ddeac` (1). Commit-date histogram
+peaks in 2003/04-2003/11 (engine written) and 2005/02 (release scramble, 47).
+
+The unit-selection sources (`usel_*.cpp`) are all 2003-04 -> 2003-10. That is
+the window in which the voice format and its build tooling stabilised.
+
+### 3. Subsystem map (module -> CVS subtree)
+
+```
+ttsEngine\src\engine  SWIttsEngine.dll        ttsProxy\src    Speechify.exe, SWItts.dll,
+ttsEngine\src\usel    SWIttsUSel.dll                          SWIttsServer.dll, Spfy*8.exe
+ttsEngine\src\wsola   SWIttsWsola.dll         ttsSAPI\src     SAPI5Speechify.dll, spfySAPIUI.dll
+ttsEngine\src\util    SWIttsEngineUtil.dll    ttsDict\src     SWIttsLex.dll, SWIttsPhoneConv.dll,
+ttsEngine\src\config  SWIttsConfig.dll                        SWIttsMigrateDictToXML.exe
+ttsSSML\src           SWIttsSSML.dll          ttsEmail\src    SWIEmail.dll
+ttsLog\src            SWIttsLogging.dll       eti\obj\...     SWIttsFe-*.dll, SWIttsRom-ja-JP.dll
+```
+
+Plus vendored platform libraries from the **OpenSpeech Browser / PIK** product
+line, carried inside the same tree: `SBinet`, `SBlog`, `slee` (SLEE),
+`VXIinterfaces`, `SWIutil`, `swichar`, `monitor`. `VXIvalue.dll` still has its
+own PDB root `C:\SPEECH~1\VXI10\VXIinterfaces\...` and is described as
+"OpenSpeech Browser PIK Value Types" -- it was copied in as a built artifact,
+not rebuilt.
+
+### 4. The offline voice compiler linked `ttsEngine\src\util` (strongest evidence)
+
+`SWIttsEngineUtil.dll` exports a **complete RIFF writer**:
+
+```
+SWIttsRiffWriter::create(const char*, const char*, SWIttsRiffEncryption)
+  openChunk / closeChunk / writeFOURCC / writeInfoChunk
+  writeByte(s) / writeWord(s) / writeDWord(s) / writeFloat(s)
+  writeStringZ / writeStringW / getChunkDepth
+```
+
+`?create@SWIttsRiffWriter@@...W4SWIttsRiffEncryption@@@Z` -- the writer takes an
+**encryption mode enum**, the same parameter the reader takes.
+
+Import scan across every module in `bin/`: **nothing imports a single
+`SWIttsRiffWriter` symbol.** Only `SWIttsRiffReader` is imported, by
+`SWIttsUSel.dll` and `SWIttsWsola.dll`, and only 6 of its methods
+(ctor/dtor/create/openChunk/closeChunk/readBytes).
+
+The runtime never writes a voice file, so the writer is dead code in the shipped
+product. It is present because `ttsEngine\src\util` was a **library shared
+between the runtime and the offline voice-build tool**, and the tool is what
+called the writer. Corollaries:
+
+- The voice compiler was a **C++ program inside the same CVS tree**, built with
+  the same MSVC 7.1 toolchain -- not an external/Unix-only pipeline.
+- Encryption of the voice files is a *parameter of the writer*, chosen by the
+  build tool at emit time, not a separate post-processing step.
+- The typed write API (`writeFloats`, `writeStringZ`, `writeFOURCC`) is the exact
+  surface any reimplementation should target; `SWIttsRiffReader.cpp` and
+  `SWIttsRiffWriter.cpp` are a matched pair (`1.1.2.3` / `1.1.2.4`, both
+  2003-04-23/30, author `dmeyer`).
+
+### 5. The runtime embeds Flite (CMU's C Festival)
+
+Verbatim Flite strings in `SWIttsEngine.dll`:
+
+```
+item_add_daughter: already in relation
+Relation: %s not present in utterance
+VAL: tried to access %s in %d type val
+NoName
+```
+
+with the Flite `cst_val` typed-object registry adjacent in .rdata:
+`wave, relation, item, utterance, itemfunc, uttfunc, features`.
+
+`SWIttsUSel.dll` adds the feature-function layer:
+`ffeature`, `ffeature: unknown directive "%s" ignored`, `daughter1`,
+`daughtern`, `parent`, `relations`, `ffunctions`, `features`.
+
+Festival relation names appear as literals: `Segment`, `Syllable`,
+`SylStructure`, `Intonation`, `IntEvent`, `Phrase`, `Word`, `Target`,
+`WordStructure`.
+
+Festival feature names appear as literals, including **Scheme-implemented ones
+that only make sense if the feature set was authored in Festival**:
+
+```
+lisp_mod_tobi_accent      lisp_mod_tobi_endtone
+lisp_stress_and_accent    lisp_stress_and_2accents
+lisp_final_boundary_strength  lisp_initial_boundary_strength
+syl_break onsetcoda syl_final syl_initial word_final word_initial
+accpos wordpos syllinword syllpos syllfoot contentp wordprom
+pitch_z power_z mpitch stress closure aspiration fw_ident
+```
+
+The `lisp_` prefix is Festival's marker for "feature function implemented in
+Scheme". Their survival as C string literals in a 2005 Win32 DLL means the
+feature descriptions were carried across verbatim from a Festival voice recipe.
+
+Loader diagnostics in `SWIttsUSel.dll` name the model files the recipe produced:
+
+```
+load_index() - meansd            (mean/sd normalisation stats: pitch_z, duration, filename)
+load_tree: ... question id %d num_questions %d   (CART trees -- wagon-style)
+Loading duration trees / Loading F0 trees / Loading context tables
+load_f0_prob_histos()            (F0 probability histograms)
+load_syl_and_phrase_pos_costs()
+load_preselection_cache_data / load_join_cost_hash / load_edge_frames
+load_chunky_index: unitinfo file version %d
+```
+
+Conclusion: the back-end voice build was a **Festival/Festvox-lineage
+clunits-style pipeline** -- CART trees for duration and F0, mean/sd feature
+normalisation, half-phone units with join-cost caching -- whose outputs were
+then packed by the in-tree C++ RIFF writer.
+
+### 6. The `.vcf` predecessor: loose files and a Scheme voice description
+
+`SWIttsConfig.dll` carries default paths that predate the packed container:
+
+```
+${xml:base}/${tts.voice.name}.CONFIG
+${xml:base}/${tts.voice.name}.PHONES
+${xml:base}/${tts.voice.name}.PROSCOST
+${xml:base}/${tts.voice.name}.HISTO
+${xml:base}/${tts.voice.name}.CKINDEX
+```
+
+plus keys with no default path: `tts.voiceCfg.speechdb`, `.index`, `.ckindex`,
+`.coderdb`, `.edgeFrames`, `.presel`, `.join`, `.pmdata`, `.pmindex`.
+
+Adjacent in the same string block, **Scheme source fragments**:
+
+```
+(setup_usel_voice          (set! usel_params          (set! wsola_params
+(set! ckindex              (set! coderdb              ))
+```
+
+immediately followed by a wide `"r"` (an `_wfopen` read mode) and `%s%s%s%d`
+format strings. So `SWIttsConfig` contains a *parser* for a Festival-style
+`(setup_usel_voice ...)` voice-description file -- the build tool's native
+output -- which it maps onto the shipped XML/`tts.voiceCfg.*` namespace.
+
+This is corroborated by the Migration Guide (Dec 2003): *"All of the Speechify
+voices have been repackaged in a new format for 3.0."* The packaging change is
+loose Festival-era files -> one encrypted RIFF container per voice.
+
+The full `tts.voiceCfg.*` namespace -- every knob the build tool had to emit --
+is enumerated verbatim in the DTD embedded in `SWIttsConfig.dll` under
+`<!ENTITY % voice_cfg_param_id '...'>`.
+
+### 7. The front-end is a different company's toolchain
+
+`SWIttsFe-*.dll` PDB paths:
+
+```
+C:\Speechify_3.0.5\Build_5040\i386-win32\Speechify30\eti\obj\win32_x86_common_cl\ndebug\sdk\product\mf\inline\salsa\<lang>\<lang>.pdb
+```
+
+`eti` = **Eloquent Technology, Inc.**; `salsa` is the project codename; language
+dirs are ISO 639-2 (`enu`, `ena`, `eng`, `deu`, `esm`, `frc`, `fra`, `jpn`,
+`ptb`, `jpnrom`).
+
+The DLLs are 90%+ generated code (Rich header: 123-133 C translation units
+vs 15 C++, `.text` 5.9 MB in en-AU) and contain the **Delta system** runtime:
+
+```
+There are too many interactive lfiles; use a bigger -lfiles argument on the DeltaTools command line
+delta insert [%s%s     delta project     delta delete %s ^_%s
+delta delete %s ^left...^right     set ^_%s = ^_%s     set %s = ^right
+"%s" is not a token name in stream "%s"     The delta is correct.
+pgmwin  cmdwin  DELTIO  cmdout  COMMAND  STATEMENT
+LFILE OPEN / LFILE ASSIGN / LFILE REMOVE   Logical file %s is not open for output
+enu.ddl   enu.syn   delta%i.%s   audio.cdv
+```
+
+`DeltaTools` is the compiler driver; `.ddl` is the Delta rule source/description
+compiled into the DLL; logical files `wordsin/wordsout/cmdfile/cmdout/pgmout/
+sprout/consprout/errorout/prmout/execfile/prompt` are Delta's I/O model; the
+`^left`/`^right`/`^_name` markers are Delta stream sync marks -- the same
+mechanism the dictionary code complains about
+(`Left sync mark for dictionary lookup not in stream`).
+
+The ETI-Eloquence identity is explicit: `ECIoutput`, `Concatenative ECI Output`,
+`Eloquence program output`, `Eloquence output`,
+`Unable to get error message from Eloquence.`, `Copy Protect: Off`, with a
+SpeechWorks-added `SpeechifyInput` stream and a `phonesAssigned` attribute.
+
+Dictionary set: `maindict, abbrdict, rootdict, worddict, hugedict, disambigDict,
+userdict`.
+
+The Delta attribute vocabulary is the front-end's whole linguistic feature set,
+e.g. `ADeclnScale/ADeclnLevel/BDeclnScale/BDeclnLevel/Midline/Rangeval`
+(F0 declination), `bound_tone/phr_tone/nuc_tone`, `brk_priority`, `acc_valu`,
+`stress_level`, `place_of_artic/manner_of_artic/sonority/voicing/backness`,
+`category/subcat/noun_verb_s/contrac/origin/number`.
+
+A **Klatt formant synthesiser** is still linked in, with an IBM copyright:
+
+```
+KlattID version 4.0
+ International Business Machines, Inc. 1996, 1997
+Call KlattSetConstParms at least once before KlattOpen!
+Synthesizer is already open!
+```
+
+So `SWIttsFe-en-US.dll` is ETI-Eloquence (Delta rules + ECI + IBM-lineage Klatt),
+recompiled inside the Speechify tree and stripped down to a text->linguistic
+front end.
+
+**Practical consequence**: the front end and the back end came from two
+unrelated toolchains that never shared a build system. Any attempt to
+reconstruct "the Speechify build tooling" is really two projects: a
+Festival/Festvox-lineage voice compiler (SpeechWorks, C++/Scheme, in-tree), and
+a Delta rule compiler (ETI, external, delivered as generated C).
+
+### 8. What is NOT in the binaries
+
+- No name for the voice-compiler executable. No `.exe` string, no usage banner,
+  no `argv` help text anywhere in `bin/`. The tool never shipped, and nothing in
+  the runtime names it.
+- No Delta rule sources or `.ddl` files -- fully compiled into the FE DLLs.
+- No `$Header$` keywords (only `$Id$`), so no CVS repository paths leaked.
+- `$Name:` is empty everywhere -> no release tag recorded.
+- The only recovered offline tool is `SWIttsMigrateDictToXML.exe`
+  (`-i/-o/-l/-t`, converts the old space-delimited `key<TAB>translation`
+  dictionary into `<lexicon xml:lang= type= alphabet="text">`), which documents
+  the *pre-3.0 dictionary format* but nothing about voice building.
+
+### 9. `SWIttsRiffEncryption` and the full container write contract (Ghidra, 2026-08-16)
+
+Decompiled from `bin/SWIttsEngineUtil.dll`, image base `0x06b40000`. All offsets
+below are absolute Ghidra addresses in that base.
+
+| method | addr | ordinal |
+|--------|------|---------|
+| `SWIttsRiffWriter::create` | `06b42af0` | 9 |
+| `SWIttsRiffWriter::openChunk` | `06b42890` | 16 |
+| `SWIttsRiffWriter::closeChunk` | `06b42690` | 7 |
+| `SWIttsRiffWriter::writeBytes` | `06b420f0` | 30 |
+| `SWIttsRiffWriter::writeInfoChunk` | `06b429b0` | 38 |
+| `SWIttsRiffWriter::writeStringZ` | `06b42280` | 40 |
+| `SWIttsRiffWriter::writeStringW` | `06b42360` | 39 |
+| `SWIttsRiffReader::create` | `06b41e50` | 8 |
+| `SWIttsRiffReader::openChunk` | `06b41d10` | 15 |
+| `SWIttsRiffReader::closeChunk` | `06b41a50` | 6 |
+| `SWIttsRiffReader::readBytes` | `06b41b70` | 17 |
+
+#### 9.1 The enum has exactly two behaviours
+
+Both sides test the mode field (`this+0x08`) against the literal `1` and nothing
+else:
+
+```c
+/* SWIttsRiffReader::readBytes @ 06b41b70 -- after fread */
+if ((*(int *)(this + 8) == 1) && (uVar3 = 0, param_2 != 0)) {
+    do { param_1[uVar3] = param_1[uVar3] ^ 0xce; uVar3++; } while (uVar3 < param_2);
+}
+
+/* SWIttsRiffWriter::writeBytes @ 06b420f0 -- before fwrite, via a 4096-byte stack buffer */
+if (*(int *)(this + 8) == 1) {
+    ...
+    do { local_1004[uVar2] = param_1[uVar2 + uVar5] ^ 0xce; uVar2++; } while (uVar2 < _Count);
+    fwrite(local_1004, 1, _Count, f);
+}
+else { fwrite(param_1, 1, param_2, f); }
+```
+
+So:
+
+```c
+enum SWIttsRiffEncryption {
+    SWItts_RIFF_PLAIN = 0,   /* and every other value -- the test is == 1 */
+    SWItts_RIFF_XOR_CE = 1   /* buf[i] ^= 0xCE */
+};
+```
+
+**The cipher is stateless.** There is no key schedule, no position term, no
+per-chunk reset. `this+0x0c` is incremented alongside it but is the *absolute
+file offset* (used by `closeChunk` for the size back-patch and by the reader for
+the end-of-chunk bounds check), not a keystream index. The writer's 4096-byte
+staging buffer is purely to avoid mutating the caller's const buffer.
+
+**Everything goes through `writeBytes`/`readBytes`**, so the XOR covers the whole
+file uniformly: FOURCCs, chunk sizes, the form type, payloads, *and pad bytes*.
+There is no plaintext header. Practical consequence for any parser: in an
+encrypted container a trailing pad byte reads as **`0xCE` on disk**, not `0x00`.
+
+#### 9.2 Container write contract
+
+```
+create(path, formType, enc):
+    fopen(path, "wb")
+    mode = enc ; pos = 0
+    openChunk("RIFF")           <- DAT_06b4580c, the 5-byte literal "RIFF\0"
+    writeBytes(formType, 4)
+
+openChunk(id):
+    validate: id[0..3] each isalnum() or ' ' ; id[4] == '\0'   (else 3006)
+    push {id, startOffset = pos} onto the chunk stack (this+0x30 array,
+         +0x34 capacity, +0x38 head, +0x3c depth)
+    writeBytes(id, 4)
+    writeBytes(&(uint32)0, 4)   <- size placeholder
+
+closeChunk():
+    pop entry -> startOffset
+    endPos = pos
+    if (endPos & 1) writeBytes(&(uint8)0, 1)      <- pad; ENCRYPTED, so 0xCE on disk
+    savedPos = pos                                 <- post-pad
+    fseek(f, startOffset + 4, SEEK_SET)
+    writeBytes(&(uint32)(endPos - startOffset - 8), 4)   <- size EXCLUDES the pad
+    fseek(f, savedPos, SEEK_SET)
+    pos = savedPos
+    if (depth == 0) fclose(f)                      <- closing RIFF closes the file
+```
+
+The reader is exactly symmetric: `openChunk` reads FOURCC+size through
+`readBytes` (so both are decrypted), validates the FOURCC charset, and sets
+`this+0x10 = pos + size` as the chunk end; `closeChunk` sets `pos = chunkEnd`,
+adds 1 if odd (**skips the pad**), seeks there, and `fclose`s at depth 0.
+
+#### 9.3 Primitive encodings
+
+- `writeStringZ(s)` -> `strlen(s) + 1` bytes. NUL-terminated, no length prefix.
+- `writeStringW(s)` -> **uint16 LE length** (`strlen`, must be < 0x10000), then
+  the bytes **without** the NUL. The `W` is *word-prefixed*, **not wide** -- the
+  mangled parameter is `PBD` (`char const *`). Do not read these as UTF-16.
+- `writeFloat` and `writeDWord` share one address (`06b42330`); `writeFloats` and
+  `writeDWords` share `06b42340`; likewise `readFloat`/`readDWord` at `06b41ce0`
+  and `readFloats`/`readDWords` at `06b41cf0`. Floats are therefore stored as
+  **raw 32-bit little-endian IEEE-754**, byte-copied, with no conversion.
+- `writeWord`/`readWord` alias signed and unsigned at one address each -- raw
+  16-bit LE.
+
+#### 9.4 `writeInfoChunk` stamps the build date
+
+```c
+t = time(NULL); tm = localtime(&t);
+sprintf(copy, "Copyright %d SpeechWorks International, Inc. All Rights Reserved.",
+        tm->tm_year + 1900);
+sprintf(date, "%d-%02d-%02d", tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+openChunk("LIST"); writeBytes("INFO", 4);
+    openChunk("ICOP"); writeStringZ(copy); closeChunk();
+    openChunk("ICRD"); writeStringZ(date); closeChunk();
+closeChunk();
+```
+
+**This is the single most useful outcome of the pass.** Every container the
+offline tool emitted carries an `ICRD` field holding the **local calendar date of
+the machine that ran the build**, and an `ICOP` whose year is that same
+`localtime()` year -- not a static string. Reading the first LIST/INFO of a voice
+container therefore dates the tooling run directly, from ~100 bytes, with no
+knowledge of voice-data semantics required.
+
+#### 9.5 The error catalog reserves a block for the library
+
+`doc/SpeechifyErrors.en-US.xml` carries **3000-3022** for the RIFF library, and
+the nine *writer* codes are in the shipped customer-facing catalog even though no
+shipped module can reach them:
+
+```
+3001  RIFF library cannot be initialized, incompatible compiler data sizes or formats
+3002  Empty file name passed for RIFF writer creation
+3003  RIFF writer create called while a file is already open
+3004  RIFF writer file open failed
+3005  RIFF writer does not have an open file
+3006  RIFF writer chunk open failed due to an invalid chunk ID
+3007  RIFF writer I/O error, seek to write chunk size failed
+3008  RIFF writer I/O error, seek after writing chunk size failed
+3009  RIFF writer I/O error, file write failed
+3020  Invalid argument for RIFF writer write bytes
+3021  Invalid argument for RIFF writer write string
+3022  RIFF information chunk write failed, failed to get the date
+```
+
+Two further points. 3001 *is* referenced twice in `.text` (immediate scan), so the
+library has a non-exported init that self-checks **compiler data sizes and
+formats** -- confirming the container is written with native struct/IEEE layout
+and that the authors knew it was layout-dependent. And a customer-facing error
+catalog that documents writer failures is consistent with the writer being a
+first-class shared component whose other consumer was the offline tool, not
+scaffolding.
+
+#### 9.6 Contract VERIFIED by byte-exact round trip (2026-08-16)
+
+`spfy/src/common/riff_write.{c,h}` implements the contract above;
+`spfy/src/cli/spfy_riff_roundtrip.c` reads a container, decrypts it, walks its
+top-level chunks, re-emits them through the writer and diffs against the
+original. Pad bytes are deliberately NOT carried across — the writer
+regenerates them — so a wrong pad rule would show up immediately.
+
+```
+en-US/tom/tom.vin     34,264,978 B  form svin  XOR 0xCE  14 chunks  BYTE-IDENTICAL
+en-US/jill/jill.vin   37,343,530 B  form svin  XOR 0xCE  14 chunks  BYTE-IDENTICAL
+en-US/tom/tom8.vdb    59,508,248 B  form WAVE  XOR 0xCE   4 chunks  BYTE-IDENTICAL
+en-US/jill/jill8.vdb  71,249,014 B  form WAVE  XOR 0xCE   4 chunks  BYTE-IDENTICAL
+```
+
+202 MB across both container forms and two independent voices. Every element of
+the recovered contract is exercised: ciphered FOURCCs and size fields, the
+`size = end - start - 8` back-patch, the pad-excluded-from-size rule, ciphered
+pad bytes, and `fclose` at depth 0.
+
+Unit coverage in `spfy/test/unit/test_common.c` (169 passing):
+`test_riff_write_encrypted_layout` pins the size/pad/cipher interaction and
+checks the reader agrees with the writer; `test_riff_write_str_w` pins the
+uint16-LE length prefix with no terminator; `test_riff_write_rejects_bad_fourcc`
+pins the `isalnum() || ' '` validation.
+
+Not gated by the parity harness: no engine call site changed, and nothing links
+against the new code yet (cf. `feedback_parity_gate_only_for_engine_changes`).
+
+---
+
+## The join cost formula (RECOVERED from SWIttsUSel.dll, 2026-08-16)
+
+Image base `0x08e80000`. The `edgeFrames` scorer shipped even though no voice
+ships an edge-frames file, so the runtime carries the exact computation the
+offline builder precomputed into `hash`.
+
+| function | role |
+|---|---|
+| `FUN_08e82670` | `load_edge_frames()` — reads frames, derives `joinweights` |
+| `FUN_08e8c440` | the per-frame-pair distance **kernel** |
+| `FUN_08e8d3a0` | 3-point boundary distance, voicing-class weighting path |
+| `FUN_08e8d420` | same, per-node weight/offset override path |
+| `FUN_08e8ed20` | join-cost dispatcher (picks V0/V1/V2 weights) |
+| `FUN_08e8edd0` | `USelGraph::Viterbi` (edge-frames) |
+| `FUN_08e8b620` | `USelGraph::ViterbiWithJoinCache` (hash) |
+
+### Edge-frame storage
+
+`load_edge_frames` fills, on the usel database object:
+
+```
++0x88  dim        floats per frame
++0x8c  joinweights[dim]
++0x90  frame table: 2 pointers per unit -- [uid*8] = start-edge frame,
+                                          [uid*8+4] = end-edge frame
++0x30  num_units
+```
+
+### The kernel — `FUN_08e8c440(weights, dim)` over frames X, Y
+
+```c
+d = 0;
+if (X[0] > T && Y[0] > T)                    /* T = DAT_08e9852c */
+    d = fabsf(X[0] - Y[0]) * w[0];           /* dim 0: ABSOLUTE difference */
+for (k = 1; k < dim; ++k)
+    d += (X[k] - Y[k]) * (X[k] - Y[k]) * w[k];   /* dims >=1: SQUARED */
+return d;
+```
+
+Dimension 0 is special in three ways — absolute rather than squared, gated on
+both frames exceeding a threshold, and counted separately during weight
+derivation with an unvoiced sentinel. **Dimension 0 is F0.** That is what
+`project_f0_bytes_gate_the_join_cost` was seeing from the outside.
+
+**Dimension 1 is dead.** `load_edge_frames` computes `joinweights[1]`, logs it,
+then immediately stores 0 over it and logs `joinweights[1] = *DISABLED*`. Its
+contribution is identically zero in every shipped voice.
+
+### Weight derivation (inverse standard deviation)
+
+Accumulating sum and sum-of-squares over all `2*num_units` frames per dimension:
+
+```
+w[0]    = sqrt(N0 / SS0) * K0      N0 = 2*num_units - n_unvoiced
+w[1]    = 0                        (computed, then explicitly disabled)
+w[k>=2] = sqrt(2*num_units / SSk) / (2*dim - 4)
+```
+
+`SS` is the sum of squared deviations, so `sqrt(N/SS) = 1/sd`. Every dimension is
+inverse-SD normalised; dims >= 2 are additionally divided by `(2*dim - 4)` so the
+spectral block contributes a bounded share regardless of `dim`.
+
+### The 3-point boundary distance — `FUN_08e8d3a0(db, right_uid, left_uid)`
+
+From the disassembly (fastcall: ECX=db, EDX=right, stack=left):
+
+```
+raw = kernel( end(left),  end(right - 1) )        /* left's end vs what
+                                                     naturally precedes right */
+    + kernel( end(left),  start(right) )  * 2     /* the actual seam, DOUBLED */
+    + kernel( ... )                               /* third, symmetric term */
+```
+
+⚠ The third call's operands could not be pinned from this listing alone —
+register liveness across the `cdecl` calls is ambiguous in the decompile. The
+first two are certain, and the `FADD ST0,ST0` doubling the seam term is explicit
+at `08e8d3ea`.
+
+### Affine mapping by voicing class
+
+`FUN_08e8ed20` selects `(weight, offset)` from the voicing of the two phones,
+read from the phone table byte at `+0x13` of a `0x18`-stride record:
+
+```
+neither voiced -> (db+0x68, db+0x6c)   = V0_JCW, V0_JCO
+one voiced     -> (db+0x70, db+0x74)   = V1_JCW, V1_JCO
+both voiced    -> (db+0x78, db+0x7c)   = V2_JCW, V2_JCO
+
+cost = raw * JCW + JCO
+```
+
+### What the cache stores — CONFIRMED post-weighting
+
+`ViterbiWithJoinCache` at `08e8b7e2`:
+
+```asm
+MOV  ESI, [ESP+0x40]              ; row base
+CMP  dword ptr [ESI+EAX*8], EBX   ; key[base+left] == uid_right ?
+JNZ  miss
+FLD  dword ptr [ESI+EAX*8+4]      ; HIT: load the cached cost
+JMP  accumulate                   ; -> FADDP.  NO multiply, NO add.
+```
+
+The cached value is accumulated **directly**. No weight, no offset. On a miss the
+path loads `MISSING_JOIN_COST` from config (`[cfg+0x84]`).
+
+So the offline builder stored the *final* cost:
+
+```
+cached(l, r) = 0                                    if r == l + 1
+             = raw(l, r) * JOIN_COST_WEIGHT + JOIN_COST_OFFSET   otherwise
+```
+
+**Self-consistency check.** jill has `JOIN_COST_WEIGHT 1.75`,
+`JOIN_COST_OFFSET .15`. The measured minimum non-zero cached cost is **0.2826**,
+which is `> 0.15` exactly as `raw*1.75 + 0.15` with `raw > 0` requires, and the
+natural-continuation entries are a hard `0` that bypasses the affine map
+entirely. The measured distribution and the recovered formula agree.
+
+Note also the in-memory layout differs from disk: the loader **interleaves** the
+two parallel on-disk arrays into 8-byte `(key, cost)` pairs, which is why the
+lookup indexes `[base + left*8]` and `[base + left*8 + 4]`.
+
+### Consequence for S4 generation
+
+Generating `hash` now requires only:
+
+1. `raw` from edge frames we compute ourselves (F0 in dim 0 with an unvoiced
+   sentinel, dim 1 unused, spectral in dims >= 2), inverse-SD normalised over
+   the corpus exactly as `load_edge_frames` does;
+2. the affine map with the voice's own `JOIN_COST_WEIGHT` / `JOIN_COST_OFFSET`;
+3. a hard `0` for natural continuations.
+
+The one remaining free choice is **what goes in dims >= 2** — the vendor's
+spectral representation is not recoverable from the reader, since the reader only
+consumes floats. Per Exp 65 that choice is not where quality lives; matching the
+resulting distribution (floor ~0.28, median ~1.77, cap ~16) is what matters.
+
+### The 3-point combination — RESOLVED (2026-08-16)
+
+The term flagged as unpinned is now derived, by tracking ESP through
+`FUN_08e8d3a0` rather than trusting the decompile's register guesses.
+
+Entry does `SUB ESP,8` then four pushes, so the caller's stack argument (the
+LEFT uid) sits at `[ESP+0x1c]`, and `EDX` carries the RIGHT uid. Then:
+
+```
+08e8d3c5  MOV [ESP+0x14],EDI       ; save start(R)  -> scratch at ESP0-8
+call 1    EAX=[ESI+L*8+4]=end(L)     EDI=[ESI+R*8-4]=end(R-1)
+call 2    EAX=[ESI+L*8+4]=end(L)     EDI=[ESP+0x18] =start(R)
+call 3    EAX=[ESI+L*8+8]=start(L+1) EDI= not reloaded = start(R)
+```
+
+At `08e8d3ec`, `[ESP+0x2c]` resolves to `ESP0+4` — the left uid — so
+`[ESI+EDX*8+8]` is `rec[L+1].ptr0`. EDI surviving call 2 is sound: Ghidra names
+it `unaff_EDI`, its term for a register read but provably unaffected.
+
+```
+raw = kernel( end(L),     end(R-1)   )        /* natural predecessor of R */
+    + kernel( end(L),     start(R)   ) * 2    /* the seam */
+    + kernel( start(L+1), start(R)   )        /* natural successor of L */
+```
+
+**It is a SUM.** The FPU trace is `2*r2`, `+r1`, spill, `+r3`; there is no
+`FDIV` or `FMUL` anywhere in the function and the epilogue only unwinds
+(`ADD ESP,0x18 / ADD ESP,8 / RET`). The "average rather than sum" hypothesis
+raised by the 2.91x residual is **REFUTED** — the residual is entirely the
+spectral gauge.
+
+The `ptr0 = start-edge / ptr1 = end-edge` assignment is forced rather than
+assumed: under the swap, call 1 would compare `start(L)` against `start(R-1)`,
+which is meaningless, and call 2's seam would run backwards.
+
+Third independent confirmation of the continuation rule: `USelGraph::Viterbi`
+tests `piVar6[4] == *(int*)(iVar11+0xc) - 1`, i.e. `left == right - 1`, and
+zeroes both cost components on that branch. The engine, the cached data, and
+the builder all agree.
+
+### Why byte-identity is unreachable for `hash`
+
+It is reachable for the container (`spfy_riff_roundtrip`, byte-identical on four
+vendor files) because every byte of that format is present in the reader. It is
+not reachable for `hash`, and the reason is informational rather than effort:
+
+- the cached value is `raw * JOIN_COST_WEIGHT + JOIN_COST_OFFSET`;
+- `raw` is a sum of kernels over the edge frames;
+- the kernel consumes the frames as **opaque floats**. Nothing in any shipped
+  binary states what dims >= 2 contain, and no voice we hold ships an
+  edge-frames file to compare against.
+
+So the vendor's spectral representation is absent from the evidence, and with it
+the absolute scale — the vendor's term scales linearly with the features' own
+spread. Everything structural around it is recovered and verified: the domain
+rule, the packing, the container, the kernel, the weight derivation, the 3-point
+combination, the affine map and the hard-zero rule.
+
+The remaining gap is one per-voice constant (`spfy_jc_t.raw_scale`) and whatever
+representation is chosen for dims >= 2. Shape already agrees to 4% on p99/p50.
+Byte-identity would require guessing the vendor's feature set exactly, which the
+binaries cannot confirm even if guessed correctly.

@@ -879,9 +879,8 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
     /* PSOLA default-OFF as of 2026-05-19 evening.
      *
      * Tom-family voices run the engine's PLAIN WSOLA mode
-     * (state+0x3614=1; FUN_08EE3AA0 mode=1), verified via Frida probe
-     * in [[project-engine-wsola-mode-finding-2026-05-14]]. The
-     * Selective-F0-smoothing branch (which is what `eff_ola = 2*T0`
+     * (state+0x3614=1; FUN_08EE3AA0 mode=1), verified via Frida probe.
+     * The selective-F0-smoothing branch (which is what `eff_ola = 2*T0`
      * mirrored) never fires for Tom. Empirically: PSOLA widening
      * generated ~240 extra mini-dips per 60 s of audio relative to
      * plain WSOLA (484 vs 247 dips at default settings, vs oracle's

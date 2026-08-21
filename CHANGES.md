@@ -1,6 +1,12 @@
-# Speechify Changelog
+# Speechify/spfy Changelog
 
-2026-08-12:
+## 2026-08-21
+
+- CRS Mara is now available for use in both Speechify and spfy (yes, it works in both engines just fine, though don't expect byte-identical parity with this specific voice!). This is a new voice that is partially made with real CRS-era direct synthesis from the NOAA Weather Radio archived webpages on Internet Archive, and partially with synthesis from [StyleTTS 2](https://github.com/yl4579/styletts2), a neural TTS engine known for being able to generate high-quality speech. It is a more natural-sounding voice than the original AI Mara, and is intended to be a replacement for it. Give it a try and let me know what you think! Feedback is always welcome. CRS Tom is Coming Soon™. The old AI Mara voice has been deleted, if you REALLY want it back, you can find it in the git history, but it is now considered **deprecated**.
+
+---
+
+## 2026-08-12
 
 - Speechify 4 mode now works on **every** platform, not just the Windows CLI and SAPI. In the WASM builds, `\!s4m` used to turn itself on, and then synthesize as plain 3.0.5, which is the worst possible failure mode: no error, just plain, incorrect audio. Two things were missing on both: the loaded VDB's path was never recorded, so the prosody stage had nothing to derive the pitch-mark filenames from, and the pitch marks themselves (`tom8.pmdata` / `tom8.pmindex`) were never shipped with the voice. Both are fixed, and the pitch marks are staged as *optional* files so voices that have none still ship.
 
@@ -10,7 +16,7 @@
 
 ---
 
-2026-08-11:
+## 2026-08-11
 
 - Initial release of the Speechify project changelog. This is similar to other changelogs I maintain in my other repositories (like EAS Tools).
 

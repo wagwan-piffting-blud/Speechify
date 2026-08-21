@@ -1,5 +1,5 @@
 {
-  "generated": "2026-08-12T18:15:11",
+  "generated": "2026-08-21T06:29:28",
   "format_khz": 8,
   "renders": [
     {
@@ -20,34 +20,18 @@
     },
     {
       "kind": "engine",
-      "id": "aimara",
-      "voice": "aimara",
+      "id": "crsmara",
+      "voice": "crsmara",
       "lang": "en-US",
       "synthetic": true,
-      "text_file": "demos/text/demo_aimara.txt",
-      "wav": "demos/engine/aimara.wav",
+      "text_file": "demos/text/demo_crsmara.txt",
+      "wav": "demos/engine/crsmara.wav",
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 118604,
+        "samples": 147138,
         "rate": 8000,
-        "seconds": 14.825
-      }
-    },
-    {
-      "kind": "engine",
-      "id": "aimara2",
-      "voice": "aimara2",
-      "lang": "en-US",
-      "synthetic": true,
-      "text_file": "demos/text/demo_aimara2.txt",
-      "wav": "demos/engine/aimara2.wav",
-      "rc": 0,
-      "ok": true,
-      "audio": {
-        "samples": 120276,
-        "rate": 8000,
-        "seconds": 15.034
+        "seconds": 18.392
       }
     },
     {
@@ -64,22 +48,6 @@
         "samples": 119820,
         "rate": 8000,
         "seconds": 14.977
-      }
-    },
-    {
-      "kind": "engine",
-      "id": "improvedaimara",
-      "voice": "improvedaimara",
-      "lang": "en-US",
-      "synthetic": true,
-      "text_file": "demos/text/demo_improvedaimara.txt",
-      "wav": "demos/engine/improvedaimara.wav",
-      "rc": 0,
-      "ok": true,
-      "audio": {
-        "samples": 137040,
-        "rate": 8000,
-        "seconds": 17.13
       }
     },
     {
@@ -164,34 +132,18 @@
     },
     {
       "kind": "spfy",
-      "id": "aimara",
-      "voice": "aimara",
+      "id": "crsmara",
+      "voice": "crsmara",
       "lang": "en-US",
       "synthetic": true,
-      "text_file": "demos/text/demo_aimara.txt",
-      "wav": "demos/spfy/aimara.wav",
+      "text_file": "demos/text/demo_crsmara.txt",
+      "wav": "demos/spfy/crsmara.wav",
       "rc": 0,
       "ok": true,
       "audio": {
-        "samples": 118604,
+        "samples": 145148,
         "rate": 8000,
-        "seconds": 14.825
-      }
-    },
-    {
-      "kind": "spfy",
-      "id": "aimara2",
-      "voice": "aimara2",
-      "lang": "en-US",
-      "synthetic": true,
-      "text_file": "demos/text/demo_aimara2.txt",
-      "wav": "demos/spfy/aimara2.wav",
-      "rc": 0,
-      "ok": true,
-      "audio": {
-        "samples": 120276,
-        "rate": 8000,
-        "seconds": 15.034
+        "seconds": 18.143
       }
     },
     {
@@ -208,22 +160,6 @@
         "samples": 119820,
         "rate": 8000,
         "seconds": 14.977
-      }
-    },
-    {
-      "kind": "spfy",
-      "id": "improvedaimara",
-      "voice": "improvedaimara",
-      "lang": "en-US",
-      "synthetic": true,
-      "text_file": "demos/text/demo_improvedaimara.txt",
-      "wav": "demos/spfy/improvedaimara.wav",
-      "rc": 0,
-      "ok": true,
-      "audio": {
-        "samples": 137040,
-        "rate": 8000,
-        "seconds": 17.13
       }
     },
     {

@@ -321,8 +321,15 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
                         : 100;
                 }
             }
-            if (spfy_env("SPFY_DAG_FWD_DUMP")) {
-                fprintf(stderr, "{\"fwd\":1,\"slot\":%u,\"c\":%u,"
+            /* Per DP CELL. Resolve once; pass a path, not "1". */
+            static FILE *fd = NULL;
+            static int   fd_init = 0;
+            if (!fd_init) {
+                fd = spfy_dump_stream("SPFY_DAG_FWD_DUMP");
+                fd_init = 1;
+            }
+            if (fd) {
+                fprintf(fd, "{\"fwd\":1,\"slot\":%u,\"c\":%u,"
                                 "\"uid\":%u,\"pre_dp\":%.6f,"
                                 "\"bestp_s\":%u,\"bestp_c\":%u,"
                                 "\"fwd\":%.6f}\n",

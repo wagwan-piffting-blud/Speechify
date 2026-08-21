@@ -361,6 +361,13 @@ static void expand_tags(const char *in, char *out, size_t maxlen) {
                 }
                 // other interpret-as: strip the tag, keep the body
             }
+        } else if (TAG("speak") || TAG("voice") || TAG("p") || TAG("s")) {
+            // SSML structural wrappers. We convert SSML bodies into inline \!
+            // codes (breaks above, etc.), so the engine is fed text/plain, not
+            // SSML -- keep the body, drop the wrapper. Leaving <speak> literal
+            // would (a) mis-trip the SSML auto-detect below and (b) be sent to
+            // the SSML parser alongside \! codes it cannot parse, which fails
+            // AND then hangs. Stripping it is what keeps this path on text/plain.
         } else if (TAG("emph") || TAG("emphasis") || TAG("pitch")) {
             // No Speechify \! equivalent -> strip the tag, keep any body text.
         } else {
@@ -801,13 +808,18 @@ static int synth_one(SWIttsAPI *api, SWIttsPort port, Ctx *ctx,
     InterlockedExchange(&ctx->done, 0);
     ResetEvent(ctx->doneEvent);
 
+    // speakText has already been through expand_tags() (see run_batch), so any
+    // SSML has been lowered to inline \! codes and the <speak> wrapper stripped
+    // -- it is text/plain-with-codes, never real SSML. Do not auto-detect SSML
+    // here: doing so would feed \! codes to the SSML parser, which fails and
+    // then hangs on the wait below.
     const char *contentType = "text/plain;charset=utf-8";
-    if (strncmp(speakText, "<speak", 6) == 0 || strncmp(speakText, "<?xml", 5) == 0)
-        contentType = "application/synthesis+ssml";
 
     int rc = 0;
     if (api->Speak(port, (const unsigned char *)speakText,
                    (unsigned)strlen(speakText), contentType) != 0) {
+        // Speak failed: do NOT wait on doneEvent -- no callback will fire, so
+        // the wait would block the full timeout (the 60 s hang). Bail now.
         fprintf(stderr, "SWIttsSpeak failed\n");
         rc = -1;
     } else {
@@ -1194,6 +1206,36 @@ int wmain(int argc, wchar_t **wargv) {
         }
     }
 
+    // Guard: if the text has nothing speakable (e.g. a bare emoji, or
+    // punctuation-only), the engine legitimately returns zero samples and we
+    // would exit rc=10. Detect it up front and finish cleanly with a valid
+    // (silent) WAV instead of spinning up synthesis to fail. We scan for any
+    // alphanumeric, skipping inline \! code letters so "\!p500" alone still
+    // counts as empty. Batch and g2p modes are exempt (batch guards per line;
+    // g2p wants marks, not audio).
+    if (!batchMode && !g2pMode && speakBuf) {
+        int hasSpeakable = 0;
+        for (const char *q = speakBuf; *q; q++) {
+            if (*q == '\\' && q[1] == '!') {       // skip an inline \!code token
+                q += 2;
+                while (*q && !isspace((unsigned char)*q)) q++;
+                if (!*q) break;
+                continue;
+            }
+            if (isalnum((unsigned char)*q)) { hasSpeakable = 1; break; }
+        }
+        if (!hasSpeakable) {
+            fwprintf(stderr, L"INFO: no speakable content in input; "
+                             L"writing silent WAV and exiting cleanly.\n");
+            if (woutPath) {
+                FILE *wf = _wfopen(woutPath, L"wb+");
+                if (wf) { write_wav_header(wf, sampleRate, 16, 1, 0); fclose(wf); }
+            }
+            free(speakBuf);
+            fast_exit(0);
+        }
+    }
+
     // Load the client DLL
     SWIttsAPI api;
     if (!LoadSWItts(&api, L".\\SWItts.dll")) {
@@ -1257,15 +1299,18 @@ int wmain(int argc, wchar_t **wargv) {
     // Speak
     const unsigned char *bytes = (const unsigned char*)speakBuf;
     unsigned len = (unsigned)strlen(speakBuf);
-    // Auto-detect SSML: if input starts with '<speak' or '<?xml', use SSML content type
+    // expand_tags() has already lowered any SSML/Balabolka/SAPI markup (breaks,
+    // prosody, pron, ...) into inline \! codes and stripped the <speak>/<?xml
+    // wrappers, so what we hold is text/plain-with-inline-codes -- NOT SSML.
+    // Sending it as application/synthesis+ssml would hand the SSML parser \!
+    // codes it cannot parse, which fails and then hangs on the wait below.
+    // Always speak the expanded buffer as text/plain.
     const char *contentType = "text/plain;charset=utf-8";
-    if (strncmp(speakBuf, "<speak", 6) == 0 || strncmp(speakBuf, "<?xml", 5) == 0) {
-        contentType = "application/synthesis+ssml";
-    }
 
     fwprintf(stderr, L"INFO: Speaking (%hs)...\n", contentType);
 
-    if (api.Speak(port, bytes, len, contentType) != 0) {
+    int speakFailed = (api.Speak(port, bytes, len, contentType) != 0);
+    if (speakFailed) {
         fprintf(stderr, "SWIttsSpeak failed\n");
     }
 
@@ -1273,9 +1318,14 @@ int wmain(int argc, wchar_t **wargv) {
     // with the text length so a large -f file is not truncated: a 60 s floor
     // plus ~10 ms per input character (a generous ceiling on synthesis time --
     // it only fires if the engine actually stalls), capped at 24 hours.
-    unsigned long long wl = 60000ULL + (unsigned long long)len * 10ULL;
-    if (wl > 86400000ULL) wl = 86400000ULL;
-    WaitForSingleObject(ctx.doneEvent, (DWORD)wl);
+    // CRITICAL: only wait if Speak() actually started -- on failure no callback
+    // will ever fire, so waiting would block the full timeout for nothing (this
+    // was the 60 s SSML hang).
+    if (!speakFailed) {
+        unsigned long long wl = 60000ULL + (unsigned long long)len * 10ULL;
+        if (wl > 86400000ULL) wl = 86400000ULL;
+        WaitForSingleObject(ctx.doneEvent, (DWORD)wl);
+    }
     CloseHandle(ctx.doneEvent);
 
     // G2P output: print phoneme sequences. Pure conversion of the marks

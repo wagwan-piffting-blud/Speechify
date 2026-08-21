@@ -1,7 +1,9 @@
 #include "env.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -76,10 +78,63 @@ int spfy_env_set(const char *name)
     return spfy_env(name) != NULL;
 }
 
+/* ⚠ stderr IS UNBUFFERED BY STANDARD, so a dump in a DP inner loop costs one
+ * write() PER LINE. SPFY_JOIN_DUMP fires once per EDGE CONSIDERED -- not once
+ * per join on the chosen path -- so on a 280k-unit voice it is millions of
+ * syscalls per sentence, and a 20-line probe run hit a 600 s timeout with the
+ * audio already written. The volume is inherent to a per-edge dump; the
+ * syscall per line is not.
+ *
+ * Give the value a PATH and the stream is a fully-buffered file (the same
+ * shape SPFY_PSOLA_GRAIN_DUMP already used). "1"/"-"/"stderr" keep the old
+ * behaviour, so every existing invocation still works.
+ *
+ * Cached by the key POINTER, exactly like spfy_env above, so a hot-path caller
+ * pays one load and a compare. */
+#define DUMP_CACHE_N 16u
+#define DUMP_BUF_N   (1u << 20)
+
+static const char *g_dkey[DUMP_CACHE_N];
+static FILE       *g_dfp [DUMP_CACHE_N];
+
+FILE *spfy_dump_stream(const char *name)
+{
+    if (!name) return NULL;
+    for (unsigned i = 0; i < DUMP_CACHE_N; ++i) {
+        if (g_dkey[i] == name) return g_dfp[i];
+        if (g_dkey[i] == NULL) {
+            const char *v = spfy_env(name);
+            FILE *fp = NULL;
+            if (v && *v) {
+                if (v[0] == '-' || !strcmp(v, "1") || !strcmp(v, "stderr")) {
+                    fp = stderr;
+                } else {
+                    fp = fopen(v, "w");
+                    if (fp) {
+                        char *b = (char *)malloc(DUMP_BUF_N);
+                        /* Leaked deliberately: it must outlive every write,
+                         * and the process flushes these streams at exit. */
+                        if (b) setvbuf(fp, b, _IOFBF, DUMP_BUF_N);
+                    }
+                }
+            }
+            g_dfp[i] = fp;
+            g_dkey[i] = name;
+            return fp;
+        }
+    }
+    return NULL;
+}
+
 void spfy_env_reset(void)
 {
     for (unsigned i = 0; i < ENV_CACHE_N; ++i) {
         g_key[i] = NULL;
         g_val[i] = NULL;
+    }
+    for (unsigned i = 0; i < DUMP_CACHE_N; ++i) {
+        if (g_dfp[i] && g_dfp[i] != stderr) fclose(g_dfp[i]);
+        g_dkey[i] = NULL;
+        g_dfp[i] = NULL;
     }
 }

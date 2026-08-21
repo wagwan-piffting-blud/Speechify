@@ -94,6 +94,9 @@ REPO = THIS.parents[3]
 ORACLE = THIS.parent
 DEFAULT_TRACES_MASTER = ORACLE / "traces_master"
 
+sys.path.insert(0, str(REPO / "bin"))
+import server_ctl
+
 
 def default_traces(vname: str) -> Path:
     """Tom's captures predate the per-voice naming and stayed put."""
@@ -593,7 +596,6 @@ def main() -> int:
     # config/SWIttsConfig.xml. Put it back: leaving the config on whichever
     # voice happened to be last is a trap for the next tool that assumes it
     # is still serving Tom.
-    import bin.server_ctl as server_ctl
     orig_voice, _orig_lang = server_ctl.read_config()
 
     summaries = []

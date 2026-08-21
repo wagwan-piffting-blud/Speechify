@@ -120,6 +120,11 @@ static int do_unit(const char *vin_path, uint32_t uid)
     printf("  sp_syl_type       : %u\n", r.sp_syl_type);
     printf("  sp_word_in_phrase : %u\n", r.sp_word_in_phrase);
     printf("  sp_syl_in_word    : %u\n", r.sp_syl_in_word);
+    /* 1 WordInitial 2 SyllInitial 3 SyllMedial 4 SyllFinal 5 WordFinal;
+     * 6 SyllUnknown is what the decoder yields when the record version has no
+     * column, so a table of nothing but 6 means the voice is v100006. */
+    printf("  sp_phone_in_syl   : %u%s\n", r.sp_phone_in_syl,
+           r.sp_phone_in_syl == 6u ? "  (SyllUnknown / absent column)" : "");
     printf("  f0_start/end/mid/ctx : %u %u %u %u\n",
            r.f0_start, r.f0_end, r.f0_mid, r.f0_context);
     printf("  phone_center   : %u\n", r.phone_center);
@@ -554,7 +559,13 @@ static int do_index(const char *vin_path)
         spfy_phone_order_free(&po); spfy_vin_free(&vin); return 1;
     }
 
-    printf("#uid\tfile_idx\tlocal_pos_ms\tdur_like_ms\tphone\tside\tfirst_half\n");
+    /* f0_start/end/mid and flag_b are here because `hist` is a histogram of
+     * the F0 STEP at natural joins -- dag_join_cb indexes its curve with
+     * f0_end(curr) - sub_off - c7c(prev), and c7c is the last f0_mid >= 21
+     * carried down the path. Without these columns that chunk cannot be
+     * checked against a vendor, only guessed at. */
+    printf("#uid\tfile_idx\tlocal_pos_ms\tdur_like_ms\tphone\tside\tfirst_half"
+           "\tf0_start\tf0_end\tf0_mid\tf0_context\tflag_b\n");
     for (uint32_t uid = 0; uid < ut.n_units; ++uid) {
         spfy_unit_record_t r;
         if (spfy_unit_record_get(&ut, uid, &r) != SPFY_OK)
@@ -562,9 +573,11 @@ static int do_index(const char *vin_path)
         uint8_t feat = (r.phone_center < po.n_labels)
                      ? po.labl_to_feat[r.phone_center] : SPFY_PHONE_NONE;
         const char *nm = (feat < po.n_phones) ? po.phone_names[feat] : "?";
-        printf("%u\t%u\t%u\t%u\t%s\t%c\t%u\n",
+        printf("%u\t%u\t%u\t%u\t%s\t%c\t%u\t%u\t%u\t%u\t%u\t%u\n",
                uid, r.file_idx, r.local_pos, r.dur_like, nm,
-               (uid & 1u) ? 'R' : 'L', (unsigned)r.is_first_half);
+               (uid & 1u) ? 'R' : 'L', (unsigned)r.is_first_half,
+               (unsigned)r.f0_start, (unsigned)r.f0_end, (unsigned)r.f0_mid,
+               (unsigned)r.f0_context, (unsigned)r.flag_b);
     }
 
     spfy_phone_order_free(&po);

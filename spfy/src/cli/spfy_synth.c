@@ -233,6 +233,16 @@ static void spfy4_env_default(const char *name, const char *val)
 #endif
 }
 
+/* Preselection backoff-ladder census, printed under SPFY_PRSL_STATS.
+ * See the increment site for why it separates a KEYS problem from a MEMBERS
+ * problem. Counted over half-phone slots only; the pinned first and last of
+ * each phrase are not preselected and are excluded. */
+static uint64_t g_prsl_rung_total  = 0;
+static uint64_t g_prsl_rung_exact  = 0;
+static uint64_t g_prsl_rung_1side  = 0;
+static uint64_t g_prsl_rung_both   = 0;
+static uint64_t g_prsl_rung_empty  = 0;
+
 /* Apply the mode. */
 /* Set by --no-s4. */
 static int g_s4_forbidden = 0;
@@ -481,6 +491,37 @@ static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_m
      * first `target` samples keeps the right COUNT and the wrong SAMPLES. */
     uint32_t nominal = dur_ms * sps;
     if (off >= rec_n) return SPFY_OK;
+    /* ⚠ CONTENT cannot outrun the recording, even though the OVER-READ may.
+     *
+     * The zero-pad below is right for the over-read: a unit at the tail of a
+     * recording must still present pre+nominal+over_n to the lag search, and
+     * clamping `blen` shortened the last unit of every phrase (6 samples on
+     * jill "One."). But that argument covers the READ WINDOW, not the unit's
+     * own length, and nothing was bounding the latter.
+     *
+     * jill.vin holds 31 units with dur_like >= 60000, one of them exactly
+     * 0xFFFF: uid 141269, file_idx 4520 ('shortAdd1_099', 7480 samples),
+     * local_pos 926 ms = sample 7408. Seventy-two samples of audio exist
+     * there; dur_like asks for 524280. We were emitting the 72 and then
+     * 524208 samples of memset zero -- 65.535 s of silence inside the word.
+     *
+     * Measured against the real 3.0.5 engine (bin/Speechify.exe via
+     * spfy_dumpwav) on the four words that reach this unit:
+     *
+     *     say laverdiere again    engine 1301.2 ms   ours 66835.8 ms
+     *     say booties again       engine 1084.8 ms   ours 66621.2 ms
+     *     say dirtyer again       engine 1222.0 ms   ours 66747.2 ms
+     *     say verdyer again       engine 1184.0 ms   ours 66709.2 ms
+     *
+     * while three controls through the same path were byte-identical, so the
+     * engine bounds the content by the recording and we did not.
+     *
+     * SPFY_NO_DUR_CLAMP=1 restores the unbounded behaviour. */
+    static int no_dur_clamp = -1;
+    if (no_dur_clamp < 0)
+        no_dur_clamp = (spfy_env("SPFY_NO_DUR_CLAMP") != NULL);
+    if (!no_dur_clamp && nominal > rec_n - off)
+        nominal = rec_n - off;
     /* ⭐ PRE-ROLL, not post-overread.
      *
      * FUN_08ee2960 reads from (local_pos - W) and records the unit's start
@@ -728,9 +769,15 @@ static int append_recording_span(spfy_wsola_streamer_t *ws,
         /* Cumulative sample-count tracker so the user can map output
          * waveform positions back to which unit was being emitted. */
         static uint64_t cum_n = 0;
+        /* uid/run are printed so a waveform position can be tied to the
+         * SELECTED unit, not just to its source recording: measuring
+         * spectral discontinuity AT a join needs to know which sample offset
+         * is a join and which is mid-unit, and file/lp/dur alone cannot say
+         * whether two consecutive units were a same-rec continuation. */
         fprintf(stderr,
-                "[unit] t=%7.1fms  file=%4u  lp=%5u  dur=%4u  n=%4zu  nom=%4zu  align=%d  f0t=%u f0h=%u  cum=%llu\n",
+                "[unit] t=%7.1fms  uid=%7u  run=%3u  file=%4u  lp=%5u  dur=%4u  n=%4zu  nom=%4zu  align=%d  f0t=%u f0h=%u  cum=%llu\n",
                 (double)cum_n * 1000.0 / 8000.0,
+                ref ? ref->uid : 0u, ref ? ref->run_n : 0u,
                 file_idx, lp, dur, n, nominal_n, align, f0_tail, f0_head,
                 (unsigned long long)cum_n);
         cum_n += nominal_n;
@@ -1932,8 +1979,14 @@ dump:
                 if (mag > 0.0f) cost += jc->pow_cont_w * mag;
             }
         }
-        if (spfy_env("SPFY_JOIN_DUMP")) {
-            fprintf(stderr, "{\"join\":1,\"prev_slot\":%u,\"prev_idx\":%u,"
+        /* ⚠ ONE LINE PER EDGE CONSIDERED, not per join on the chosen path.
+         * Resolve the stream ONCE -- this is the DP inner loop, and to stderr
+         * (unbuffered) it is a syscall per line. Give SPFY_JOIN_DUMP a PATH. */
+        static FILE *jd = NULL;
+        static int   jd_init = 0;
+        if (!jd_init) { jd = spfy_dump_stream("SPFY_JOIN_DUMP"); jd_init = 1; }
+        if (jd) {
+            fprintf(jd, "{\"join\":1,\"prev_slot\":%u,\"prev_idx\":%u,"
                             "\"curr_slot\":%u,\"curr_idx\":%u,"
                             "\"prev_jk\":%u,\"curr_uid\":%u,"
                             "\"prev_c7c\":%d,\"prev_c80\":%d,\"curr_c6c\":%u,"
@@ -3663,13 +3716,23 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             pool_n      = 1u;
             goto pool_ready;
         }
+        /* Which rung of the backoff ladder fed this slot. A candidate reached
+         * through a fallback carries a context unrelated to the slot's, so
+         * its prsl key does not satisfy the family relation S4 builds the
+         * `hash` domain from -- and every join touching it is a guaranteed
+         * miss at MISSING_JOIN_COST. Counting the rungs is what separates
+         * "our preselection needs more KEYS" from "it needs more MEMBERS".
+         * Printed at the end of the run under SPFY_PRSL_STATS. */
+        ++g_prsl_rung_total;
         spfy_prsl_lookup(&v->prsl, ck, &pool, &pool_n);
+        if (pool_n) ++g_prsl_rung_exact;
         if (pool_n == 0 && !spfy_env("SPFY_NO_PRSL_92_FALLBACK")) {
             uint32_t side = ctx5[2] & 1u;
             uint32_t l_fb = side ? hp_bound : ctx5[1];
             uint32_t r_fb = side ? ctx5[3] : hp_bound;
             uint32_t ck_fb = spfy_prsl_context_key(l_fb, ctx5[2], r_fb);
             spfy_prsl_lookup(&v->prsl, ck_fb, &pool, &pool_n);
+            if (pool_n) ++g_prsl_rung_1side;
             /* ⚠ THE SUBSTITUTION ESCALATES. When the one-sided key misses
              * too, the engine drops BOTH contexts and takes the group keyed
              * on the centre class alone.
@@ -3689,6 +3752,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 uint32_t ck_both = spfy_prsl_context_key(hp_bound, ctx5[2],
                                                          hp_bound);
                 spfy_prsl_lookup(&v->prsl, ck_both, &pool, &pool_n);
+                if (pool_n) ++g_prsl_rung_both;
+                else        ++g_prsl_rung_empty;
             }
         }
     pool_ready:
@@ -6781,6 +6846,22 @@ int main(int argc, char **argv)
                 stats.n_phrases);
     } else {
         fprintf(stderr, "error: %s\n", spfy_strerror(rc));
+    }
+    if (spfy_env("SPFY_PRSL_STATS") && g_prsl_rung_total) {
+        double t = (double)g_prsl_rung_total;
+        fprintf(stderr,
+                "prsl ladder: %llu preselected slots  exact %llu (%.2f%%)  "
+                "one-sided %llu (%.2f%%)  both-sided %llu (%.2f%%)  "
+                "empty %llu (%.2f%%)\n",
+                (unsigned long long)g_prsl_rung_total,
+                (unsigned long long)g_prsl_rung_exact,
+                100.0 * (double)g_prsl_rung_exact / t,
+                (unsigned long long)g_prsl_rung_1side,
+                100.0 * (double)g_prsl_rung_1side / t,
+                (unsigned long long)g_prsl_rung_both,
+                100.0 * (double)g_prsl_rung_both / t,
+                (unsigned long long)g_prsl_rung_empty,
+                100.0 * (double)g_prsl_rung_empty / t);
     }
     free(file_text);
     spfy_voice_free(&voice);

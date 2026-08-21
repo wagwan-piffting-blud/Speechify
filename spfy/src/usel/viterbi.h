@@ -70,9 +70,15 @@ typedef struct {
      *   c6c = unit_mem+0x10 (f0_end). Used as the curr-side argument to
      *         the F0-prob curve lookup.
      *   c70 = unit_mem+0x0f (f0_start). Stored on cand+0x70.
-     *   c78 = unit_mem+0x0f (f0_start) — engine init for cand+0x78,
-     *         which becomes the run-length COUNT seed when the cand's
-     *         own c68 >= 21. Same byte as c70.
+     *   c78 = NOT f0_start. FUN_08e8ce60 (decompiled 2026-08-14) walks the
+     *         anchor's units and accumulates unit.dur_like into cand+0x78,
+     *         RESETTING it to 0 at every unit whose f0_mid >= 21 — so it is
+     *         "milliseconds since the last voiced pitch mark", not a pitch
+     *         byte at all. That is what makes the join gate's `prev.c80 < 15`
+     *         mean "the previous unit was voiced within the last 15 ms",
+     *         i.e. price pitch steps only INSIDE a voiced stretch.
+     *         spfy_synth.c implements the accumulation correctly; only this
+     *         comment was wrong.
      *
      * For a multi-UID anchor cand the engine populates these from the
      * RUN-TAIL unit (cand+0x10). Pass se_unit's bytes for anchor cands. */

@@ -4,6 +4,9 @@
 
 #include "../../src/common/obfuscation.h"
 #include "../../src/common/riff.h"
+#include "../../src/common/riff_write.h"
+#include "../../src/vb/join_cost.h"
+#include "../../src/vb/vb_chunk.h"
 #include "../../src/usel/cost.h"
 #include "../../src/usel/viterbi.h"
 #include "../../include/spfy/spfy.h"
@@ -380,10 +383,301 @@ static void test_viterbi_long_double_accumulation(void)
     for (uint32_t i = 0; i < N; ++i) CHECK(path[i] == 1000 + i);
 }
 
+/* ---- RIFF writer -------------------------------------------------------
+ * Contract from SWIttsEngineUtil.dll: the size field excludes the pad byte,
+ * and the pad goes through the cipher like everything else. */
+
+#define TMP_RIFF "test_riff_write.tmp"
+
+static long slurp_tmp(uint8_t *buf, size_t cap)
+{
+    FILE *fp = fopen(TMP_RIFF, "rb");
+    if (!fp) return -1;
+    size_t n = fread(buf, 1, cap, fp);
+    fclose(fp);
+    return (long)n;
+}
+
+static void test_riff_write_encrypted_layout(void)
+{
+    spfy_riff_writer w;
+    CHECK(spfy_riff_create(&w, TMP_RIFF, "svin", SPFY_RIFF_CE) == 0);
+    CHECK(spfy_riff_open_chunk(&w, "abc ") == 0);
+    CHECK(spfy_riff_write_bytes(&w, "xyz", 3) == 0);   /* odd -> pad */
+    CHECK(spfy_riff_close_chunk(&w) == 0);
+    CHECK(spfy_riff_open_chunk(&w, "defg") == 0);
+    CHECK(spfy_riff_write_u32(&w, 0x11223344u) == 0);
+    CHECK(spfy_riff_close_chunk(&w) == 0);
+    CHECK(spfy_riff_finish(&w) == 0);
+
+    uint8_t raw[256];
+    long n = slurp_tmp(raw, sizeof raw);
+    CHECK(n > 0);
+
+    /* No plaintext header: even "RIFF" is ciphered. */
+    CHECK(raw[0] == (uint8_t)('R' ^ SPFY_OBFUSCATION_BYTE));
+
+    uint8_t plain[256];
+    spfy_unobfuscate_ce_copy(plain, raw, (size_t)n);
+    CHECK(memcmp(plain, "RIFF", 4) == 0);
+    CHECK(memcmp(plain + 8, "svin", 4) == 0);
+
+    /* 'abc ' payload is 3 bytes; the size field must say 3, not 4. */
+    CHECK(memcmp(plain + 12, "abc ", 4) == 0);
+    CHECK(plain[16] == 3 && plain[17] == 0 && plain[18] == 0 && plain[19] == 0);
+
+    /* The pad byte at offset 23 is a ciphered zero on disk. */
+    CHECK(raw[23] == SPFY_OBFUSCATION_BYTE);
+    CHECK(plain[23] == 0);
+
+    /* Second chunk starts after the pad. */
+    CHECK(memcmp(plain + 24, "defg", 4) == 0);
+
+    /* Outer RIFF size covers everything after the size field itself. */
+    uint32_t riff_size = (uint32_t)plain[4] | ((uint32_t)plain[5] << 8) |
+                         ((uint32_t)plain[6] << 16) | ((uint32_t)plain[7] << 24);
+    CHECK(riff_size == (uint32_t)n - 8);
+
+    /* And the reader agrees with the writer. */
+    spfy_riff_iter it;
+    spfy_chunk c;
+    spfy_riff_iter_init(&it, plain + 12, (size_t)n - 12);
+    CHECK(spfy_riff_iter_next(&it, &c) == 1);
+    CHECK(c.fourcc == SPFY_FOURCC('a','b','c',' ') && c.size == 3);
+    CHECK(spfy_riff_iter_next(&it, &c) == 1);
+    CHECK(c.fourcc == SPFY_FOURCC('d','e','f','g') && c.size == 4);
+    CHECK(spfy_riff_iter_next(&it, &c) == 0);
+
+    remove(TMP_RIFF);
+}
+
+static void test_riff_write_str_w(void)
+{
+    spfy_riff_writer w;
+    CHECK(spfy_riff_create(&w, TMP_RIFF, "svin", SPFY_RIFF_PLAIN) == 0);
+    CHECK(spfy_riff_open_chunk(&w, "strw") == 0);
+    CHECK(spfy_riff_write_str_w(&w, "hi") == 0);
+    CHECK(spfy_riff_close_chunk(&w) == 0);
+    CHECK(spfy_riff_finish(&w) == 0);
+
+    uint8_t raw[64];
+    long n = slurp_tmp(raw, sizeof raw);
+    CHECK(n > 0);
+    /* word-prefixed, NOT wide, and NOT NUL-terminated */
+    CHECK(raw[20] == 2 && raw[21] == 0);
+    CHECK(raw[22] == 'h' && raw[23] == 'i');
+    CHECK(raw[16] == 4);   /* chunk size = 2 + 2 */
+
+    remove(TMP_RIFF);
+}
+
+static void test_riff_write_rejects_bad_fourcc(void)
+{
+    spfy_riff_writer w;
+    CHECK(spfy_riff_create(&w, TMP_RIFF, "svin", SPFY_RIFF_PLAIN) == 0);
+    CHECK(spfy_riff_open_chunk(&w, "ab")    != 0);   /* too short */
+    CHECK(spfy_riff_open_chunk(&w, "abcde") != 0);   /* too long  */
+    CHECK(spfy_riff_open_chunk(&w, "ab\tc") != 0);   /* bad char  */
+    CHECK(spfy_riff_finish(&w) == 0);
+    remove(TMP_RIFF);
+}
+
+/* ---- join cost (S4) ----------------------------------------------------
+ * Pins the four behaviours that make this the vendor's formula rather than a
+ * generic spectral distance: dim 0 absolute and voicing-gated, dim 1 dead,
+ * the seam term doubled, and continuations hard-zeroed. */
+
+#define JC_DIM 4u
+
+static void jc_setup(spfy_jc_t *jc, float *frames, float *w, uint32_t n_units)
+{
+    memset(jc, 0, sizeof *jc);
+    jc->dim = JC_DIM;
+    jc->n_units = n_units;
+    jc->frames = frames;
+    jc->weights = w;
+    jc->f0_gate = 0.0f;
+    jc->raw_scale = 1.0f;
+    for (uint32_t k = 0; k < JC_DIM; ++k) w[k] = 1.0f;
+    w[SPFY_JC_DIM_DEAD] = 0.0f;
+}
+
+static void test_jc_kernel_f0_gate(void)
+{
+    float frames[2 * JC_DIM] = { 0 };
+    float w[JC_DIM];
+    spfy_jc_t jc;
+    jc_setup(&jc, frames, w, 1);
+
+    float x[JC_DIM] = { 100.0f, 5.0f, 0.0f, 0.0f };
+    float y[JC_DIM] = { 110.0f, 9.0f, 0.0f, 0.0f };
+
+    /* Both voiced: dim 0 is |100-110| = 10, ABSOLUTE not squared.
+     * dim 1 is dead so its 4.0 difference must contribute nothing. */
+    CHECK(fabsf(spfy_jc_kernel(&jc, x, y) - 10.0f) < 1e-5f);
+
+    /* Left unvoiced: the dim-0 term drops out entirely rather than
+     * becoming a large penalty. */
+    x[0] = 0.0f;
+    CHECK(fabsf(spfy_jc_kernel(&jc, x, y) - 0.0f) < 1e-5f);
+
+    /* A spectral dimension is SQUARED. */
+    x[0] = 0.0f; y[0] = 0.0f;
+    x[3] = 3.0f; y[3] = 0.0f;
+    CHECK(fabsf(spfy_jc_kernel(&jc, x, y) - 9.0f) < 1e-5f);
+}
+
+static void test_jc_seam_is_doubled(void)
+{
+    /* 3 units. Make every frame identical except the seam pair, so only the
+     * doubled term is non-zero and its factor is directly observable. */
+    float frames[3 * 2 * JC_DIM];
+    float w[JC_DIM];
+    spfy_jc_t jc;
+    memset(frames, 0, sizeof frames);
+    jc_setup(&jc, frames, w, 3);
+
+    /* unit 0 end-frame spectral dim = 2, unit 2 start-frame = 0 -> diff 2. */
+    frames[(0 * 2 + 1) * JC_DIM + 3] = 2.0f;
+
+    /* raw = 2*kernel(end0,start2) + kernel(end0,end1) + kernel(start2,start1)
+     *     = 2*4            + 4              + 0        = 12 */
+    CHECK(fabsf(spfy_jc_raw(&jc, 0, 2) - 12.0f) < 1e-4f);
+}
+
+static void test_jc_continuation_is_hard_zero(void)
+{
+    float frames[3 * 2 * JC_DIM];
+    float w[JC_DIM];
+    spfy_jc_t jc;
+    memset(frames, 0, sizeof frames);
+    jc_setup(&jc, frames, w, 3);
+    frames[(0 * 2 + 1) * JC_DIM + 3] = 7.0f;   /* make raw large */
+
+    /* r == l+1 bypasses the affine map: exactly 0, not offset. */
+    CHECK(spfy_jc_cached_value(&jc, 0, 1, 1.75f, 0.15f) == 0.0f);
+    /* Everything else is >= the offset, which is what makes the vendor's
+     * measured floor (0.2826) exceed JOIN_COST_OFFSET (0.15). */
+    CHECK(spfy_jc_cached_value(&jc, 0, 2, 1.75f, 0.15f) > 0.15f);
+}
+
+static void test_jc_weights_disable_dim1(void)
+{
+    /* 2 units, 4 frames. Give dim 1 large variance; its weight must still
+     * come out exactly zero. */
+    float frames[2 * 2 * JC_DIM];
+    float w[JC_DIM];
+    spfy_jc_t jc;
+    memset(frames, 0, sizeof frames);
+    jc_setup(&jc, frames, w, 2);
+    for (uint32_t f = 0; f < 4u; ++f) {
+        frames[f * JC_DIM + 0u] = (float)(100u + f * 10u);  /* voiced */
+        frames[f * JC_DIM + 1u] = (float)(f * 1000u);       /* dead dim */
+        frames[f * JC_DIM + 2u] = (float)f;
+        frames[f * JC_DIM + 3u] = (float)(f * 2u);
+    }
+    CHECK(spfy_jc_derive_weights(&jc, 1.0f) == 0);
+    CHECK(w[SPFY_JC_DIM_DEAD] == 0.0f);
+    CHECK(w[SPFY_JC_DIM_F0] > 0.0f);
+    CHECK(w[3] > 0.0f);
+    /* dims >= 2 are shared out by (2*dim - 4); with dim 4 that is 4. */
+    CHECK(w[2] > 0.0f && w[2] < 1.0f);
+}
+
+/* ---- ckls: an EMPTY anchor group must not carry a sequence index ----
+ *
+ * Each ckls record is {u32 seq_index, token, span_start, span_end, filename};
+ * the index is written BEFORE its record, so a group with no records writes
+ * none. The engine's reader (voice/chunk_table.c) consumes it only when the
+ * count is non-zero, and felix ships an empty `_WORD_` group proving that is
+ * the vendor's rule too.
+ *
+ * No corpus we build yields an empty group, so this branch has no coverage
+ * from any build -- hence a direct control. It reads with the ENGINE's rule
+ * and asserts the writer's bytes are consumed EXACTLY; a writer that emits the
+ * word unconditionally leaves 4 bytes over and fails here. */
+static size_t ckls_scan_group(const uint8_t *p, size_t n, size_t *off,
+                              uint32_t *out_count)
+{
+    if (*off + 2u > n) return 0;
+    uint16_t nm = (uint16_t)(p[*off] | (p[*off + 1u] << 8));
+    *off += 2u + nm;
+    if (*off + 4u > n) return 0;
+    uint32_t cnt = (uint32_t)(p[*off] | (p[*off + 1u] << 8)
+                            | (p[*off + 2u] << 16) | (p[*off + 3u] << 24));
+    *off += 4u;
+    if (cnt) *off += 4u;                    /* record 0's sequence index */
+    for (uint32_t i = 0; i < cnt; ++i) {
+        if (*off + 2u > n) return 0;
+        uint16_t tl = (uint16_t)(p[*off] | (p[*off + 1u] << 8));
+        *off += 2u + tl + 8u;               /* token, span_start, span_end */
+        if (*off + 2u > n) return 0;
+        uint16_t fl = (uint16_t)(p[*off] | (p[*off + 1u] << 8));
+        *off += 2u + fl;                    /* filename */
+        if (i + 1u < cnt) *off += 4u;       /* the NEXT record's index */
+    }
+    *out_count = cnt;
+    return 1;
+}
+
+static void test_ckls_empty_group(void)
+{
+    char t0[] = "cloudy", f0[] = "wx_001";
+    char t1[] = "today",  f1[] = "wx_002";
+    spfy_vb_anchor rec[2];
+    memset(rec, 0, sizeof rec);
+    rec[0].text = t0; rec[0].file = f0;
+    rec[0].span_start = 10; rec[0].span_end = 21;
+    rec[1].text = t1; rec[1].file = f1;
+    rec[1].span_start = 30; rec[1].span_end = 37;
+
+    spfy_vb_anchors words;
+    spfy_vb_anchors syls;
+    memset(&words, 0, sizeof words);      /* the empty group */
+    memset(&syls, 0, sizeof syls);
+    syls.v = rec; syls.n = 2;
+
+    uint8_t *out = NULL;
+    size_t out_n = 0;
+    CHECK(spfy_vb_encode_ckls(&words, &syls, &out, &out_n) == SPFY_OK);
+    if (!out) return;
+
+    size_t off = 4;                        /* u32 n_groups */
+    uint32_t c0 = 0xFFFFFFFFu, c1 = 0xFFFFFFFFu;
+    CHECK(out_n >= 4u);
+    CHECK(ckls_scan_group(out, out_n, &off, &c0) == 1);
+    CHECK(c0 == 0u);
+    CHECK(ckls_scan_group(out, out_n, &off, &c1) == 1);
+    CHECK(c1 == 2u);
+    /* The whole point: no bytes left over and none borrowed. */
+    CHECK(off == out_n);
+
+    /* Control -- the same scan on two NON-empty groups must also be exact, so
+     * a pass above cannot come from the scanner simply being lax. */
+    free(out);
+    out = NULL; out_n = 0;
+    CHECK(spfy_vb_encode_ckls(&syls, &syls, &out, &out_n) == SPFY_OK);
+    if (!out) return;
+    off = 4; c0 = c1 = 0xFFFFFFFFu;
+    CHECK(ckls_scan_group(out, out_n, &off, &c0) == 1);
+    CHECK(ckls_scan_group(out, out_n, &off, &c1) == 1);
+    CHECK(c0 == 2u && c1 == 2u);
+    CHECK(off == out_n);
+    free(out);
+}
+
 int main(void)
 {
+    test_ckls_empty_group();
     test_ce_roundtrip();
     test_riff_iter();
+    test_jc_kernel_f0_gate();
+    test_jc_seam_is_doubled();
+    test_jc_continuation_is_hard_zero();
+    test_jc_weights_disable_dim1();
+    test_riff_write_encrypted_layout();
+    test_riff_write_str_w();
+    test_riff_write_rejects_bad_fourcc();
     test_riff_truncated();
     test_fourcc_str();
     test_cost_d_basic();

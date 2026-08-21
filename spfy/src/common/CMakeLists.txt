@@ -1,6 +1,7 @@
 add_library(spfy_common STATIC
     obfuscation.c
     riff.c
+    riff_write.c
     log.c
     file_io.c
     env.c

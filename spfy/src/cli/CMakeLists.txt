@@ -223,11 +223,15 @@ target_include_directories(spfy_text_norm_dump
     PRIVATE ${CMAKE_SOURCE_DIR}/src/text_norm)
 target_link_libraries(spfy_text_norm_dump PRIVATE spfy_text_norm)
 
-# Phase 4 in-house FE assembler — text → tagged-output (DLL-compatible).
-add_executable(spfy_fe_text2tagged spfy_fe_text2tagged.c)
-target_include_directories(spfy_fe_text2tagged
-    PRIVATE ${CMAKE_SOURCE_DIR}/src/fe_internal)
-target_link_libraries(spfy_fe_text2tagged PRIVATE spfy_fe_internal)
+# ⛔ spfy_fe_text2tagged is NO LONGER BUILT.
+#
+# It is a default FE with no voice loaded, and it disagreed with the engine on
+# 48.7% of words -- `mph` came out as letters where spfy_synth says "miles per
+# hour". Every label it produced described audio that does not exist. The
+# source stays in the tree; nothing should link it.
+#
+# Use spfy_synth with SPFY_ETAGS_DUMP=1. vb_fesrc.tagged_bodies() drives it
+# across all cores.
 
 # One-shot diagnostic: print Tom's unit corpus F0 byte distribution to
 # size the selection-only pitch range before falling back to PSOLA.
@@ -254,15 +258,18 @@ target_link_libraries(spfy_synth_replay
 # t000 (TLDs) and t001 (units of measure) to validate vocabulary
 # wiring before any pipeline stage is implemented.
 # Hosted-FE integration smoke test (built only when SPFY_FE_HOSTED=ON).
-if(SPFY_FE_HOSTED)
-    add_executable(spfy_fe_host_dump spfy_fe_host_dump.c)
-    target_include_directories(spfy_fe_host_dump
-        PRIVATE ${CMAKE_SOURCE_DIR}/src/fe
-                ${CMAKE_SOURCE_DIR}/src/voice
-    )
-    target_link_libraries(spfy_fe_host_dump
-        PRIVATE spfy_fe spfy_voice spfy_common)
-endif()
+# ⛔ spfy_fe_host_dump is NO LONGER BUILT.
+#
+# It gets the WORD sequence right -- measured 0 of 40,556 words differ from
+# spfy_synth across the corpus, `mph` included -- but NOT the phones: the
+# synth applies a reduction pass it does not (ax->ix, ih->ix, `ax l`->el,
+# t->dx). A unit labelled from host_dump carries a phone the audio does not
+# have, and mixing the two put the phone stream and the captured sp slots on
+# different indices once already (ctx cross-check 42.18% vs 99.70%).
+#
+# Since it was only ever the fast path to the right answer, and
+# vb_fesrc.tagged_bodies() now runs the synth across all cores at ~14/s,
+# there is nothing left for it to be faster at.
 
 if(NOT SPFY_FE_HOSTED)
 # These two exercise the legacy hand-written FE stage functions directly, so
@@ -287,3 +294,114 @@ endif()
 # The identity check here is what the whole stage rests on.
 add_executable(spfy_prosody_test spfy_prosody_test.c)
 target_link_libraries(spfy_prosody_test PRIVATE spfy_prosody spfy_common)
+
+# Acceptance test for the reconstructed RIFF writer: re-emit a container
+# through it and diff byte-for-byte. Everything the voice builder writes
+# hangs off this contract being right.
+add_executable(spfy_riff_roundtrip spfy_riff_roundtrip.c)
+target_link_libraries(spfy_riff_roundtrip PRIVATE spfy_common)
+
+# S4 acceptance gate: rebuild a voice's join-cost table from its own pair set
+# and compare, semantically and byte-for-byte. See src/vb/SPEC_S4_hash.md.
+# S4 calibration: our join cost against the vendor's cached distribution.
+add_executable(spfy_vb_joincost spfy_vb_joincost.c)
+target_include_directories(spfy_vb_joincost
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_joincost PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+# S4 cost identification: score the vendor's own cached pairs with a candidate
+# spectral representation and correlate PER PAIR, with a floor control. This is
+# what separates "the vendor's features" from "features with a similar spread";
+# spfy_vb_joincost only ever compared sorted distributions.
+add_executable(spfy_vb_jcfit spfy_vb_jcfit.c)
+target_include_directories(spfy_vb_jcfit
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_jcfit PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+# Price the S4 cost in picks, not in correlation: rebuild `hash` with
+# substituted costs over the vendor's own domain, so selection can be run
+# against it. See SPEC_S4_hash.md, "What the cost is worth".
+add_executable(spfy_vb_hashgen spfy_vb_hashgen.c)
+target_include_directories(spfy_vb_hashgen
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_hashgen PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+# Separate "the table is narrow" from "the table is truncated": relation width
+# per right unit against what the shipped table actually stores.
+add_executable(spfy_vb_domaudit spfy_vb_domaudit.c)
+target_include_directories(spfy_vb_domaudit
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+)
+target_link_libraries(spfy_vb_domaudit PRIVATE spfy_usel spfy_voice spfy_common)
+
+add_executable(spfy_hash_roundtrip spfy_hash_roundtrip.c)
+target_include_directories(spfy_hash_roundtrip
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+)
+# spfy_vb for spfy_hash_build: the packer moved out of spfy_usel so it could be
+# threaded without putting -fopenmp on anything spfy_synth links.
+target_link_libraries(spfy_hash_roundtrip PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+# The voice builder itself: corpus -> .vin/.vdb, all seven stages in order.
+# See src/vb/README.md. Replaces vb_build1.py + vb_mean_apply.py +
+# vb_trees_apply.py + vb_poolcap.py + vb_hash_cost/pack + vb_hash_apply.py.
+add_executable(spfy_vb_build spfy_vb_build.c)
+target_include_directories(spfy_vb_build
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_build PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+# ⛔ 2 GB is not enough to build a corpus this size. S4 JOIN returned
+# SPFY_E_NOMEM (stderr `join -4`) at a 1,616 MB peak on a 1,293,926-unit
+# inventory: a 32-bit image without this flag is capped at 2 GB of user
+# address space, and a fragmented heap fails a large allocation well below the
+# cap. This sets a PE header bit -- no code, no codegen, no ABI change -- and
+# is scoped to the container TOOLS, so the engine binary and its byte-identity
+# with vendor Speechify are untouched.
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_link_options(spfy_vb_build PRIVATE -Wl,--large-address-aware)
+endif()
+
+add_executable(spfy_vb_ccos spfy_vb_ccos.c)
+target_include_directories(spfy_vb_ccos
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_ccos PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+add_executable(spfy_vb_wagon spfy_vb_wagon.c)
+target_include_directories(spfy_vb_wagon
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_wagon PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+add_executable(spfy_vb_verify spfy_vb_verify.c)
+target_include_directories(spfy_vb_verify
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/cart
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_verify PRIVATE spfy_vb spfy_usel spfy_cart spfy_voice spfy_common)
+
+# Same reason as spfy_vb_build above: verify loads the whole container, and a
+# VIN carrying a hash chunk for 1.29 M units does not fit 2 GB either.
+if(WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 4)
+    target_link_options(spfy_vb_verify PRIVATE -Wl,--large-address-aware)
+endif()

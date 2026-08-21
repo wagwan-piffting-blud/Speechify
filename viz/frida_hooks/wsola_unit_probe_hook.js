@@ -33,7 +33,7 @@
  *
  * --- Safety ---
  *
- * Function-entry hook only (per [[feedback-frida-entry-only]]). Cap at
+ * Function-entry hook only. Cap at
  * TOTAL_CAP units across the session to bound trace size. All pointer
  * reads guarded.
  */

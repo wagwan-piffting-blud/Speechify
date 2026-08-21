@@ -81,7 +81,7 @@
   </param>
 
   <param name="tts.voice.name">
-     <value> tom </value> <!-- can be one of aimara, aimara2, tom, jill, felix, javier, paulina; the language folder the voice data is stored in MUST match below -->
+     <value> tom </value> <!-- can be one of crsmara, crstom, tom, jill, felix, javier, paulina; the language folder the voice data is stored in MUST match below -->
   </param>
 
   <param name="tts.voice.format">

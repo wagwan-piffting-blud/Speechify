@@ -1,0 +1,8 @@
+# Words the compaction must keep WHOLE, whatever the demand sample asked for.
+# One token per line, matched case-insensitively against the ckls _WORD_ token.
+#
+# 2026-08-21: `tornado` was the only word he named as rough in px2Oc. It has 13
+# anchors in the px2 corpus and the held-out Brown sample touches none of them,
+# so the cut left it to be spliced. 214 units, 0.09 MB.
+tornado
+tornadoes

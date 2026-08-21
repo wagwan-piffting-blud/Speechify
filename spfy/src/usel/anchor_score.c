@@ -1104,8 +1104,13 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
 
     /* SPFY_HP_COMP_DUMP — emit per-cand component costs for ALL cands (vs
      * SPFY_HP_COMP_UID which gates on a single uid for verbose diagnostic). */
-    if (spfy_env("SPFY_HP_COMP_DUMP")) {
-        fprintf(stderr,
+    /* Per CANDIDATE. Resolve once; pass a path, not "1" (stderr is
+     * unbuffered, so "1" costs a syscall per candidate scored). */
+    static FILE *hc = NULL;
+    static int   hc_init = 0;
+    if (!hc_init) { hc = spfy_dump_stream("SPFY_HP_COMP_DUMP"); hc_init = 1; }
+    if (hc) {
+        fprintf(hc,
             "{\"hp_comp\":1,\"uid\":%u,\"total\":%.6f,\"sp\":%.6f,"
             "\"flag\":%.6f,\"ccos\":%.6f,\"d\":%.6f,\"f0\":%.6f}\n",
             uid, (double)*out_cost, (double)sp_cost, (double)flag_cost,
@@ -1169,6 +1174,18 @@ void spfy_anchor_voice_set_default_weights(spfy_anchor_voice_t *av)
     av->w_dur = 0.30f;
     av->w_f0  = 0.20f;
     av->w_f0_miss = 5.0f;
+    /* SPFY_W_F0_MISS overrides the flat penalty charged when a unit has no
+     * f0_start. It exists for ONE experiment: `--f0 render` populates
+     * f0_start/f0_end so WSOLA's PSOLA crossfade can fire, and with the f0tr
+     * leaf variances zeroed the F0-span term is then 0 for every VOICED unit
+     * and 5.0 for every voiceless one -- variable, where `--f0 absent` charged
+     * all of them alike. That asymmetry is the last thing standing between
+     * "render-only" and provably identical picks. Default unchanged, so the
+     * parity gate does not see this. */
+    {
+        const char *e = spfy_env("SPFY_W_F0_MISS");
+        if (e && *e) av->w_f0_miss = (float)atof(e);
+    }
     av->anchor_norm  = 0.7f;
     av->anchor_norm2 = 0.005f;
     av->dat_971d8 = 0.1f;

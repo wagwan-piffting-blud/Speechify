@@ -82,7 +82,7 @@ LANGS = ("en-US", "es-MX", "fr-CA")
 
 # The clone voices share tom.vin byte for byte and their VDB audio is
 # synthetic -- fine to demo, never admissible as evidence about SpeechWorks.
-SYNTHETIC = {"aicraig", "aimara", "aimara2", "improvedaimara"}
+SYNTHETIC = {"aicraig", "crsmara", "crstom"}
 
 DISPLAY = {
     "tom": "Tom",
@@ -91,9 +91,8 @@ DISPLAY = {
     "paulina": "Paulina",
     "felix": "Félix",
     "aicraig": "Craig",
-    "aimara": "Mara",
-    "aimara2": "Mara Two",
-    "improvedaimara": "Mara - Improved",
+    "crsmara": "C R S Mara",
+    "crstom": "C R S Tom",
 }
 
 DEMO_TEXT = {

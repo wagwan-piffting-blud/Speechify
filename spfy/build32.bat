@@ -2,7 +2,24 @@
 setlocal
 set "MSYS_ROOT=C:\msys64"
 set "PATH=%MSYS_ROOT%\mingw32\bin;%PATH%"
+REM ⚠⚠ PROBE THE CMAKE, DO NOT ASSUME IT. On 2026-08-15 the MSYS2 mingw64
+REM cmake.exe stopped being able to START AT ALL (exit 57, no output, no
+REM diagnostic -- a broken package after an msys2 update). Because the build
+REM step's failure was not checked, the script went on to print
+REM "Built ...spfy_sapi64.dll" and looked successful while spfy_synth.exe
+REM stayed STALE for a day. A parity run then passed 221/221 against the OLD
+REM binary, which is the worst possible outcome: a green gate that proves
+REM nothing. Probe, prefer msys2, fall back to the system CMake, and refuse
+REM to continue if neither runs.
+REM ⚠ PROBE WITH ||, NOT `if errorlevel`. A cmake that cannot START is not the
+REM same as one that runs and returns non-zero, and `if errorlevel 1` did not
+REM catch it here -- the fallback never fired and the stale binary survived a
+REM second time. The && / || form does catch it.
 set "CMAKE=%MSYS_ROOT%\mingw64\bin\cmake.exe"
+("%CMAKE%" --version >nul 2>&1) || (
+    echo build32: msys2 cmake cannot run -- using the system CMake
+    set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"
+)
 set "NINJA=%MSYS_ROOT%\mingw64\bin\ninja.exe"
 set "GCC=%MSYS_ROOT%\mingw32\bin\gcc.exe"
 set "GXX=%MSYS_ROOT%\mingw32\bin\g++.exe"
@@ -22,10 +39,21 @@ if "%~1"=="sapi64"    goto :sapi64
 if "%~1"=="" goto :all
 
 :all
+("%CMAKE%" --version >nul 2>&1) || (
+    echo ERROR: no working cmake -- neither msys2's nor the system CMake runs.
+    exit /b 1
+)
 call :configure
-if errorlevel 1 exit /b 1
-"%CMAKE%" --build "%BUILD_DIR%"
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    echo ERROR: cmake configure failed.
+    exit /b 1
+)
+("%CMAKE%" --build "%BUILD_DIR%") || (
+    echo ERROR: cmake --build failed. spfy_synth.exe is NOT up to date --
+    echo        do NOT run the parity gate against it: it will pass on the
+    echo        stale binary and prove nothing.
+    exit /b 1
+)
 REM src/sapi/CMakeLists.txt gates spfy_sapi64 on CMAKE_SIZEOF_VOID_P EQUAL 8,
 REM so this 32-bit configure can never produce it -- but
 REM installer/spfy_setup.iss requires it with no skipifsourcedoesntexist, so
