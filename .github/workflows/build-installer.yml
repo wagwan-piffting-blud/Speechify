@@ -245,29 +245,56 @@ jobs:
             -Wl,--kill-at \
             -Wl,--out-implib,"$OUTDIR/libspfy_sapi64.dll.a"
 
-      # `file` output is asserted, not just printed. A silently 64-bit
+      # The architecture is ASSERTED, not just printed: a silently 64-bit
       # spfy_sapi.dll would still install and still regsvr32 "successfully"
-      # under the wrong loader, so the arch is checked where it is cheap.
+      # under the wrong loader.
+      #
+      # ⛔ NOT `file | grep`. Its wording is not stable across versions —
+      # file 5.46 prints "Intel i386" where older builds printed
+      # "Intel 80386", and a grep for the wrong one fails a perfectly good
+      # binary. `objdump -f` emits a machine token instead of prose:
+      #     32-bit -> architecture: i386,
+      #     64-bit -> architecture: i386:x86-64,
+      # Note the 64-bit token CONTAINS the 32-bit one, so this compares the
+      # extracted field exactly rather than grepping for a substring.
+      #
+      # ⛔ IT MUST BE THE x86_64 objdump. The i686 binutils cannot read a
+      # PE32+ at all — it prints "file format not recognized" and yields an
+      # EMPTY architecture, which a naive comparison then reports as a wrong
+      # architecture. The empty case is therefore its own error: "could not
+      # read" and "built wrong" must not look alike.
       - name: Verify build outputs
         shell: msys2 {0}
         run: |
           set -eu
+          for c in /mingw64/bin/objdump.exe /usr/bin/objdump; do
+            [ -x "$c" ] && OBJDUMP="$c" && break
+          done
+          : "${OBJDUMP:=$(command -v objdump)}"
+          echo "  objdump: $OBJDUMP"
+          arch_of() {
+            "$OBJDUMP" -f "$1" 2>/dev/null | sed -n 's/^architecture: \([^,]*\),.*/\1/p'
+          }
+          check() {   # <path> <expected-token>
+            got=$(arch_of "$1")
+            printf '  %-18s %-14s %s\n' "$(basename "$1")" "${got:-?}" "$(file -b "$1")"
+            [ -n "$got" ] || { echo "::error::$OBJDUMP could not read $1"; exit 1; }
+            [ "$got" = "$2" ] || { echo "::error::$(basename "$1") is '$got', expected '$2'"; exit 1; }
+          }
           ls -la /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll
           ls -la /c/tmp/spfy_build32/src/cli/spfy_synth.exe
-          file /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll | grep -q "80386" \
-            || { echo "spfy_sapi.dll is not 32-bit x86"; exit 1; }
-          file /c/tmp/spfy_build32/src/cli/spfy_synth.exe | grep -q "80386" \
-            || { echo "spfy_synth.exe is not 32-bit x86"; exit 1; }
+          check /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll i386
+          check /c/tmp/spfy_build32/src/cli/spfy_synth.exe i386
           if [ "${{ matrix.build64 }}" = "true" ]; then
             ls -la /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll
-            file /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll | grep -q "x86-64" \
-              || { echo "spfy_sapi64.dll is not x86-64"; exit 1; }
+            check /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll i386:x86-64
           else
             # The x86 installer must not be able to pick one up by accident:
             # if a stale 64-bit DLL were present the [Files] #if would still
             # exclude it, but its absence here is the cheaper proof.
             test ! -f /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll \
-              || { echo "unexpected spfy_sapi64.dll on the x86 leg"; exit 1; }
+              || { echo "::error::unexpected spfy_sapi64.dll on the x86 leg"; exit 1; }
+            echo "  spfy_sapi64.dll    (absent, as expected on the x86 leg)"
           fi
 
       # --------------------------------------------------------------

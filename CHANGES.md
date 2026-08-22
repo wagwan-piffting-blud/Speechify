@@ -4,6 +4,8 @@
 
 - Overall engine and WASM deployment updates. Also backport the Inno installer for spfy to as far back as Windows 7. The Inno installer is the recommended way to install spfy/Speechify voices on Windows overall.
 
+- Fix build error in WASM/Windows builds due to the recent changes made last commit. Non-CI local testing can only catch so much...
+
 ---
 
 ## 2026-08-21

@@ -118,6 +118,9 @@ def discover(root, large_bytes):
                 # a confirm when the voice is actually big.
                 "large": bool(over.get("large", total >= large_bytes)),
                 "bytes": total,
+                # Consumed by pick_default(), then dropped from the entry —
+                # the manifest carries one top-level "default" id instead.
+                "_default": bool(over.get("default", False)),
             })
     # ⚠ Two voices showing the same label is a UI trap, and it happens for a
     # real reason: a voice built from another's template inherits that
@@ -142,6 +145,22 @@ COPY_CHUNK = 8 * 1024 * 1024
 # roughly "will not finish quickly on a phone"; the four historic voices sit
 # well under it and were all flagged large:false by hand.
 LARGE_BYTES = 150 * 1024 * 1024
+
+# ⛔ WHICH VOICE THE PAGE OPENS WITH IS A DECISION, NOT AN ACCIDENT OF SORTING.
+# The manifest is ordered language-then-id for a readable diff, so before this
+# existed the page loaded whatever sorted first -- and adding `crsmara`/`aicraig`
+# silently moved the default off tom and broke the smoke test's Phase 1, which
+# had been asserting a property nothing guaranteed.
+#
+# tom is the choice because he is the committed vendor voice every other gate in
+# this repo already leans on (the unix legs' byte-exactness check synthesizes
+# through en-US/tom), so "the demo opens on tom" and "CI verifies tom" stay the
+# same statement.
+#
+# Override per voice with `{"default": true}` in its voice.json, or per build
+# with --default. If the named voice is not staged, the first entry is used and
+# the fallback is announced -- never silently.
+DEFAULT_VOICE_ID = "tom"
 
 
 def voice_files(v):
@@ -299,6 +318,36 @@ def load_external(path):
     return data.get("voices", [])
 
 
+def pick_default(entries, voices, want):
+    """The id the page should open with, and why. Order of authority:
+    --default, then `"default": true` in a voice.json, then DEFAULT_VOICE_ID,
+    then the first staged entry.
+
+    Returns (id, reason). Never returns an id that is not in `entries`: a
+    default naming a voice that failed to stage would leave the page loading
+    nothing at all.
+    """
+    have = {e["id"] for e in entries}
+    if not entries:
+        return None, "no voices staged"
+    flagged = [v["id"] for v in voices if v.get("_default") and v["id"] in have]
+    if want:
+        if want in have:
+            return want, "--default"
+        print(f"  ⚠ --default {want!r} was not staged; falling back",
+              file=sys.stderr)
+    if len(flagged) > 1:
+        print(f"  ⚠ {len(flagged)} voices claim \"default\": true "
+              f"({', '.join(flagged)}); using {flagged[0]}", file=sys.stderr)
+    if flagged:
+        return flagged[0], "voice.json"
+    if DEFAULT_VOICE_ID in have:
+        return DEFAULT_VOICE_ID, "DEFAULT_VOICE_ID"
+    print(f"  ⚠ default voice {DEFAULT_VOICE_ID!r} is not in this build; "
+          f"the page will open on {entries[0]['id']!r}", file=sys.stderr)
+    return entries[0]["id"], "first staged (fallback)"
+
+
 def main():
     default_ext = Path(__file__).resolve().parent.parent / "external_voices.json"
     ap = argparse.ArgumentParser()
@@ -315,6 +364,9 @@ def main():
                     help="comma list of voice ids; stage only these")
     ap.add_argument("--list", action="store_true",
                     help="print what discovery finds and exit, staging nothing")
+    ap.add_argument("--default", default=None, metavar="ID",
+                    help=f"voice the page opens with (default: "
+                         f"{DEFAULT_VOICE_ID}, else the first staged)")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -360,11 +412,14 @@ def main():
         entries.append(external_entry(v))
         print(f"  external {v['id']}: {v['baseUrl']}", file=sys.stderr)
 
-    manifest = {"version": 1, "voices": entries}
+    default_id, why = pick_default(entries, voices, args.default)
+
+    manifest = {"version": 1, "default": default_id, "voices": entries}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     ids = ", ".join(e["id"] for e in entries) or "(none)"
     print(f"manifest.json: {len(entries)} voice(s) staged: {ids}",
           file=sys.stderr)
+    print(f"  default: {default_id} ({why})", file=sys.stderr)
     return 0
 
 

@@ -250,10 +250,23 @@ async function boot() {
     populateVoicePicker(voices);
     voiceSelect.addEventListener("change", () => loadVoice(voiceSelect.value));
 
-    // Auto-load the first (default) voice through the same lazy path so the
-    // demo is ready to speak on arrival.
-    voiceSelect.value = voices[0].id;
-    await loadVoice(voices[0].id);
+    // Auto-load the default voice through the same lazy path so the demo is
+    // ready to speak on arrival.
+    //
+    // ⛔ NOT voices[0]. The manifest is sorted language-then-id for a readable
+    // diff, so relying on position meant that adding a voice whose id sorted
+    // earlier silently changed which voice the page opens with -- which is
+    // exactly what adding aicraig/crsmara did. stage_voices.py now names the
+    // default explicitly; falling back to the first entry keeps an older
+    // manifest working.
+    const wanted = state.manifest.default;
+    const chosen = voices.some((v) => v.id === wanted) ? wanted : voices[0].id;
+    if (wanted && chosen !== wanted) {
+        console.warn(`[spfy] manifest default '${wanted}' is not in the ` +
+                     `catalog; opening '${chosen}'`);
+    }
+    voiceSelect.value = chosen;
+    await loadVoice(chosen);
 }
 
 // ---------------------------------------------------------------------

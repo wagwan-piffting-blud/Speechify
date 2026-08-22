@@ -138,8 +138,27 @@ def main():
         wait_status(drv, "Ready", 90, "Tom")
         ids = [o.get_attribute("value")
                for o in drv.find_elements(By.CSS_SELECTOR, "#voice-select option")]
+        # The manifest's declared default, not its first entry. When this
+        # phase fails, the useful question is "which voice did the page mean
+        # to open, and did it?" -- reporting only "Tom not loaded" sent the
+        # last investigation looking at the runtime instead of at ordering.
+        declared = drv.execute_async_script(
+            "const cb = arguments[0];"
+            "fetch('voices/manifest.json').then(r => r.json())"
+            "  .then(m => cb(m.default || null)).catch(() => cb(null));")
+        selected = drv.find_element(By.ID, "voice-select").get_attribute("value")
         print(f"    voices in picker ({len(ids)}): {ids}")
-        assert "Tom" in status_text(drv), "Tom not loaded"
+        print(f"    manifest default: {declared!r}  ·  picker selected: "
+              f"{selected!r}")
+        assert declared, ("voices/manifest.json has no \"default\" — "
+                          "stage_voices.py must name one")
+        assert selected == declared, (
+            f"page opened {selected!r} but the manifest declares "
+            f"{declared!r} as the default")
+        assert "Tom" in status_text(drv), (
+            f"Tom not loaded — manifest default is {declared!r}; if that is "
+            f"not 'tom', change DEFAULT_VOICE_ID in stage_voices.py rather "
+            f"than this assertion")
         do_synth(drv, "The quick brown fox jumps over the lazy dog.", "Tom")
         results["1_tom"] = "PASS"
 
