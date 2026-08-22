@@ -1,5 +1,11 @@
 # Speechify/spfy Changelog
 
+## 2026-08-22
+
+- Overall engine and WASM deployment updates. Also backport the Inno installer for spfy to as far back as Windows 7. The Inno installer is the recommended way to install spfy/Speechify voices on Windows overall.
+
+---
+
 ## 2026-08-21
 
 - CRS Mara is now available for use in both Speechify and spfy (yes, it works in both engines just fine, though don't expect byte-identical parity with this specific voice!). This is a new voice that is partially made with real CRS-era direct synthesis from the NOAA Weather Radio archived webpages on Internet Archive, and partially with synthesis from [StyleTTS 2](https://github.com/yl4579/styletts2), a neural TTS engine known for being able to generate high-quality speech. It is a more natural-sounding voice than the original AI Mara, and is intended to be a replacement for it. Give it a try and let me know what you think! Feedback is always welcome. CRS Tom is Coming Soon™. The old AI Mara voice has been deleted, if you REALLY want it back, you can find it in the git history, but it is now considered **deprecated**.

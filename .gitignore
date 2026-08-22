@@ -44,6 +44,7 @@ examples/
 reveng/spfy4/
 generate_*archive.bat
 *.obj
+!voice.json
 
 # The engine reference for the audio parity gate. Tom's set is flat; every
 # other voice nests one level down (engine_ref/<voice>/), so the gate can be

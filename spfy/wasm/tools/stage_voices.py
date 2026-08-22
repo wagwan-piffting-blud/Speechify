@@ -26,32 +26,122 @@ SPDX-License-Identifier: GPL-3.0-or-later
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
-# Voices staged LOCALLY: files copied from the repo working tree into
-# dist/voices/ and served same-origin from the site. id, display name,
-# VCF language tag, on-disk file prefix, dir under repo root, and whether
-# the UI should gate the download behind a confirm.
+# ⭐ VOICES ARE DISCOVERED, NOT LISTED. The repo convention is
+# `<lang>/<name>/<name>.vin` + `<name>8.vdb` + `<name>.vcf`, which is the same
+# rule the registry tools resolve by, so a new voice appears on the site by
+# existing rather than by being added here. A hard-coded table silently omits
+# every voice someone forgets to append to it, and that failure looks exactly
+# like a build that worked.
+#
+# Identity comes from the VOICE'S OWN VCF -- name, language, gender are stored
+# there and are what the engine itself reads, so the site cannot disagree with
+# the synthesiser about what a voice is called.
 #
 # Voices too large to commit / serve from Pages (e.g. Paulina, whose
 # 253 MB VDB exceeds GitHub's 100 MB limits) are declared in
 # external_voices.json instead and fetched from a CORS-enabled host.
-VOICES = [
-    {"id": "tom",     "display": "Tom",     "lang": "en-US",
-     "prefix": "tom",     "dir": "en-US/tom",     "large": False},
-    {"id": "jill",    "display": "Jill",    "lang": "en-US",
-     "prefix": "jill",    "dir": "en-US/jill",    "large": False},
-    {"id": "javier",  "display": "Javier",  "lang": "es-MX",
-     "prefix": "javier",  "dir": "es-MX/javier",  "large": False},
-    {"id": "felix",   "display": "Felix",   "lang": "fr-CA",
-     "prefix": "felix",   "dir": "fr-CA/felix",   "large": False},
-]
+
+# Language directories to scan. A dir is a language iff it looks like a BCP-47
+# tag; that keeps `spfy/`, `bin/`, `doc/` and friends out without a blocklist
+# that would need maintaining.
+LANG_DIR = re.compile(r"^[a-z]{2}-[A-Z]{2}$")
+
+# The 2:1 nibble cipher a .vcf is stored in. Inlined rather than imported from
+# reveng/ so this stays runnable in a CI checkout that has no reveng tree.
+_VCF_ENC = [0xDD, 0xDC, 0xDF, 0xDE, 0xD9, 0xD8, 0xDB, 0xDA,
+            0xD5, 0xD4, 0xAC, 0xAF, 0xAE, 0xA9, 0xA8, 0xAB]
+_VCF_DEC = {c: n for n, c in enumerate(_VCF_ENC)}
+
+
+def vcf_params(path):
+    """{param: value} from a .vcf, or {} if it cannot be read."""
+    try:
+        raw = Path(path).read_bytes()
+        txt = bytes(((_VCF_DEC[raw[i]] << 4) | _VCF_DEC[raw[i + 1]])
+                    for i in range(0, len(raw) - 1, 2)).decode("latin1")
+    except (OSError, KeyError, IndexError, UnicodeDecodeError):
+        return {}
+    return dict(re.findall(
+        r'<param name="tts\.voiceCfg\.([A-Za-z0-9_]+)">\s*<value>\s*'
+        r'([^\s<]*)\s*</value>', txt))
+
+
+def display_name(vcf, fallback):
+    """A human label. The VCF is authoritative but not always presentable --
+    `javier` ships lowercase and `CRS_Mara` uses an underscore."""
+    name = (vcf.get("name") or "").replace("_", " ").strip()
+    if not name:
+        name = fallback
+    return name.title() if name.islower() else name
+
+
+def discover(root, large_bytes):
+    """Every voice in the working tree, by convention. Sorted for a stable
+    manifest: language first, then id, so a diff of manifest.json is readable.
+
+    An optional `voice.json` beside the voice files overrides anything here;
+    `{"skip": true}` keeps a work-in-progress voice off the site without
+    deleting it or editing this script.
+    """
+    found = []
+    for lang_dir in sorted(p for p in Path(root).iterdir()
+                           if p.is_dir() and LANG_DIR.match(p.name)):
+        for d in sorted(x for x in lang_dir.iterdir() if x.is_dir()):
+            vid = d.name
+            vin, vdb, vcf = d / f"{vid}.vin", d / f"{vid}8.vdb", d / f"{vid}.vcf"
+            if not (vin.is_file() and vdb.is_file() and vcf.is_file()):
+                continue
+            over = {}
+            ov = d / "voice.json"
+            if ov.is_file():
+                try:
+                    over = json.loads(ov.read_text(encoding="utf-8"))
+                except ValueError:
+                    print(f"  ⚠ {ov} is not valid JSON; ignoring",
+                          file=sys.stderr)
+            if over.get("skip"):
+                print(f"  - {lang_dir.name}/{vid}: skipped by voice.json")
+                continue
+            p = vcf_params(vcf)
+            total = sum(f.stat().st_size for f in (vin, vdb, vcf))
+            found.append({
+                "id": vid,
+                "display": over.get("display") or display_name(p, vid),
+                "lang": over.get("lang") or p.get("language") or lang_dir.name,
+                "prefix": vid,
+                "dir": f"{lang_dir.name}/{vid}",
+                # Not a hand-set flag any more: the UI gates a download behind
+                # a confirm when the voice is actually big.
+                "large": bool(over.get("large", total >= large_bytes)),
+                "bytes": total,
+            })
+    # ⚠ Two voices showing the same label is a UI trap, and it happens for a
+    # real reason: a voice built from another's template inherits that
+    # template's VCF `name` until it is overridden. Say so rather than shipping
+    # a picker with two identical entries.
+    seen = {}
+    for v in found:
+        seen.setdefault(v["display"], []).append(v["dir"])
+    for label, dirs in seen.items():
+        if len(dirs) > 1:
+            print(f"  ⚠ display name {label!r} is used by {len(dirs)} voices "
+                  f"({', '.join(dirs)}) -- set tts.voiceCfg.name in the VCF, "
+                  f"or `display` in voice.json", file=sys.stderr)
+    return found
 
 # 90 MiB. GitHub blocks pushes of files >100 MB and Pages refuses to serve
 # them, so keep every emitted object comfortably under that.
 DEFAULT_THRESHOLD = 90 * 1024 * 1024
 COPY_CHUNK = 8 * 1024 * 1024
+
+# Total voice size at or above which the UI asks before downloading. 150 MB is
+# roughly "will not finish quickly on a phone"; the four historic voices sit
+# well under it and were all flagged large:false by hand.
+LARGE_BYTES = 150 * 1024 * 1024
 
 
 def voice_files(v):
@@ -218,17 +308,45 @@ def main():
                     help="max bytes per emitted object before splitting")
     ap.add_argument("--external", default=str(default_ext),
                     help="JSON of off-site voices to append (absolute URLs)")
+    ap.add_argument("--large-bytes", type=int, default=LARGE_BYTES,
+                    help="total size at or above which the UI confirms before "
+                         "downloading a voice")
+    ap.add_argument("--only", default=None,
+                    help="comma list of voice ids; stage only these")
+    ap.add_argument("--list", action="store_true",
+                    help="print what discovery finds and exit, staging nothing")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
     out = Path(args.out).resolve()
-    out.mkdir(parents=True, exist_ok=True)
 
+    voices = discover(root, args.large_bytes)
+    if args.only:
+        want = {s.strip() for s in args.only.split(",") if s.strip()}
+        missing = want - {v["id"] for v in voices}
+        if missing:
+            print(f"--only names voices that were not discovered: "
+                  f"{', '.join(sorted(missing))}", file=sys.stderr)
+            return 2
+        voices = [v for v in voices if v["id"] in want]
+
+    if args.list:
+        for v in voices:
+            print(f"  {v['dir']:<24s} {v['display']:<14s} {v['lang']:<7s} "
+                  f"{v['bytes'] / 1e6:8.1f} MB"
+                  + ("  [large]" if v["large"] else ""))
+        print(f"{len(voices)} voice(s) discovered under {root}")
+        return 0
+
+    out.mkdir(parents=True, exist_ok=True)
     print(f"staging voices from {root} -> {out} "
           f"(split >{args.threshold} B)", file=sys.stderr)
+    print(f"  discovered: "
+          + (", ".join(f"{v['id']}({v['lang']})" for v in voices) or "(none)"),
+          file=sys.stderr)
 
     entries = []
-    for v in VOICES:
+    for v in voices:
         e = stage_voice(v, root, out, args.threshold)
         if e:
             entries.append(e)

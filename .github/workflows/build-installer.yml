@@ -10,9 +10,19 @@
 # Jobs:
 #   * setup          — resolves the date-based version once so every
 #                      build and the release agree on the string.
-#   * build-windows  — msys2 mingw32/mingw64 + Inno Setup. Produces
-#                      spfy-setup-<version>.exe (registers SAPI, drops
-#                      the FE data into %USERPROFILE%\Documents).
+#   * build-windows  — msys2 mingw32/mingw64 + Inno Setup, as a matrix over
+#                      arch. Produces TWO installers:
+#                        x64 -> spfy-setup-<version>.exe
+#                        x86 -> spfy-setup-<version>-x86.exe
+#                      Both register SAPI and drop the FE data into
+#                      %USERPROFILE%\Documents. They are separate installers,
+#                      not one universal build, because the x86 one has no
+#                      spfy_sapi64.dll to ship and registers through
+#                      System32\regsvr32 instead of SysWOW64\regsvr32.
+#                      The 32-bit payload itself needed no change: it was
+#                      always i686/min-OS-4.0/msvcrt with no post-NT-6.1
+#                      imports — the installer's ArchitecturesAllowed was
+#                      the only thing refusing 32-bit Windows.
 #   * build-unix     — matrix over linux-x86 (i386), linux-x86_64,
 #                      linux-armv7, linux-arm64, macos-arm64 and
 #                      macos-x86_64. No SAPI (Windows COM only); each leg
@@ -27,7 +37,9 @@
 # Toolchains:
 #   * Windows: msys2 mingw32 (i686) for the main project + 32-bit SAPI
 #     DLL, msys2 mingw64 (x86_64) for the 64-bit SAPI shim, Inno Setup 6
-#     via Chocolatey.
+#     via Chocolatey. The x86 leg skips the 64-bit shim step entirely; it
+#     still needs the mingw64 cmake/ninja, which are what drive the
+#     mingw32 compiler (see the Configure step).
 #   * Linux: stock gcc, cmake, ninja. gcc-multilib is needed ONLY by the
 #     i386 leg, and only for its 32-bit libc.
 #   * Linux armv7: no hosted 32-bit ARM runner exists, so this leg builds
@@ -124,6 +136,30 @@ jobs:
       run:
         shell: pwsh
 
+    strategy:
+      # Same reason as build-unix: one arch failing shouldn't hide the other's
+      # result. The release job still requires BOTH — they are both shipped
+      # deliverables now, not a primary and a nice-to-have.
+      fail-fast: false
+      matrix:
+        include:
+          # 64-bit Windows. Ships spfy_sapi64.dll alongside the 32-bit COM
+          # DLL and registers through SysWOW64\regsvr32.
+          - arch: x64
+            build64: true
+          # 32-bit Windows, down to Windows 7 SP1 (Inno's own default
+          # MinVersion floor, which this script does not override).
+          #
+          # It is a SEPARATE INSTALLER rather than one universal build: there
+          # is no spfy_sapi64.dll to ship and regsvr32 lives in System32, so
+          # a combined installer would carry a 64-bit DLL it could never
+          # install. The payload needed no change at all — spfy_sapi.dll and
+          # spfy_synth.exe are already i686, min OS 4.0, msvcrt (not UCRT)
+          # and import nothing newer than NT 6.1. Only the installer's
+          # ArchitecturesAllowed was refusing to run.
+          - arch: x86
+            build64: false
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -187,6 +223,7 @@ jobs:
       # --------------------------------------------------------------
 
       - name: Build 64-bit SAPI shim
+        if: matrix.build64
         shell: msys2 {0}
         run: |
           SRCDIR="$(cygpath -u '${{ github.workspace }}')/spfy/src/sapi"
@@ -208,14 +245,30 @@ jobs:
             -Wl,--kill-at \
             -Wl,--out-implib,"$OUTDIR/libspfy_sapi64.dll.a"
 
+      # `file` output is asserted, not just printed. A silently 64-bit
+      # spfy_sapi.dll would still install and still regsvr32 "successfully"
+      # under the wrong loader, so the arch is checked where it is cheap.
       - name: Verify build outputs
         shell: msys2 {0}
         run: |
+          set -eu
           ls -la /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll
-          ls -la /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll
           ls -la /c/tmp/spfy_build32/src/cli/spfy_synth.exe
-          file /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll
-          file /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll
+          file /c/tmp/spfy_build32/src/sapi/spfy_sapi.dll | grep -q "80386" \
+            || { echo "spfy_sapi.dll is not 32-bit x86"; exit 1; }
+          file /c/tmp/spfy_build32/src/cli/spfy_synth.exe | grep -q "80386" \
+            || { echo "spfy_synth.exe is not 32-bit x86"; exit 1; }
+          if [ "${{ matrix.build64 }}" = "true" ]; then
+            ls -la /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll
+            file /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll | grep -q "x86-64" \
+              || { echo "spfy_sapi64.dll is not x86-64"; exit 1; }
+          else
+            # The x86 installer must not be able to pick one up by accident:
+            # if a stale 64-bit DLL were present the [Files] #if would still
+            # exclude it, but its absence here is the cheaper proof.
+            test ! -f /c/tmp/spfy_build32/src/sapi/spfy_sapi64.dll \
+              || { echo "unexpected spfy_sapi64.dll on the x86 leg"; exit 1; }
+          fi
 
       # --------------------------------------------------------------
       # Inno Setup — package the installer
@@ -231,6 +284,7 @@ jobs:
             $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
           }
           & $iscc `
+            /DTargetArch="${{ matrix.arch }}" `
             /DBuildDir="C:\tmp\spfy_build32" `
             /DSourceRoot="${{ github.workspace }}" `
             /DSpfyVersion="${{ needs.setup.outputs.version }}" `
@@ -242,10 +296,27 @@ jobs:
           }
           Get-ChildItem "${{ github.workspace }}\installer\dist\"
 
+      # Each leg must produce exactly the filename the release job asks for by
+      # name. Globbing the upload would let an x86 leg that quietly compiled
+      # the x64 script sail through and overwrite the real one on merge.
+      - name: Verify installer filename
+        run: |
+          $ver = "${{ needs.setup.outputs.version }}"
+          $suffix = if ("${{ matrix.arch }}" -eq "x86") { "-x86" } else { "" }
+          $want = "${{ github.workspace }}\installer\dist\spfy-setup-$ver$suffix.exe"
+          if (-not (Test-Path $want)) {
+            Write-Error "expected $want, found: $(
+              (Get-ChildItem "${{ github.workspace }}\installer\dist\*.exe" |
+               ForEach-Object { $_.Name }) -join ', ')"
+            exit 1
+          }
+          "{0}  {1:N0} bytes" -f (Split-Path $want -Leaf),
+            (Get-Item $want).Length
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v7
         with:
-          name: spfy-installer-windows-${{ needs.setup.outputs.version }}
+          name: spfy-installer-windows-${{ matrix.arch }}-${{ needs.setup.outputs.version }}
           path: installer/dist/*.exe
           if-no-files-found: error
           retention-days: 30
@@ -512,6 +583,16 @@ jobs:
           echo "Publishing:"
           ls -la dist/
           missing=0
+          # Windows first, and by exact name. `fail_on_unmatched_files: false`
+          # is required for the partial-unix-release behaviour, which means a
+          # missing .exe would otherwise be published silently.
+          for w in "spfy-setup-${{ needs.setup.outputs.version }}.exe" \
+                   "spfy-setup-${{ needs.setup.outputs.version }}-x86.exe"; do
+            if [ ! -f "dist/$w" ]; then
+              echo "::warning title=Missing installer::$w did not build — release is partial"
+              missing=$((missing + 1))
+            fi
+          done
           for t in linux-x86 linux-x86_64 linux-armv7 linux-arm64 macos-arm64 macos-x86_64; do
             if ! ls dist/spfy-"$t"-*.tar.gz >/dev/null 2>&1; then
               echo "::warning title=Missing target::no artifact for $t — release is partial"
@@ -552,4 +633,5 @@ jobs:
           fail_on_unmatched_files: false
           files: |
             dist/spfy-setup-${{ needs.setup.outputs.version }}.exe
+            dist/spfy-setup-${{ needs.setup.outputs.version }}-x86.exe
             dist/*.tar.gz

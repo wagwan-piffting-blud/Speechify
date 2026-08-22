@@ -51,6 +51,41 @@
 #define SpfyVersionInfo "1.0.0.0"
 #endif
 
+; Which Windows this installer targets: "x64" (default) or "x86".
+;
+; They are SEPARATE INSTALLERS, not one universal build, because the payloads
+; genuinely differ — the x86 one has no spfy_sapi64.dll to ship, and its
+; regsvr32 lives somewhere else. A single installer allowing both would carry
+; a 64-bit DLL it can never install and a Check: on every line that touches it.
+;
+; Everything that varies between the two is gathered here and at the three
+; #if TargetArch sites below ([Setup] architectures + filename, [Files] the
+; 64-bit shim, [Run] the regsvr32 path). Nothing else in this script cares.
+;
+;   iscc /DTargetArch=x86 spfy_setup.iss   ->  spfy-setup-<ver>-x86.exe
+;   iscc                  spfy_setup.iss   ->  spfy-setup-<ver>.exe
+#ifndef TargetArch
+#define TargetArch "x64"
+#endif
+#if (TargetArch != "x64") && (TargetArch != "x86")
+#error TargetArch must be "x64" or "x86"
+#endif
+
+; Where the 32-BIT regsvr32 lives on the target. On 64-bit Windows that is
+; SysWOW64 (the naming is historical); on 32-bit Windows there is no SysWOW64
+; and System32 — {sys} — holds the 32-bit one.
+;
+; ⚠ THIS IS A #define, NOT AN #if AROUND THE [Run] LINE, and it has to be.
+; That entry ends each line with Inno's `\` continuation, which swallows a
+; following `#else` as part of the same logical line — the `#if` then never
+; closes and the compiler fails at EOF with "'endif' expected", pointing at
+; the last line of the file rather than at the actual mistake.
+#if TargetArch == "x86"
+#define RegSvrDir "{sys}"
+#else
+#define RegSvrDir "{syswow64}"
+#endif
+
 #define MyAppName       "Speechify (spfy)"
 #define MyAppShortName  "spfy"
 #define MyAppPublisher  "Speechify Open-Source Reimplementation"
@@ -74,6 +109,7 @@ AppUpdatesURL={#MyAppURL}/releases
 VersionInfoVersion={#SpfyVersionInfo}
 VersionInfoProductName={#MyAppName}
 VersionInfoCompany={#MyAppPublisher}
+MinVersion=6.1
 
 ; Installs to "C:\Program Files\Speechify" on 64-bit Windows. The 32-bit
 ; SAPI DLL still goes here (not Program Files (x86)) because both DLLs
@@ -110,7 +146,11 @@ PrivilegesRequired=admin
 ; name a path under {userdocs}.
 UsedUserAreasWarning=no
 
+#if TargetArch == "x86"
+OutputBaseFilename=spfy-setup-{#SpfyVersion}-x86
+#else
 OutputBaseFilename=spfy-setup-{#SpfyVersion}
+#endif
 OutputDir=dist
 Compression=lzma2/ultra
 SolidCompression=yes
@@ -119,8 +159,20 @@ SolidCompression=yes
 ; correctly when registering the 32-bit COM DLL on a 64-bit host.
 ; "x64compatible" is the modern Inno 6.3+ identifier (covers x64 and arm64
 ; running x64 binaries). Falls back to "x64" on older Inno.
+;
+; ⚠ ArchitecturesAllowed is a HARD REFUSAL, not a preference: Setup aborts on
+; a machine that doesn't match, before touching anything. x64compatible alone
+; is why this installer would not run on 32-bit Windows at all — the payload
+; was always capable (spfy_sapi.dll and spfy_synth.exe are i686, min OS 4.0,
+; msvcrt not UCRT, no api-set imports), the installer simply refused.
+#if TargetArch == "x86"
+ArchitecturesAllowed=x86compatible
+; No ArchitecturesInstallIn64BitMode: there is no 64-bit mode to install in,
+; and naming it here would be a compile error on a 32-bit-only build.
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\spfy.ico
@@ -174,8 +226,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ;   (b) The 32-bit DLL's DllRegisterServer writes BOTH the 32- and
 ;       64-bit CLSID hives + voice tokens — running regsvr32 separately
 ;       on the 64-bit DLL would double-register.
+;
+; ⚠ The `32bit`/`64bit` flags select which VIEW of {app} / {sys} the entry
+; resolves in, and `64bit` is INVALID unless the install is running in 64-bit
+; mode. On the x86 build there is no such mode, so the 64-bit shim is not
+; merely skipped — it must not appear in the script at all.
 Source: "{#BuildDir}\src\sapi\spfy_sapi.dll";   DestDir: "{app}"; Flags: ignoreversion 32bit
+#if TargetArch == "x64"
 Source: "{#BuildDir}\src\sapi\spfy_sapi64.dll"; DestDir: "{app}"; Flags: ignoreversion 64bit
+#endif
 Source: "{#BuildDir}\src\cli\spfy_synth.exe";   DestDir: "{app}"; Flags: ignoreversion 32bit
 
 ; Helper batch — self-elevating regsvr32 wrapper for re-scanning the
@@ -280,7 +339,14 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 ; (yes, the naming is backwards — Windows historical legacy). The DLL's
 ; DllRegisterServer writes both 32- and 64-bit registry views and
 ; auto-scans %USERPROFILE%\Documents\Speechify\en-US\ for voices.
-Filename: "{syswow64}\regsvr32.exe"; \
+;
+; ⚠ THE ARCH SPLIT IS EXPLICIT ON PURPOSE. Inno documents {syswow64} as
+; falling back to {sys} on 32-bit Windows, so one hardcoded line would
+; probably have worked — but this is the step that actually registers the
+; voices, and "probably" is not a property worth shipping in the one line
+; whose failure leaves a silently voiceless install. {#RegSvrDir} is chosen
+; at compile time in the preprocessor block at the top of this file.
+Filename: "{#RegSvrDir}\regsvr32.exe"; \
   Parameters: "/s ""{app}\spfy_sapi.dll"""; \
   StatusMsg: "Registering SAPI voice DLL..."; \
   Flags: runascurrentuser waituntilterminated

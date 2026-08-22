@@ -1,0 +1,5 @@
+{
+  "_comment": "Work-in-progress build, deliberately staged here for testing once it's ready. Its VCF is still vendor Tom's, so without the display override below the picker would show two voices both called 'Tom'. Skip is set to true for now since there is no data here yet.",
+  "display": "CRS Tom",
+  "skip": true
+}
