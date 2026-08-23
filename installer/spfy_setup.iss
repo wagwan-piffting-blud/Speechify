@@ -1,10 +1,10 @@
-; spfy_setup.iss — Inno Setup script for Speechify (spfy)
+; spfy_setup.iss - Inno Setup script for Speechify (spfy)
 ;
 ; Builds a Windows installer that:
 ;   1. Drops binaries (spfy_sapi.dll, spfy_sapi64.dll, spfy_synth.exe) into
 ;      Program Files\Speechify
 ;   2. Drops shared FE data (hpclass + fe_tables + symbol table) into
-;      %USERPROFILE%\Documents\Speechify\spfy\ — that's the layout
+;      %USERPROFILE%\Documents\Speechify\spfy\ - that's the layout
 ;      spfy_sapi.dll's path resolution expects (see get_project_root in
 ;      spfy/src/sapi/spfy_sapi.c).
 ;   3. Registers the 32-bit SAPI DLL via regsvr32. The DLL's own
@@ -14,13 +14,13 @@
 ;   4. On uninstall: deregisters cleanly (which removes voice tokens
 ;      from both registry views) and deletes the bundled binaries.
 ;
-; Voices (VIN/VDB/VCF) are NOT bundled — they're proprietary SpeechWorks
+; Voices (VIN/VDB/VCF) are NOT bundled - they're proprietary SpeechWorks
 ; assets. The user drops them into
 ; %USERPROFILE%\Documents\Speechify\en-US\<voicename>\ themselves;
 ; auto-scan picks them up at registration time (re-run regsvr32 after
 ; adding a voice to refresh the token list).
 ;
-; Tom's PITCH MARKS (tom8.pmindex / tom8.pmdata) ARE bundled — see the
+; Tom's PITCH MARKS (tom8.pmindex / tom8.pmdata) ARE bundled - see the
 ; [Files] note. They are measured metadata, not voice data, and Speechify 4
 ; mode does not start without them.
 ;
@@ -28,7 +28,7 @@
 ; Override paths: iscc /DBuildDir=C:\tmp\spfy_build32 /DSourceRoot=..  spfy_setup.iss
 
 ; ---------------------------------------------------------------------
-; Preprocessor — paths and metadata
+; Preprocessor - paths and metadata
 ; ---------------------------------------------------------------------
 
 #ifndef BuildDir
@@ -54,7 +54,7 @@
 ; Which Windows this installer targets: "x64" (default) or "x86".
 ;
 ; They are SEPARATE INSTALLERS, not one universal build, because the payloads
-; genuinely differ — the x86 one has no spfy_sapi64.dll to ship, and its
+; genuinely differ - the x86 one has no spfy_sapi64.dll to ship, and its
 ; regsvr32 lives somewhere else. A single installer allowing both would carry
 ; a 64-bit DLL it can never install and a Check: on every line that touches it.
 ;
@@ -73,11 +73,11 @@
 
 ; Where the 32-BIT regsvr32 lives on the target. On 64-bit Windows that is
 ; SysWOW64 (the naming is historical); on 32-bit Windows there is no SysWOW64
-; and System32 — {sys} — holds the 32-bit one.
+; and System32 - {sys} - holds the 32-bit one.
 ;
 ; ⚠ THIS IS A #define, NOT AN #if AROUND THE [Run] LINE, and it has to be.
 ; That entry ends each line with Inno's `\` continuation, which swallows a
-; following `#else` as part of the same logical line — the `#if` then never
+; following `#else` as part of the same logical line - the `#if` then never
 ; closes and the compiler fails at EOF with "'endif' expected", pointing at
 ; the last line of the file rather than at the actual mistake.
 #if TargetArch == "x86"
@@ -97,7 +97,7 @@
 ; ---------------------------------------------------------------------
 
 [Setup]
-; Unique installer identity — NOT the COM CLSID. The COM CLSID is
+; Unique installer identity - NOT the COM CLSID. The COM CLSID is
 ; {9C3A7D1E-4F5A-4B6C-8EA2-5C71D08F1234}, baked into spfy_sapi.dll.
 AppId={{B7EC3D11-1A22-4F2C-9F18-3C7E5E5E3D71}
 AppName={#MyAppName}
@@ -122,7 +122,7 @@ DisableReadyPage=no
 DisableDirPage=no
 
 ; SAPI registration touches HKLM\SOFTWARE\Microsoft\Speech\Voices\Tokens
-; and HKLM\SOFTWARE\Classes\CLSID — admin only.
+; and HKLM\SOFTWARE\Classes\CLSID - admin only.
 PrivilegesRequired=admin
 
 ; We intentionally write per-user data ({userdocs}\Speechify\) while
@@ -155,14 +155,14 @@ OutputDir=dist
 Compression=lzma2/ultra
 SolidCompression=yes
 
-; 64-bit installer behavior — needed so {syswow64}/regsvr32 resolves
+; 64-bit installer behavior - needed so {syswow64}/regsvr32 resolves
 ; correctly when registering the 32-bit COM DLL on a 64-bit host.
 ; "x64compatible" is the modern Inno 6.3+ identifier (covers x64 and arm64
 ; running x64 binaries). Falls back to "x64" on older Inno.
 ;
 ; ⚠ ArchitecturesAllowed is a HARD REFUSAL, not a preference: Setup aborts on
 ; a machine that doesn't match, before touching anything. x64compatible alone
-; is why this installer would not run on 32-bit Windows at all — the payload
+; is why this installer would not run on 32-bit Windows at all - the payload
 ; was always capable (spfy_sapi.dll and spfy_synth.exe are i686, min OS 4.0,
 ; msvcrt not UCRT, no api-set imports), the installer simply refused.
 #if TargetArch == "x86"
@@ -178,14 +178,14 @@ UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\spfy.ico
 WizardStyle=modern
 
-; Branding — single 256x256 multi-resolution .ico sourced from the
+; Branding - single 256x256 multi-resolution .ico sourced from the
 ; installer/ directory. Used by:
-;   * SetupIconFile         — the icon Explorer shows for spfy-setup-*.exe
-;   * UninstallDisplayIcon  — the icon in Settings > Apps & features /
+;   * SetupIconFile         - the icon Explorer shows for spfy-setup-*.exe
+;   * UninstallDisplayIcon  - the icon in Settings > Apps & features /
 ;                             Control Panel > Programs and Features
-;   * [Icons] IconFilename  — Start Menu shortcuts that want app branding
+;   * [Icons] IconFilename  - Start Menu shortcuts that want app branding
 ;
-; Wizard small image — the icon in the top-right corner of every
+; Wizard small image - the icon in the top-right corner of every
 ; wizard page after Welcome. BMP only (not ICO). Multiple comma-
 ; separated paths let Inno pick the best for the user's DPI:
 ;   1.00x  55x58
@@ -214,6 +214,22 @@ AppContact={#MyAppURL}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 ; ---------------------------------------------------------------------
+; [Tasks] - the one thing this installer asks the user to decide
+; ---------------------------------------------------------------------
+
+[Tasks]
+; Checked by default, and easy to find afterwards (Start Menu → Check for
+; Updates → the printed instructions, or `spfy_update --disable`).
+;
+; What it actually does when UNCHECKED is create {app}\no_update_check, which
+; every spfy binary looks for. That marker is machine-wide ON PURPOSE: this
+; installer runs elevated, so a per-user opt-out would be written into the
+; ADMINISTRATOR's profile and would not apply to the person who goes on to use
+; the voice. See spfy_upd_machine_opt_out() in spfy/src/update/upd_state.c.
+Name: "updatecheck"; Description: "Check for engine and voice updates"; \
+  GroupDescription: "Updates:"; Flags: checkedonce
+
+; ---------------------------------------------------------------------
 ; [Files]
 ; ---------------------------------------------------------------------
 
@@ -224,26 +240,33 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ;   (a) It always uses {sys}\regsvr32 which is 64-bit on x64; our DLL
 ;       is 32-bit and must register via SysWOW64\regsvr32.
 ;   (b) The 32-bit DLL's DllRegisterServer writes BOTH the 32- and
-;       64-bit CLSID hives + voice tokens — running regsvr32 separately
+;       64-bit CLSID hives + voice tokens - running regsvr32 separately
 ;       on the 64-bit DLL would double-register.
 ;
 ; ⚠ The `32bit`/`64bit` flags select which VIEW of {app} / {sys} the entry
 ; resolves in, and `64bit` is INVALID unless the install is running in 64-bit
 ; mode. On the x86 build there is no such mode, so the 64-bit shim is not
-; merely skipped — it must not appear in the script at all.
+; merely skipped - it must not appear in the script at all.
 Source: "{#BuildDir}\src\sapi\spfy_sapi.dll";   DestDir: "{app}"; Flags: ignoreversion 32bit
 #if TargetArch == "x64"
 Source: "{#BuildDir}\src\sapi\spfy_sapi64.dll"; DestDir: "{app}"; Flags: ignoreversion 64bit
 #endif
 Source: "{#BuildDir}\src\cli\spfy_synth.exe";   DestDir: "{app}"; Flags: ignoreversion 32bit
 
-; Helper batch — self-elevating regsvr32 wrapper for re-scanning the
+; The update checker. It MUST land in {app}, beside spfy_sapi.dll: that DLL
+; resolves its own directory and starts this by name, and it starts nothing
+; if the file is not there. The DLL never checks for updates itself - it runs
+; in-process inside Narrator and Balabolka, where a network call would stall a
+; screen reader mid-sentence.
+Source: "{#BuildDir}\src\update\spfy_update.exe"; DestDir: "{app}"; Flags: ignoreversion 32bit
+
+; Helper batch - self-elevating regsvr32 wrapper for re-scanning the
 ; en-US folder after the user drops new voice directories in. Bundled
 ; so the Start Menu "Refresh SAPI Voices" shortcut and the post-install
 ; flow have something to point at.
 Source: "refresh_voices.bat"; DestDir: "{app}"; Flags: ignoreversion
 
-; App icon — bundled so UninstallDisplayIcon and Start Menu shortcuts
+; App icon - bundled so UninstallDisplayIcon and Start Menu shortcuts
 ; can reference {app}\spfy.ico. SetupIconFile (above) reads it at
 ; compile time, this entry ships it for runtime references.
 Source: "spfy.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -256,7 +279,7 @@ Source: "spfy.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; links spfy_embedded_assets (the same blob spfy_synth.exe has carried all
 ; along) and extracts to %TEMP%\spfy_assets_<dll-mtime> on first voice load.
 ;
-; That removes a whole class of breakage — a relocated Documents folder, a
+; That removes a whole class of breakage - a relocated Documents folder, a
 ; second Windows account, or a partial uninstall used to kill every SAPI
 ; voice while the CLI carried on working, because only the DLL depended on
 ; the on-disk copy.
@@ -270,12 +293,12 @@ Source: "spfy.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; tom_hpclass.bin is gone too: hpclass is passed NULL on both the SAPI path
 ; and the CLI short form, so it is derived per-voice from the VIN. Its only
 ; readers are spfy_dump_voice --hpclass, spfy_anchor_replay and
-; spfy_hp_score_test — none of which this installer ships.
+; spfy_hp_score_test - none of which this installer ships.
 
 ; --- Pitch marks → the voice folder ---
 ; Needed only by Speechify 4 mode (spfy_synth --s4 / SPFY_4_MODE=1), which
 ; retargets F0 by TD-PSOLA and cannot start without them. They are ANALYSIS
-; METADATA measured from the audio — periods in samples, one run per unit —
+; METADATA measured from the audio - periods in samples, one run per unit -
 ; not voice data, which is why they ship here while the VIN/VDB/VCF do not.
 ;
 ; They land in the voice folder because the pitch-mark stem is derived from
@@ -290,14 +313,14 @@ Source: "spfy.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; worse than not shipping one.
 ; ⚠ FLAGS ARE LOAD-BEARING. Read before changing either line.
 ;
-; onlyifdoesntexist  — never overwrite a file already sitting there. These
+; onlyifdoesntexist  - never overwrite a file already sitting there. These
 ;   land in the USER'S OWN data folder, which may be a working copy of this
 ;   repository (it is on the maintainer's machine: {userdocs}\Speechify IS
 ;   the checkout). Clobbering a newer, locally regenerated set of pitch marks
 ;   with the ones frozen into the installer would be silent and unrecoverable
 ;   without a backup.
 ;
-; uninsneveruninstall — never DELETE them on uninstall. Inno removes whatever
+; uninsneveruninstall - never DELETE them on uninstall. Inno removes whatever
 ;   it installed, and that is exactly how an uninstall wiped tracked files out
 ;   of the working tree: an earlier build of this script also installed
 ;   fe_symbol_table.json and 728 fe_tables\*.bin under {userdocs}, so removing
@@ -305,7 +328,7 @@ Source: "spfy.ico"; DestDir: "{app}"; Flags: ignoreversion
 ;   blob.
 ;
 ; RULE FOR ANYTHING ADDED HERE LATER: inside {app} the installer owns the
-; files and may delete them freely. Inside {userdocs} it is a GUEST — install
+; files and may delete them freely. Inside {userdocs} it is a GUEST - install
 ; only what is missing, and never take anything away.
 Source: "{#SourceRoot}\en-US\tom\tom8.pmindex"; DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "{#SourceRoot}\en-US\tom\tom8.pmdata";  DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
@@ -315,7 +338,7 @@ Source: "{#SourceRoot}\SPFY_README.md"; DestDir: "{app}"; Flags: ignoreversion s
 Source: "{#SourceRoot}\SPEECHIFY_4_FINDINGS.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; ---------------------------------------------------------------------
-; [Icons] — Start Menu group
+; [Icons] - Start Menu group
 ; ---------------------------------------------------------------------
 
 [Icons]
@@ -327,22 +350,28 @@ Name: "{group}\Refresh SAPI Voices"; Filename: "{app}\refresh_voices.bat"; \
   WorkingDir: "{app}"; IconFilename: "{sys}\shell32.dll"; IconIndex: 238
 Name: "{group}\Open Voices Folder"; Filename: "{userdocs}\Speechify\en-US"; \
   IconFilename: "{sys}\shell32.dll"; IconIndex: 4
+; Console app, so it runs under cmd /k -- otherwise the window closes on the
+; answer. --gui adds the tray balloon, which is what a screen-reader user
+; gets told by; --check ignores the weekly interval.
+Name: "{group}\Check for Updates"; Filename: "{cmd}"; \
+  Parameters: "/k ""{app}\spfy_update.exe"" --check --gui"; \
+  WorkingDir: "{app}"; IconFilename: "{sys}\shell32.dll"; IconIndex: 46
 Name: "{group}\Documentation"; Filename: "{app}\SPFY_README.md"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 
 ; ---------------------------------------------------------------------
-; [Run] — post-install actions
+; [Run] - post-install actions
 ; ---------------------------------------------------------------------
 
 [Run]
 ; Register the 32-bit SAPI DLL. SysWOW64\regsvr32.exe is the 32-bit one
-; (yes, the naming is backwards — Windows historical legacy). The DLL's
+; (yes, the naming is backwards - Windows historical legacy). The DLL's
 ; DllRegisterServer writes both 32- and 64-bit registry views and
 ; auto-scans %USERPROFILE%\Documents\Speechify\en-US\ for voices.
 ;
 ; ⚠ THE ARCH SPLIT IS EXPLICIT ON PURPOSE. Inno documents {syswow64} as
 ; falling back to {sys} on 32-bit Windows, so one hardcoded line would
-; probably have worked — but this is the step that actually registers the
+; probably have worked - but this is the step that actually registers the
 ; voices, and "probably" is not a property worth shipping in the one line
 ; whose failure leaves a silently voiceless install. {#RegSvrDir} is chosen
 ; at compile time in the preprocessor block at the top of this file.
@@ -352,7 +381,7 @@ Filename: "{#RegSvrDir}\regsvr32.exe"; \
   Flags: runascurrentuser waituntilterminated
 
 ; ---------------------------------------------------------------------
-; [UninstallRun] — pre-uninstall actions
+; [UninstallRun] - pre-uninstall actions
 ; ---------------------------------------------------------------------
 
 [UninstallDelete]
@@ -363,8 +392,19 @@ Filename: "{#RegSvrDir}\regsvr32.exe"; \
 ; an upgrade that changes the FE tables leaves the previous one behind too.
 Type: filesandordirs; Name: "{app}\fe_assets_*"
 
+; The update opt-out marker is created by [Code], not installed, so Inno does
+; not know about it and would leave it behind to make the directory undeletable.
+Type: files; Name: "{app}\no_update_check"
+
+; The checker's own state: last-check timestamp, dismissals and the SHA-256
+; stamp cache. Best-effort only -- uninstall runs elevated, so this reaches
+; the administrator's profile and not necessarily the profile that used the
+; voice. Nothing here is load-bearing; a leftover copy costs one stale
+; timestamp on a reinstall.
+Type: filesandordirs; Name: "{localappdata}\Speechify"
+
 ; ---------------------------------------------------------------------
-; [UninstallRun] — pre-uninstall actions
+; [UninstallRun] - pre-uninstall actions
 ; ---------------------------------------------------------------------
 
 [UninstallRun]
@@ -381,7 +421,7 @@ Filename: "{syswow64}\regsvr32.exe"; \
   RunOnceId: "DeregisterSpfySapi"
 
 ; ---------------------------------------------------------------------
-; [Code] — install-time sanity checks
+; [Code] - install-time sanity checks
 ; ---------------------------------------------------------------------
 
 [Code]
@@ -426,6 +466,38 @@ begin
   end;
 end;
 
+// The machine-wide update opt-out.
+//
+// The presence of the no_update_check file in {#Emit '{app}'} is what every
+// spfy binary tests, so this is a create-or-delete, not a setting written
+// anywhere else. Deleting it on the checked path matters as much as creating
+// it on the unchecked one: a user who unticked the box last time and ticks it
+// now expects that to take.
+//
+// ⚠ // comments, not { }: Pascal block comments END at the first closing
+// brace, and an Inno constant written in prose carries one. That mistake
+// compiles as far as the next statement and then reports a syntax error on a
+// line that looks fine.
+procedure ApplyUpdateChoice();
+var
+  Marker: String;
+begin
+  Marker := ExpandConstant('{app}\no_update_check');
+  if WizardIsTaskSelected('updatecheck') then
+  begin
+    if FileExists(Marker) then
+      DeleteFile(Marker);
+  end
+  else
+  begin
+    SaveStringToFile(Marker,
+      'Delete this file to let spfy check for engine and voice updates again.'
+      + #13#10 +
+      'Created by the installer because the "Check for engine and voice '
+      + 'updates" box was cleared.' + #13#10, False);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   VoicesDir: String;
@@ -435,13 +507,14 @@ var
 begin
   if CurStep = ssPostInstall then
   begin
+    ApplyUpdateChoice();
     VoicesDir := ExpandConstant('{userdocs}\Speechify\en-US');
     ForceDirectories(VoicesDir);
     Found := CountVoiceDirs(VoicesDir);
 
     if Found = 0 then
     begin
-      { Fresh install — no voices on disk yet. Explain the workflow
+      { Fresh install - no voices on disk yet. Explain the workflow
         and offer to open the folder. }
       Msg :=
         'Speechify is installed, but no SAPI voices have been registered yet.' + #13#10 + #13#10 +
@@ -460,7 +533,7 @@ begin
     end
     else
     begin
-      { Voices already present (re-install / upgrade) — registration
+      { Voices already present (re-install / upgrade) - registration
         already picked them up. Just confirm count. }
       Msg :=
         'Speechify is installed and ' + IntToStr(Found) +

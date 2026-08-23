@@ -120,7 +120,7 @@ Interceptor.attach(ADDR_FUN, {
                 snap.unit.raw_u32.push(safeReadU32(u.add(off)));
             }
 
-            /* Walk sub-unit array (0x30 bytes each) — likely the source
+            /* Walk sub-unit array (0x30 bytes each) - likely the source
              * of per-pitch-period data engine uses for PSOLA. */
             snap.unit.sub_units = [];
             if (snap.unit.n_sub_units !== null && snap.unit.n_sub_units > 0
@@ -275,7 +275,7 @@ Interceptor.attach(ADDR_1700, {
 /* Also hook FUN_08EE3560 (the OLA blend + emit) entry to count its
  * iVar1 arg (= samples emitted via state[+0x30] callback). FUN_08EE3560
  * is __fastcall with arg in ecx = state ptr. The output emission uses
- * state[+0x08] as n_samples — we capture it. */
+ * state[+0x08] as n_samples - we capture it. */
 var ADDR_3560 = ptr('0x08EE3560');
 var ola_calls = 0;
 Interceptor.attach(ADDR_3560, {

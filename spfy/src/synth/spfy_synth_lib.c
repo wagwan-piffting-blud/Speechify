@@ -1,4 +1,4 @@
-/* spfy_voice_load / spfy_voice_free — voice loading lifted out of the
+/* spfy_voice_load / spfy_voice_free - voice loading lifted out of the
  * spfy_synth CLI's main() (formerly lines 673..867). */
 
 #include "spfy_synth_lib.h"
@@ -165,7 +165,7 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
                             spfy_vcf_str(&v->vcf, "phoneset"),
                             spfy_vcf_str(&v->vcf, "version"));
 
-    /* Engine-faithful voicing table — see and the in-line comment in
+    /* Engine-faithful voicing table - see and the in-line comment in
      * spfy_synth.c for the rationale (the "name" feat chunk in the VIN is
      * alphabetical and the canonical source of HP-label... */
     {

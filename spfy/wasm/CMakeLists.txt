@@ -2,7 +2,7 @@
 #
 # Ships an emulator-backed FE by default: the unmodified
 # SWIttsFe-en-US.dll (32-bit Windows PE) is embedded into the WASM
-# module and run through spfy/src/host_emu/ — the same portable x86
+# module and run through spfy/src/host_emu/ - the same portable x86
 # interpreter that audits 100% engine PATH UID on the desktop and
 # ships in the Android APK. wasm32 executes it identically.
 #
@@ -65,7 +65,7 @@ add_subdirectory(${SPFY_ROOT}/src/text_norm   ${CMAKE_BINARY_DIR}/_text_norm)
 add_library(spfy_baked_pos STATIC ${SPFY_ROOT}/src/fe/baked_pos.c)
 target_include_directories(spfy_baked_pos PUBLIC ${SPFY_ROOT}/src/fe)
 
-# spfy_fe_types — minimal subset of src/fe/ (phoneset + prosody only).
+# spfy_fe_types - minimal subset of src/fe/ (phoneset + prosody only).
 add_library(spfy_fe_types STATIC
     ${SPFY_ROOT}/src/fe/phoneset.c
     ${SPFY_ROOT}/src/fe/prosody.c
@@ -79,7 +79,7 @@ target_link_libraries(spfy_fe_types PUBLIC
     spfy_voice spfy_common spfy_baked_pos
 )
 
-# In-house pure-C FE — pulled in either way. When SPFY_WASM_INHOUSE_FE
+# In-house pure-C FE - pulled in either way. When SPFY_WASM_INHOUSE_FE
 # is on it drives synth directly; when the emulator path is on it's a
 # no-op dependency of spfy_fe_types (baked_pos).
 add_subdirectory(${SPFY_ROOT}/src/fe_internal ${CMAKE_BINARY_DIR}/_fe_internal)
@@ -119,8 +119,8 @@ else()
     # links and adding a language is a one-line list edit.
     #
     # Each embedded DLL is baked into the .wasm as a C byte array. These are
-    # small (en-US 7.5 MB, fr-CA 1.5 MB, es-MX 0.9 MB) — ~10 MB total, a
-    # one-time HTTP-cached download — so we bake ALL languages the shipped
+    # small (en-US 7.5 MB, fr-CA 1.5 MB, es-MX 0.9 MB) - ~10 MB total, a
+    # one-time HTTP-cached download - so we bake ALL languages the shipped
     # voices use into a single module. The big per-voice payload is the
     # voice DATA (vin/vdb), which is lazy-loaded at runtime, NOT baked in.
     # en-US must stay first: it is the fallback when a voice's VCF names a
@@ -147,7 +147,7 @@ else()
         set(_dll "${SWITTSFE_DLL_DIR}/SWIttsFe-${_lang}.dll")
         if(NOT EXISTS "${_dll}")
             message(FATAL_ERROR
-                "SWIttsFe-${_lang}.dll not found at ${_dll} — fix "
+                "SWIttsFe-${_lang}.dll not found at ${_dll} - fix "
                 "SPFY_WASM_FE_LANGS / SWITTSFE_DLL_DIR, or pass "
                 "-DSPFY_WASM_INHOUSE_FE=ON to fall back to the in-house FE.")
         endif()
@@ -179,7 +179,7 @@ ${_reg_rows}};
 const size_t spfy_fe_n_dlls = sizeof(spfy_fe_dlls) / sizeof(spfy_fe_dlls[0]);
 ")
 
-    # spfy_fe — emulator-backed. Same target name so downstream link is
+    # spfy_fe - emulator-backed. Same target name so downstream link is
     # unchanged.
     add_library(spfy_fe STATIC
         ${SPFY_ROOT}/src/fe_host/fe_host_emu.c
@@ -206,7 +206,7 @@ const size_t spfy_fe_n_dlls = sizeof(spfy_fe_dlls) / sizeof(spfy_fe_dlls[0]);
     message(STATUS "wasm FE: EMULATOR-backed (100% audit), embedding: ${SPFY_WASM_FE_LANGS}")
 endif()
 
-# spfy_synth_lib — declared inline rather than via add_subdirectory
+# spfy_synth_lib - declared inline rather than via add_subdirectory
 # because the desktop src/synth/CMakeLists.txt builds only the
 # voice-load half (spfy_synth_lib.c); the per-call pipeline
 # (spfy_synth_to_sink) lives in src/cli/spfy_synth.c, gated by
@@ -233,8 +233,8 @@ target_link_libraries(spfy_synth_lib
            spfy_fe spfy_fe_internal spfy_prosody spfy_common
 )
 # spfy_synth.c prints a one-time "[spfy] FE backend: ..." banner keyed off
-# SPFY_FE_EMU / SPFY_FE_HOSTED. The macro drives only that string — the
-# actual spfy_fe_synth_text() call links to whatever FE is in spfy_fe — but
+# SPFY_FE_EMU / SPFY_FE_HOSTED. The macro drives only that string - the
+# actual spfy_fe_synth_text() call links to whatever FE is in spfy_fe - but
 # without it here the emulator build mislabels itself "IN-HOUSE pure-C".
 # Propagate the flag so the banner reports the truth (EMULATED DLL).
 if(NOT SPFY_WASM_INHOUSE_FE)
@@ -278,7 +278,7 @@ target_link_libraries(spfy_wasm PRIVATE
 # parts (GitHub Pages' hard per-file limit), and writes
 # dist/voices/manifest.json. At runtime the browser fetches ONLY the
 # selected voice, stitches any split parts, and writes them into the
-# emscripten FS before calling spfy_wasm_init — so the page starts with
+# emscripten FS before calling spfy_wasm_init - so the page starts with
 # just the ~14 MB module and pulls a voice on demand.
 #
 # Voices whose source files are absent are skipped (CI checkouts don't

@@ -1,4 +1,4 @@
-"""engine_callgraph.py — static call-graph closure for the K2 reimpl work.
+"""engine_callgraph.py - static call-graph closure for the K2 reimpl work.
 
 Starting from the 6 SWIttsEngine.dll entry points the FE invokes
 (installHookA/B, setPair_E/F/G/H), walk every CALL/JMP target to its
@@ -147,7 +147,7 @@ def disasm_function(md, sections, va):
                 calls.append((ins.address, ('mem', op.mem.disp & 0xffffffff)))
             pending_terminator_at = len(ins_list) - 1
         elif m.startswith('j'):
-            # Conditional branch — record local target
+            # Conditional branch - record local target
             if ins.operands and ins.operands[0].type == capstone.x86.X86_OP_IMM:
                 branches.append((ins.address, ins.operands[0].imm & 0xffffffff))
         elif m == 'ret':
@@ -224,7 +224,7 @@ def main():
             'ended_with_ret': ended,
         }
         for from_va, to in calls:
-            if isinstance(to, tuple):       # ('mem', addr) — indirect import
+            if isinstance(to, tuple):       # ('mem', addr) - indirect import
                 _, slot_va = to
                 imp = imports.get(slot_va)
                 callee_label = ('IMPORT', slot_va, imp)

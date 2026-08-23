@@ -165,7 +165,7 @@ static uint16_t pick_vowel(char letter, int is_open, int has_e,
     case 'a': return PH_aa;
     case 'e': return PH_E;
     case 'i': return PH_I;
-    case 'o': return PH_A;         /* "stop"=/stɑp/ — engine uses ARPAbet "aa" not "ao" for American /ɑ/. */
+    case 'o': return PH_A;         /* "stop"=/stɑp/ - engine uses ARPAbet "aa" not "ao" for American /ɑ/. */
     case 'u': return PH_U;
     }
     return PH_at;
@@ -546,7 +546,7 @@ static void syllable_to_phonemes(const char *t,
             i += 2; ++emitted; continue;
         }
         if (dg(t, i, end, "oi") || dg(t, i, end, "oy")) {
-            /* /ɔɪ/ — no clean SAMPA mapping in our table; emit as /O/
+            /* /ɔɪ/ - no clean SAMPA mapping in our table; emit as /O/
              * (open-o) approximation. */
             emit(delta, PH_O, syl_id, word_id, phrase_id,
                  (uint16_t)i, 2, 1, pos, 0);
@@ -690,7 +690,7 @@ int spfy_fe_lts_run(const spfy_fe_t *fe,
 
     free(word_state);
 
-    /* Post-LTS engine reductions — disable via SPFY_NO_LTS_REDUCTIONS=1. */
+    /* Post-LTS engine reductions - disable via SPFY_NO_LTS_REDUCTIONS=1. */
     if (!getenv("SPFY_NO_LTS_REDUCTIONS")) {
         uint32_t n_phon = 0, n_word_r = 0;
         const spfy_fe_token_t *phons_c =
@@ -754,7 +754,7 @@ int spfy_fe_lts_run(const spfy_fe_t *fe,
                 }
             } else if (strcmp(wbuf, "for") == 0) {
                 /* f ao r -> f er (engine reduces unconditionally in
-                 * connected speech, including before vowels — verified on
+                 * connected speech, including before vowels - verified on
                  * text_018 "for English"). */
                 if (p_end >= p_start + 2
                     && phons_c[p_start].name == PH_f

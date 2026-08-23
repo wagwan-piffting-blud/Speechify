@@ -184,7 +184,7 @@ ULAW_DECODE = np.array([
 
 
 def pcm16_array_to_ulaw(pcm_array):
-    """Encode PCM16 array to u-law bytes — fully vectorized via lookup table."""
+    """Encode PCM16 array to u-law bytes - fully vectorized via lookup table."""
     return bytes(PCM16_TO_ULAW_TABLE[np.clip(pcm_array.astype(np.int32) + 32768, 0, 65535)])
 
 
@@ -256,7 +256,7 @@ def smooth_at_boundary(audio_pcm, center, half_window, strength):
 
 
 def process_single_recording(args):
-    """Process one recording — worker function for multiprocessing."""
+    """Process one recording - worker function for multiprocessing."""
     fidx, rec_offset, rec_length, lp_positions, half_window, strength, ulaw_bytes = args
 
     if not lp_positions:

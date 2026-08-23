@@ -1,4 +1,4 @@
-# spfy/src/fe_host/CMakeLists.txt — hosted-DLL FE.
+# spfy/src/fe_host/CMakeLists.txt - hosted-DLL FE.
 #
 # Builds the spfy_fe target (drop-in name) backed by the embedded
 # SWIttsFe-<lang>.dll bytes, driven through the portable x86 interpreter
@@ -8,13 +8,13 @@
 # History: a native PE-loader backend (src/host/ + fe_host.c) used to be
 # the default on 32-bit x86, with the emulator as the portable fallback.
 # It was retired 2026-07-22 once the emulator was shown byte-exact on
-# every target — including i686, where it cost only ~7% wall-clock. The
+# every target - including i686, where it cost only ~7% wall-clock. The
 # 32-bit build still exists (older x86-only CPUs and VMs); it just runs
 # the interpreter like everyone else.
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-message(STATUS "fe_host: EMULATOR backend (host_emu) — 100% engine PATH UID, any host CPU")
+message(STATUS "fe_host: EMULATOR backend (host_emu) - 100% engine PATH UID, any host CPU")
 
 # Languages whose SWIttsFe-<lang>.dll gets embedded. en-US must stay
 # first: it is the fallback when a voice's VCF names a language we did
@@ -49,7 +49,7 @@ foreach(_lang IN LISTS SPFY_FE_LANGS)
     set(_dll "${SWITTSFE_DLL_DIR}/SWIttsFe-${_lang}.dll")
     if(NOT EXISTS "${_dll}")
         message(FATAL_ERROR
-            "SWIttsFe-${_lang}.dll not found at ${_dll} — fix SPFY_FE_LANGS "
+            "SWIttsFe-${_lang}.dll not found at ${_dll} - fix SPFY_FE_LANGS "
             "or SWITTSFE_DLL_DIR")
     endif()
     set(_out "${CMAKE_CURRENT_BINARY_DIR}/swittsfe_${_sym}_data.c")

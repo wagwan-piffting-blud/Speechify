@@ -759,7 +759,7 @@ def _synth_via_trace(text, voice="tom"):
     candidate's target cost (not just a pre-prune snapshot)."""
     exe = _trace_exe()
     if not exe:
-        return jsonify({"error": "spfy_synth_trace.exe not found — build spfy "
+        return jsonify({"error": "spfy_synth_trace.exe not found - build spfy "
                                  "(spfy/build.bat) or set SPFY_SYNTH_TRACE_EXE"}), 503
     assets = _voice_assets(voice)
     if not assets:
@@ -831,7 +831,7 @@ def _synth_via_trace(text, voice="tom"):
 
     # pre_prune_hps = per slot, the greedy best-by-target-cost candidate (what
     # you'd pick ignoring join cost) + the candidate list. A mismatch with the
-    # Viterbi pick means the join cost changed the choice — same semantic as the
+    # Viterbi pick means the join cost changed the choice - same semantic as the
     # old Frida "pre-prune vs Viterbi" flag.
     pre_prune_hps = []
     for p in picks:
@@ -898,7 +898,7 @@ def _trace_exe():
 
 def _voice_assets(name):
     """Resolve (vin, vdb, vcf) for a voice. Prefers the 8-bit u-law VDB
-    (tom8.vdb) — the 16k VDB decodes wrong through the 8kHz mu-law path.
+    (tom8.vdb) - the 16k VDB decodes wrong through the 8kHz mu-law path.
     Returns None if any of the three is missing."""
     d = os.path.join(PROJ_ROOT, "en-US", name)
     vin = os.path.join(d, f"{name}.vin")
@@ -917,7 +917,7 @@ def _voice_assets(name):
 def _enrich_uid_event(v, data):
     """Add phone / half / rec_name / file_idx to a unit- or pick-event's data
     dict, resolved from the VIN unit table + feat filenames. Mutates and
-    returns `data`. Only used for the low-volume unit/pick events — candidate
+    returns `data`. Only used for the low-volume unit/pick events - candidate
     events stay lightweight (uid + tc)."""
     uid = data.get("uid")
     if uid is None or not isinstance(uid, int) or not (0 <= uid < v["n_units"]):
@@ -951,7 +951,7 @@ def api_synth_stream():
 
     exe = _trace_exe()
     if not exe:
-        return jsonify({"error": "spfy_synth_trace.exe not found — build spfy "
+        return jsonify({"error": "spfy_synth_trace.exe not found - build spfy "
                                  "(spfy/build.bat) or set SPFY_SYNTH_TRACE_EXE"}), 503
     assets = _voice_assets(voice)
     if not assets:
@@ -965,7 +965,7 @@ def api_synth_stream():
     wav_path = os.path.join(wav_dir, wav_name)
 
     def sse(obj):
-        # Compact separators — the candidate stream is high-volume, so drop
+        # Compact separators - the candidate stream is high-volume, so drop
         # the default ", " / ": " padding.
         return f"data: {json.dumps(obj, separators=(',', ':'))}\n\n"
 

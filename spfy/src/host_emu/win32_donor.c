@@ -468,7 +468,7 @@ extern void s_fprintf(void);
 extern void s_pow_cdecl(void);
 extern void s_log_cdecl(void);
 extern void s_exp_cdecl(void);
-/* s_CxxFrameHandler is defined statically below — used for both
+/* s_CxxFrameHandler is defined statically below - used for both
  * __CxxFrameHandler3/4 (donor entries) and __CxxFrameHandler (spfy entry). */
 extern void s_except_handler3(void);
 extern void s_CppXcptFilter(void);
@@ -675,7 +675,7 @@ static const reg_t REG[] = {
      * spfy additions: SWIttsFe-en-US.dll imports not in the donor's
      * VST-oriented base shim list. Implementations live in
      * spfy_extra_shims.c. Argbytes follow Win32 stdcall (KERNEL32/
-     * USER32/WINMM) or cdecl=0 (MSVCR71 — caller cleans).
+     * USER32/WINMM) or cdecl=0 (MSVCR71 - caller cleans).
      * ============================================================ */
     {"DisableThreadLibraryCalls", s_DisableThreadLibraryCalls, 4},
     {"SearchPathA",               s_SearchPathA,               24},

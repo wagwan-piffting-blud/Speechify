@@ -106,7 +106,7 @@ class Word:
 @dataclass
 class Utt:
     words: List[Word] = field(default_factory=list)
-    end_boundary: str = ""    # "L-L%" / "H-H%" / "" — boundary tone
+    end_boundary: str = ""    # "L-L%" / "H-H%" / "" - boundary tone
 
 @dataclass
 class Parsed:
@@ -213,7 +213,7 @@ def parse(stream: str) -> Parsed:
 def _parse_word(p: _P) -> Word:
     p.expect("<")
     text = p.ident()
-    # (char_start, char_len) — DLL emits "()" when the source span is
+    # (char_start, char_len) - DLL emits "()" when the source span is
     # unknown (synthesized fragments like the `em` in alphabet spellings).
     p.expect("(")
     p.skip_ws()
@@ -337,7 +337,7 @@ def _accent_syl_idx(word: Word) -> int:
 def _diff_word(w_int: Word, w_dll: Word, out: List[Mismatch]):
     # Sanity: same word? POS may differ even when text matches.
     if w_int.text.lower() != w_dll.text.lower():
-        # Words misaligned — skip detailed diff for this pair.
+        # Words misaligned - skip detailed diff for this pair.
         return
     if w_int.pos != w_dll.pos:
         out.append(Mismatch("pos_tag",
@@ -354,7 +354,7 @@ def _diff_word(w_int: Word, w_dll: Word, out: List[Mismatch]):
                             f"(int={'-'.join('_'.join(s) for s in syls_i)} "
                             f"dll={'-'.join('_'.join(s) for s in syls_d)})"))
         return
-    # Same syl count — check syl-by-syl
+    # Same syl count - check syl-by-syl
     for si in range(len(syls_i)):
         si_i = "_".join(syls_i[si])
         si_d = "_".join(syls_d[si])

@@ -1,6 +1,6 @@
 'use strict';
 /*
- * accent_decision_hook.js — capture per-syllable accent class decisions.
+ * accent_decision_hook.js - capture per-syllable accent class decisions.
  *
  * Hooks FUN_07e09337 in SWIttsFe-en-US.dll. Per static RE, this is the
  * per-syllable accent-emit orchestrator that:
@@ -18,7 +18,7 @@
  * Hook strategy:
  *   - onEnter: capture state pointer + initial state[+0x124f] (input)
  *     and the feature flags +0x86b..+0x887, +0xea7..+0xeab.
- *     Also capture the 6 accent-class IDs (+0x751..+0x765) — these
+ *     Also capture the 6 accent-class IDs (+0x751..+0x765) - these
  *     should be ~constant per-language but useful to log once.
  *   - onLeave: capture state[+0x124f] (output) and resolve to label
  *     via the slot table.

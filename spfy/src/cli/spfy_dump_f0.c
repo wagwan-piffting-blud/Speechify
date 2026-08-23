@@ -1,4 +1,4 @@
-/* spfy_dump_f0 — print Tom's per-unit F0 byte distribution. */
+/* spfy_dump_f0 - print Tom's per-unit F0 byte distribution. */
 
 #include <spfy/spfy.h>
 #include "../voice/voice.h"

@@ -1,4 +1,4 @@
-/* spfy_g2p_dump — print ARPAbet phonemes for words via the multi-stage G2P
+/* spfy_g2p_dump - print ARPAbet phonemes for words via the multi-stage G2P
  * pipeline (CMU dict → suffix strip → letter-to-sound). */
 
 #include "g2p.h"
@@ -60,7 +60,7 @@ int main(int argc, char **argv)
     }
 
     fprintf(stderr,
-        "spfy_g2p_dump — multi-stage G2P lookup (%zu dict entries)\n"
+        "spfy_g2p_dump - multi-stage G2P lookup (%zu dict entries)\n"
         "usage: %s [-v|--verbose] <word>\n"
         "       %s [-v|--verbose] --batch <word1> [<word2> ...]\n",
         spfy_g2p_dict_size(), argv[0], argv[0]);

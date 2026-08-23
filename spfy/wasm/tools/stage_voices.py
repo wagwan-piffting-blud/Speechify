@@ -12,7 +12,7 @@ order and stitches them back together in the virtual FS, so a 253 MB VDB
 (Paulina) ships as three ~85 MB objects with no server-side support.
 
 A voice whose source files are not present is SKIPPED with a note (CI
-checkouts don't carry the gitignored large voices, e.g. Paulina) — the
+checkouts don't carry the gitignored large voices, e.g. Paulina) - the
 manifest simply omits it, so the web UI only offers what actually shipped.
 
 Nothing here is Speechify-specific beyond the voice table; it is a plain
@@ -118,7 +118,7 @@ def discover(root, large_bytes):
                 # a confirm when the voice is actually big.
                 "large": bool(over.get("large", total >= large_bytes)),
                 "bytes": total,
-                # Consumed by pick_default(), then dropped from the entry —
+                # Consumed by pick_default(), then dropped from the entry -
                 # the manifest carries one top-level "default" id instead.
                 "_default": bool(over.get("default", False)),
             })

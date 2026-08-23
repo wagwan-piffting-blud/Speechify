@@ -1,6 +1,6 @@
 // hp_prune_trace_hook.js
 // Trace engine FUN_08e88830 (histogram-prune for HP cands).
-// FUNCTION-ENTRY ONLY hook — mid-function trampolines AV the engine
+// FUNCTION-ENTRY ONLY hook - mid-function trampolines AV the engine
 // (per project Frida rules; see feedback-frida-entry-only memory).
 //
 // On entry: capture inputs.

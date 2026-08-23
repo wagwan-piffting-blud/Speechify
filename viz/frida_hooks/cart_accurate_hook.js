@@ -1,6 +1,6 @@
 'use strict';
 
-// Accurate CART feature dump v2 — hooks FUN_08e87c70 (the ESI-compare
+// Accurate CART feature dump v2 - hooks FUN_08e87c70 (the ESI-compare
 // function) and uses return address to infer q_type. Also hooks dispatcher
 // entry to catch types 1 and 2.
 
@@ -59,7 +59,7 @@ Interceptor.attach(ADDR_F0TR_WALK, {
     }
 });
 
-// Hook dispatcher entry — capture types 1, 2, 7 (these don't call FUN_08e87c70)
+// Hook dispatcher entry - capture types 1, 2, 7 (these don't call FUN_08e87c70)
 Interceptor.attach(ADDR_DISPATCH, {
     onEnter: function() {
         if (currentSlot < 0 || currentTree === '') return;
@@ -82,7 +82,7 @@ Interceptor.attach(ADDR_DISPATCH, {
     }
 });
 
-// Hook FUN_08e87c70 for types 3, 4, 5, 8, 9 — ESI holds feature value
+// Hook FUN_08e87c70 for types 3, 4, 5, 8, 9 - ESI holds feature value
 Interceptor.attach(ADDR_COMPARE, {
     onEnter: function() {
         if (currentSlot < 0 || currentTree === '') return;

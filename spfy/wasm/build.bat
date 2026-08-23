@@ -18,7 +18,7 @@ REM      "MinGW Makefiles" (mingw32-make) if no Ninja is found.
 REM
 REM Outputs (in dist/):
 REM   spfy_wasm.js, spfy_wasm.wasm, and voices/ (lazy voice assets +
-REM   manifest.json). No .data sidecar — voices load on demand.
+REM   manifest.json). No .data sidecar - voices load on demand.
 REM
 REM Usage:
 REM   build.bat           Configure + build (Release by default).

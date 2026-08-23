@@ -6,15 +6,61 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ---------------------------------------------------------------------
+# Version string. CI passes -DSPFY_VERSION=YYYY.MM.DD -- the SAME calver the
+# release tag and the installer's AppVersion carry, resolved once in the
+# `setup` job of build-installer.yml.
+#
+# A hand-built tree gets dev-<short-sha> instead, and the update checker
+# refuses to notify on a `dev-` version: a developer's working copy is by
+# definition ahead of the newest release, so comparing it against one can
+# only produce a wrong answer.
+#
+# `git describe` is deliberately NOT used -- v1..v4 tags from an earlier era
+# still exist alongside the calver ones and it picks them.
+# ---------------------------------------------------------------------
+if(NOT SPFY_VERSION)
+    execute_process(
+        COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short=8 HEAD
+        OUTPUT_VARIABLE _spfy_sha
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _spfy_git_rc)
+    if(_spfy_git_rc EQUAL 0 AND _spfy_sha)
+        set(SPFY_VERSION "dev-${_spfy_sha}")
+    else()
+        set(SPFY_VERSION "dev")
+    endif()
+endif()
+
+set(SPFY_GITHUB_REPO "wagwan-piffting-blud/Speechify" CACHE STRING
+    "owner/repo the update checker points at")
+# One rolling `updates` tag holding one asset, so this URL never changes when
+# an engine or a voice is published. Release-asset URLs 302 to a signed,
+# short-lived objects host; both fetch backends follow redirects.
+set(SPFY_UPDATE_URL
+    "https://github.com/${SPFY_GITHUB_REPO}/releases/download/updates/update.json"
+    CACHE STRING "update manifest URL")
+set(SPFY_RELEASES_URL
+    "https://github.com/${SPFY_GITHUB_REPO}/releases"
+    CACHE STRING "human-facing releases page")
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/spfy/version.h.in"
+    "${CMAKE_BINARY_DIR}/generated/spfy/version.h"
+    @ONLY)
+include_directories("${CMAKE_BINARY_DIR}/generated")
+message(STATUS "spfy: version ${SPFY_VERSION}")
+
 option(SPFY_TRACE        "Emit JSONL stage traces from synth core" OFF)
 option(SPFY_BUILD_TESTS  "Build unit tests"                         ON)
 option(SPFY_STRICT_FP    "Enforce x87 long-double FP discipline"    ON)
-# OFF by default — measured, not assumed. -ffloat-store forces every float
+# OFF by default - measured, not assumed. -ffloat-store forces every float
 # expression through memory; with LTO on, removing it is -13.2% on a bulletin
 # (15/15 paired rounds) with parity still BYTE-IDENTICAL 235/235, and the
 # REMAINING strict-FP flags then add nothing measurable (+1.1%, 6/15 = noise).
-# So the determinism that matters — -fexcess-precision=standard, -mno-fma,
-# -fno-fast-math — is free, and this one flag was the whole cost.
+# So the determinism that matters - -fexcess-precision=standard, -mno-fma,
+# -fno-fast-math - is free, and this one flag was the whole cost.
 #
 # Turning it ON is still the more conservative choice across UNKNOWN compilers,
 # which is why it remains a switch rather than being deleted.
@@ -31,7 +77,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-# Strict FP — pin x87 80-bit semantics so results stay bit-identical to the
+# Strict FP - pin x87 80-bit semantics so results stay bit-identical to the
 # Windows/i386 reference.
 #
 # Only meaningful on x86: AArch64 (Apple Silicon, arm64 Linux) has no x87,
@@ -53,7 +99,7 @@ if(SPFY_STRICT_FP AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"
     # float expression through memory; -fexcess-precision=standard already
     # gives C99-defined x87 semantics without that cost. Measured on this
     # toolchain: with LTO on, dropping -ffloat-store is -8.9% (15/15 paired
-    # rounds) while parity stays BYTE-IDENTICAL 235/235 — the two flags
+    # rounds) while parity stays BYTE-IDENTICAL 235/235 - the two flags
     # interact, because LTO exposes more cross-TU FP that then gets spilled.
     #
     # Kept ON by default anyway: it is reproducibility insurance ACROSS
@@ -87,14 +133,14 @@ if(SPFY_STRICT_FP AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"
 
     if(_spfy_fp_missing)
         message(WARNING
-            "SPFY_STRICT_FP: this compiler rejected ${_spfy_fp_missing} — x87 "
+            "SPFY_STRICT_FP: this compiler rejected ${_spfy_fp_missing} - x87 "
             "semantics are not fully pinned, so synthesized audio bytes may "
             "differ in low bits from the i386 reference build. Unit-selection "
             "UIDs are unaffected.")
     endif()
 elseif(SPFY_STRICT_FP AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     message(STATUS
-        "SPFY_STRICT_FP: no x87 on ${CMAKE_SYSTEM_PROCESSOR} — skipping x87 "
+        "SPFY_STRICT_FP: no x87 on ${CMAKE_SYSTEM_PROCESSOR} - skipping x87 "
         "pinning (UID path is integer and unaffected).")
 endif()
 
@@ -105,7 +151,7 @@ endif()
 
 # LTO, probed rather than assumed: CheckIPOSupported reports per-toolchain, so
 # an emulated armv7 leg or an odd Clang simply builds without it instead of
-# failing to configure. Release-only — a Debug build wants fast iteration and
+# failing to configure. Release-only - a Debug build wants fast iteration and
 # readable backtraces far more than it wants cross-TU inlining.
 if(SPFY_LTO)
     include(CheckIPOSupported)
@@ -115,14 +161,14 @@ if(SPFY_LTO)
         set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
         message(STATUS "spfy: LTO enabled for Release")
     else()
-        message(STATUS "spfy: LTO unavailable — ${_spfy_ipo_why}")
+        message(STATUS "spfy: LTO unavailable - ${_spfy_ipo_why}")
     endif()
 endif()
 
 # Apple's linker (Xcode 15+) warns "ignoring duplicate libraries" on nearly
 # every link here, for two benign reasons:
 #   * CMake repeats static libs to satisfy the circular deps between
-#     spfy_voice / spfy_common / spfy_usel — intentional, and required by
+#     spfy_voice / spfy_common / spfy_usel - intentional, and required by
 #     GNU ld's single-pass archive resolution.
 #   * libm arrives twice: from the global link_libraries(m) below AND from
 #     host_emu's own `PUBLIC m`, which it must keep for standalone /
@@ -194,6 +240,7 @@ else()
     add_subdirectory(src/fe)
 endif()
 add_subdirectory(src/synth)
+add_subdirectory(src/update)
 add_subdirectory(src/cli)
 if(WIN32)
     add_subdirectory(src/sapi)

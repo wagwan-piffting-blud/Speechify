@@ -1,4 +1,4 @@
-/* Text normalization — Phase 3 of the in-house FE. */
+/* Text normalization - Phase 3 of the in-house FE. */
 
 #ifndef SPFY_TEXT_NORM_H
 #define SPFY_TEXT_NORM_H

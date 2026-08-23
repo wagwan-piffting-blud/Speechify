@@ -33,7 +33,7 @@
  * "10 ms Hanning OLA" in SWIttsWsola::concat. Empirical A/B against
  * engine WAV output (2026-06-08, "The quick brown fox… Speechify engine
  * using the Tom voice"): same UIDs as engine (audit-verified) but our
- * emit was 6.41 s vs engine's 6.84 s — losing 80 samples (10 ms) per
+ * emit was 6.41 s vs engine's 6.84 s - losing 80 samples (10 ms) per
  * cross-rec join across 66 joins = 660 ms cumulative.
  *
  * Engine's effective per-join sample loss is ~26 samples (3.25 ms), not
@@ -152,7 +152,7 @@ typedef struct {
      *   this+4   = W   =  80  samples blended   (ola_samples)
      * FUN_08ee2d60 emits `total - this+8 - this+0xc` and copies this+0xc
      * into the tail buffer, and the measured engine loss is 160 per join,
-     * not 80 — captured geometry gives output = sum(dur) - 160*(N-1) - 80,
+     * not 80 - captured geometry gives output = sum(dur) - 160*(N-1) - 80,
      * which lands within 2 samples of the real 19134 on text_002. */
     uint32_t tail_keep;
     uint32_t next_pre;
@@ -233,7 +233,7 @@ int  spfy_wsola_push_unit(spfy_wsola_streamer_t *s,
  * extra samples act as a "look-ahead reservoir": after lag-shift, the
  * function truncates to exactly `nominal_n` samples of output. This
  * matches engine's behaviour where each unit always emits its dur
- * samples regardless of join-alignment lag — eliminates cumulative
+ * samples regardless of join-alignment lag - eliminates cumulative
  * timing drift on dense cross-recording join clusters. Pass
  * nominal_n == 0 to disable (output = n samples after lag).
  */

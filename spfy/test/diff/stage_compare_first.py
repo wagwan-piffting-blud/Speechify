@@ -2,20 +2,20 @@
 
 Walks STAGE_ORDER in fixed sequence and reports the FIRST stage whose JSONL
 trace diverges between native and oracle for a given corpus id.  Field-level
-diff math is delegated to ``stage_compare.py`` — this module is a thin wrapper
+diff math is delegated to ``stage_compare.py`` - this module is a thin wrapper
 that adds (a) the canonical stage ordering, (b) a primary-then-fallback hook
 lookup, and (c) the D-12 short-name mapping consumed by the per-phrase report.
 
 Decisions referenced (see ``.planning/phases/01-validation-infrastructure/01-CONTEXT.md``):
 
-* **D-12** — value contract for the ``stage_first_divergence`` field of the
+* **D-12** - value contract for the ``stage_first_divergence`` field of the
   per-phrase JSONL: legal values are ``"cart"``, ``"prsl"``, ``"cost"``,
   ``"viterbi"``, ``"wsola"`` (or ``null``).  ``STAGE_TO_D12`` enforces the
   mapping from hook name -> D-12 short name.
-* **D-14** — fixed STAGE_ORDER and "wrap, do not duplicate" rule: this file
+* **D-14** - fixed STAGE_ORDER and "wrap, do not duplicate" rule: this file
   imports ``load_stage`` and ``field_diff`` from ``stage_compare`` and never
   re-implements them.
-* **D-15** — for the 168 new corpus phrases the cart-stage trace lives under
+* **D-15** - for the 168 new corpus phrases the cart-stage trace lives under
   ``cart_walker_args/`` instead of ``cart_walks/``.  When the primary
   ``cart_walks`` trace is missing (on either side), we fall back to
   ``cart_walker_args`` *before* declaring "no trace at this stage".  Both
@@ -24,12 +24,12 @@ Decisions referenced (see ``.planning/phases/01-validation-infrastructure/01-CON
   hook vs. the wider cart_walker_args hook).
 
 Comparison strategy: ``load_stage(path, None)`` returns ALL records in line
-order (no ``type`` filter) — ``stage_compare.py``'s diff strategy is
+order (no ``type`` filter) - ``stage_compare.py``'s diff strategy is
 line-index alignment, and we follow it verbatim.  A length mismatch at a
 given stage is treated as divergence; otherwise records are compared
 pairwise with ``field_diff`` and the first non-empty diff wins.
 
-This module does NOT exit non-zero on divergence — D-14 is a *labelling*
+This module does NOT exit non-zero on divergence - D-14 is a *labelling*
 tool, not a pass/fail gate.  Divergence on a known-divergent phrase is the
 expected outcome; it is the caller (Phase 6 orchestrator) that decides
 what to do with the resulting label.
@@ -99,7 +99,7 @@ def first_divergence(
 
     Both are ``None`` when no divergence is found across all stages OR no
     comparable trace pair exists at any stage (e.g. native traces have not
-    been produced yet — Phase 1 may run with oracle-only data).
+    been produced yet - Phase 1 may run with oracle-only data).
     """
     for stage in STAGE_ORDER:
         # Build the candidate hook list: the primary, then any fallback.
@@ -122,7 +122,7 @@ def first_divergence(
                 if field_diff(a, b):
                     return hook, STAGE_TO_D12[hook]
             # This hook's traces compared cleanly; do NOT try the fallback
-            # for this stage — advance to the next stage in STAGE_ORDER.
+            # for this stage - advance to the next stage in STAGE_ORDER.
             break
 
     return None, None

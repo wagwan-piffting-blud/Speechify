@@ -1,6 +1,6 @@
 'use strict';
 /*
- * fe_stalker_calltree.js — full Stalker trace of FE function calls during
+ * fe_stalker_calltree.js - full Stalker trace of FE function calls during
  * the runtime portion of synthesis (after FE init completes).
  *
  * Strategy:

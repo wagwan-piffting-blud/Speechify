@@ -56,7 +56,7 @@ Installers are built by GitHub Actions on every push to `main` and attached to a
 date-versioned release: a Windows `.exe` plus one tarball per unix target
 (linux-x86, linux-x86_64, linux-armv7, linux-arm64, macos-arm64, macos-x86_64).
 End users who only want the SAPI voice can take `spfy-setup-<version>.exe` from
-the [Releases page](https://github.com/wagwan-piffting-blud/Speechify_EAS_Listener/releases)
+the [Releases page](https://github.com/wagwan-piffting-blud/Speechify/releases)
 and skip the build entirely.
 
 Voices (proprietary VIN/VDB/VCF) are **not** bundled with the installer - drop
@@ -64,6 +64,76 @@ them into `%USERPROFILE%\Documents\Speechify\<lang>\<voicename>\`, where
 `<lang>` is the voice's language directory (`en-US`, `es-MX`, `fr-CA`), and
 re-run regsvr32. Tom's pitch-mark pair **is** bundled, because Speechify 4 mode
 cannot start without it.
+
+Voices are published as their own release assets, one zip per voice plus one
+per language, on the rolling [`voices`](https://github.com/wagwan-piffting-blud/Speechify/releases/tag/voices)
+tag. Each zip already contains the `<lang>\<voice>\` folders, so unzipping it
+into `%USERPROFILE%\Documents\Speechify\` puts every file where the SAPI scan
+looks; then run **Refresh SAPI Voices**.
+
+---
+
+## Updates
+
+spfy tells you when a newer engine, or a rebuilt version of a voice you have
+installed, is available. It checks **at most once a week**, and only when you
+actually use it.
+
+```text
+spfy_synth --check-update      check right now and print the answer
+spfy_synth --no-update-check   skip the automatic check for this run
+spfy_update --status           what it knows: interval, last check, dismissals
+spfy_update --disable          turn the automatic check off for this user
+spfy_update --dismiss          stop reporting what is currently available
+SPFY_NO_UPDATE_CHECK=1         off everywhere, including inside the SAPI voice
+```
+
+Uncheck **"Check for engine and voice updates"** during setup and the installer
+writes `{app}\no_update_check`, which switches it off for every account on the
+machine. Delete that file to switch it back on.
+
+What it does, and what it deliberately does not:
+
+* **Voices are compared by content, not by version string.** The manifest
+  carries the size and SHA-256 of each voice file; the size is checked first
+  (free) and the hash only when the sizes match, which is the rare case. A
+  computed hash is cached against the file's size and mtime, so a 96 MB VDB is
+  read once per rebuild, not once per check. Measured on CRS Tom: 0.57 s cold
+  across its 153 MB of voice files, 0.019 s warm.
+* **The SAPI DLL never checks anything itself.** It runs in-process inside
+  Narrator and Balabolka, so on the first `Speak` it stats one small file and,
+  at most once per process, starts a detached `spfy_update.exe`. No fetch, no
+  hashing and no window ever happens on the screen reader's thread; the result
+  arrives as a tray balloon, which takes no focus.
+* **A `dev-` build is never told about an engine release.** A working copy is
+  by definition ahead of the newest release, so comparing them can only produce
+  a wrong answer. `spfy_synth --version` prints which kind of build you have.
+* **Failure is silent.** No network, a 404, a truncated body or a manifest with
+  a schema this build does not understand all end with nothing printed. The
+  timestamp still moves, so an offline machine pays one failed connect a week
+  rather than one on every synth.
+* Nothing is downloaded or installed for you. The notification is a URL.
+* **Only builds that ask for it have any of this in them.** The check lives
+  behind `SPFY_HAVE_UPDATE_CHECK`, set by the `spfy_synth` / `spfy_synth_trace`
+  targets alone. The WASM and Android builds compile the same
+  `src/cli/spfy_synth.c` from CMakeLists of their own, and get exactly the file
+  as it was before the feature existed - no version header, no network code, no
+  new symbols. `build32.bat`, `build.bat`, `build_emu.bat`, `build_hosted.bat`,
+  `build_linux.sh` and `build_macos.sh` all go through `spfy/CMakeLists.txt`
+  and pick it up automatically, stamped `dev-<sha>`.
+* A 64-bit SAPI client (Narrator on x64) reaches the engine through
+  `spfy_sapi64.dll`, which renders by spawning `spfy_synth.exe`. That copy has
+  no console window, so it hands the check to the detached helper rather than
+  printing into a pipe nobody reads - and returns immediately, because the
+  shim is waiting on it to produce audio.
+
+The manifest lives at
+`https://github.com/wagwan-piffting-blud/Speechify/releases/download/updates/update.json`
+- a rolling tag, so the URL baked into every binary ever shipped keeps working.
+Point the checker somewhere else with `SPFY_UPDATE_URL`, including at a local
+file: `spfy_update --url file:///C:/tmp/update.json --check`.
+
+Publishing (maintainer): [`installer/updates/README.md`](installer/updates/README.md).
 
 ---
 
@@ -80,22 +150,42 @@ It is **off by default** and everything it touches is identity when off - see
 claimed about it.
 
 ```cmd
-:: cmd.exe
+:: cmd.exe / PowerShell / sh -- one token for the voice
+spfy_synth.exe --s4 tom "This is a radar indicated threat." out.wav
+```
+
+Naming the three files still works and is what scripts should keep using when
+they point at a voice outside the tree:
+
+```cmd
 spfy_synth.exe --s4 en-US\tom\tom.vin en-US\tom\tom8.vdb en-US\tom\tom.vcf ^
   "This is a radar indicated threat." out.wav
 ```
 
-```powershell
-# PowerShell
-& spfy_synth.exe --s4 en-US\tom\tom.vin en-US\tom\tom8.vdb en-US\tom\tom.vcf `
-  "This is a radar indicated threat." out.wav
-```
+### Voice by name
 
-```sh
-# Linux / macOS
-spfy_synth --s4 en-US/tom/tom.vin en-US/tom/tom8.vdb en-US/tom/tom.vcf \
-  "This is a radar indicated threat." /tmp/out.wav
-```
+`spfy_synth <voice> "<text>" <out.wav>` takes the voice **folder name**,
+matched case-insensitively, and finds the triple itself -- `tom`, `Tom` and
+`TOM` all resolve to `en-US/tom/tom.vin`, `tom8.vdb`, `tom.vcf`. A path to the
+voice directory (`en-US/crstom`) is accepted too.
+
+The search order is, first hit wins:
+
+| # | where |
+|---|---|
+| 1 | `$SPFY_VOICE_DIR` |
+| 2 | the working directory, then its parents |
+| 3 | the directory holding the binary, then its parents |
+| 4 | `~/Documents/Speechify` (the installer's layout) |
+
+A directory only counts if it *contains* a language folder, and a language
+folder is recognised by shape (`en-US`, `es-MX`, `fr-CA`, …) rather than from a
+list -- adding a language needs no code change. `spfy_synth --list-voices`
+prints everything the search can see, and the same list is printed when a name
+does not match.
+
+⚠ `<voice>8.vdb` is preferred over `<voice>.vdb` whenever both exist, because a
+16 kHz bank sitting beside the 8 kHz one is not an equivalent substitute.
 
 `-4` is a synonym for `--s4`; `SPFY_4_MODE=1` in the environment does the same
 thing for callers that cannot pass flags. `--no-s4` forces it off even when the
@@ -649,6 +739,17 @@ rate control that cannot alter selection, use `SPFY_RATE`.
 
 ## Env knobs
 
+### Update check
+
+```text
+SPFY_NO_UPDATE_CHECK=1        no automatic check anywhere, SAPI included
+SPFY_UPDATE_URL=<url>         manifest to poll; file:// works, which is how
+                              the whole path is tested without a server
+SPFY_UPDATE_INTERVAL_DAYS=N   override the stored interval (0 = every run)
+SPFY_UPDATE_TIMEOUT=N         seconds for the whole transfer (5 inline in
+                              spfy_synth, 20 in the detached helper)
+```
+
 ### Speechify 4 mode
 
 ```text
@@ -945,6 +1046,9 @@ spfy/
     host_emu/     x86 interpreter that runs the FE DLL on every platform
     synth/        spfy_voice_t + per-call synth library
     sapi/         Windows SAPI 5 voice DLL (32-bit + 64-bit)
+    update/       the update check, split in two: spfy_update_trigger
+                  (paths + state + spawn, what the SAPI DLL links) and
+                  spfy_update_core (fetch + SHA-256 + manifest + notify)
     cli/          spfy_synth, spfy_dump_voice, replay tools, ...
   test/
     oracle/    221-entry en-US corpus + 100-entry es-MX and fr-CA corpora,
@@ -959,6 +1063,7 @@ spfy/
 | CLI | Purpose |
 |---|---|
 | `spfy_synth` | text (or inline-SPR phonemes) → WAV |
+| `spfy_update` | check for a newer engine / rebuilt voices (`--status`, `--disable`, `--dismiss`) |
 | `spfy_dump_voice` | introspect a VIN/VDB/VCF (units, ccos, prsl, ...) |
 | `spfy_dump_f0` | per-voice F0 byte distribution |
 | `spfy_f0_flatten` | flatten a WAV's F0 to a constant, for A/B listening |

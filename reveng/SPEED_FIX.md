@@ -51,12 +51,12 @@ A polling loop with 10ms sleep. Fixed by replacing with a proper Win32 Event (`W
 
 The ~2.9s floor with both fixes is a fixed cost per request, not per word.
 
-> **Superseded 2026-07-20 — the floor was NOT IPC.** This section previously
+> **Superseded 2026-07-20 - the floor was NOT IPC.** This section previously
 > attributed the floor to "each invocation establishes a new TCP connection
 > to `Speechify.exe`". Direct phase timing disproves that: connecting and
 > opening a port costs **61 ms**, and synthesis completes at **88 ms**.
 > The entire remaining ~4.6 s is `SWIttsTerm()` plus `SWItts.dll`'s
-> `DLL_PROCESS_DETACH` — pure client-side teardown, after the server port
+> `DLL_PROCESS_DETACH` - pure client-side teardown, after the server port
 > has already been released. See "Teardown, not IPC" below.
 
 ## The Fix
@@ -147,7 +147,7 @@ Connecting is cheap and synthesis is cheap. **98% of every invocation was
 client-side library teardown**, paid after the server had already
 released the port. Measured mean over the 235-phrase corpus before the
 fix: **4,683 ms per phrase, with a standard deviation of ~10 ms and no
-correlation to text length** — 2 characters cost the same as 44, which is
+correlation to text length** - 2 characters cost the same as 44, which is
 the signature of a fixed cost rather than work.
 
 ### Two fixes
@@ -184,7 +184,7 @@ utterances.
 ### Correctness checks
 
 - Output is **byte-identical** (SHA-256) to the pre-change binary, both
-  for single-shot and for batch — so reusing one port across a whole
+  for single-shot and for batch - so reusing one port across a whole
   corpus does not perturb synthesis. That matters for oracle capture:
   the existing Tom traces were taken one-process-per-phrase.
 - **120-invocation soak, 0 failures.** `tts.server.numPorts` is 100, so
@@ -192,6 +192,6 @@ utterances.
   It does not: the server reaps the port when the TCP connection dies
   with the process.
 
-Rebuild with `bin\build_dumpwav.bat` (MSVC x86 — must be 32-bit, it
+Rebuild with `bin\build_dumpwav.bat` (MSVC x86 - must be 32-bit, it
 `LoadLibrary`s the 32-bit `SWItts.dll`).
 

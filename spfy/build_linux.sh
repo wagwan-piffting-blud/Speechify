@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# build_linux.sh — first Linux build of the spfy core.
+# build_linux.sh - first Linux build of the spfy core.
 #
 # Mirrors build32.bat (the Windows mingw32 path). Linux gcc with
 # multilib support is required because the FE DLL we host is 32-bit
-# Windows PE — even on Linux the loader must run in a 32-bit address
+# Windows PE - even on Linux the loader must run in a 32-bit address
 # space to map the PE sections.
 #
 # Setup (Ubuntu/Debian):
@@ -43,7 +43,7 @@ case "${1:-all}" in
 esac
 
 if [[ ! -f "$SWITTSFE_DLL" ]]; then
-    echo "FE DLL not found at $SWITTSFE_DLL — set SWITTSFE_DLL=<path>" >&2
+    echo "FE DLL not found at $SWITTSFE_DLL - set SWITTSFE_DLL=<path>" >&2
     exit 1
 fi
 

@@ -1,5 +1,5 @@
 /*
- * spfy/src/host_emu/spfy_dll_boot.c — high-level boot wrapper for the
+ * spfy/src/host_emu/spfy_dll_boot.c - high-level boot wrapper for the
  * embedded SWIttsFe-en-US.dll.
  *
  * Wraps the emulator's mem_init → cpu_reset → pe_load_mem → win32_init →
@@ -78,7 +78,7 @@ int spfy_dll_emu_boot(const uint8_t *dll_bytes, uint32_t dll_len) {
     cpu_reset();
 
     /* Reset import table BEFORE pe_load_mem because pe_load_mem walks the
-     * import directory and calls win32_register_import per name — which
+     * import directory and calls win32_register_import per name - which
      * appends into g_imp[]. */
     win32_reset();
 

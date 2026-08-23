@@ -1,4 +1,4 @@
-# SWIttsFe-en-US.dll — empirical synthesis protocol
+# SWIttsFe-en-US.dll - empirical synthesis protocol
 
 Captured 2026-05-10 via `viz/frida_hooks/fe_vtable_trace.js` against a
 running `Speechify.exe`. Raw traces:
@@ -98,7 +98,7 @@ buffer could hold).
 1. **Open**: `host_dll_load` → `getObject(2, &iobj)`. The engine uses
    `kind=2`; our open path should match (the inventory says either 1 or
    2 works, but staying on 2 maximizes compatibility).
-2. **Init**: skip slots 47/48/41/43/45/46 — they pass engine-internal
+2. **Init**: skip slots 47/48/41/43/45/46 - they pass engine-internal
    pointers (callback addresses in Speechify.exe's address space) that
    wouldn't make sense from our process. Verify empirically that
    `initStage1` alone is enough; the FE's default delegates should
@@ -107,7 +107,7 @@ buffer could hold).
 3. **Per-utterance synth**:
    ```c
    slot5(this, "\\\\!SWIcv3.0.0.");   // header
-   /* slot6 is a no-op for us — its arg is an engine-internal struct;
+   /* slot6 is a no-op for us - its arg is an engine-internal struct;
     * we'll attempt without and observe. */
    slot5(this, text);                  // the input
    /* Drain output. */
@@ -118,7 +118,7 @@ buffer could hold).
        if (out_len <= 1) break;        // out_len includes the +1
        append_to_output_stream(buf, out_len - 1);
    }
-   /* runOrAbort triggers the synth pass — but since we're consuming
+   /* runOrAbort triggers the synth pass - but since we're consuming
     * the tagged FE output ourselves, this may or may not be needed
     * depending on whether the deep FE has any work that happens AFTER
     * the tagged text is emitted. The capture shows runOrAbort is
@@ -126,20 +126,20 @@ buffer could hold).
    slot11(this, 0);                    // synth / commit
    ```
 4. **Parse** the tagged output stream into `spfy_fe_utterance_t.slots`.
-   The parser is straightforward recursive-descent — one slot per
+   The parser is straightforward recursive-descent - one slot per
    phoneme `phn(pNNN)`. POS / stress / accent attach to enclosing word
    / syllable. Char-span tuples `(start, len)` map slots back to input
    text positions for prosody hint application.
 5. **Close**: `slot4 (initStage2)` → `slot26 (reset)` → `slot2 (Release)`
    → `host_dll_free`.
 
-## Still unknown (low-priority — not blocking task 4)
+## Still unknown (low-priority - not blocking task 4)
 
 - **What does `feedConfigB`'s argument actually point to?** The blob
-  reads as something like `\0\0Exiting\0\0\0E\0x\0i\0t\0i\0n\0g\0` — looks
+  reads as something like `\0\0Exiting\0\0\0E\0x\0i\0t\0i\0n\0g\0` - looks
   like a Microsoft BSTR (4-byte length prefix immediately before the
   UTF-16LE string at offset -4). The value is the SAME pointer across
-  all calls in a session — likely a static struct in Speechify.exe's
+  all calls in a session - likely a static struct in Speechify.exe's
   `.data`. Skipping `feedConfigB` from our hosted side may simply
   bypass an optional config path; needs runtime test to confirm.
 - **What do `installHookA` / `installHookB` install?** First arg points
@@ -149,7 +149,7 @@ buffer could hold).
   skip if our usage doesn't need them.
 - **What do `setPair_E..H` actually configure?** They write to
   `ctrl[+0x25..+0x41]` in the state. The blobs look like more
-  code-pointer bytes — probably more callbacks parked in the FE state
+  code-pointer bytes - probably more callbacks parked in the FE state
   for the FE to call when generating output. The output stream we
   captured works without us replicating these.
 

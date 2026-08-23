@@ -1,4 +1,4 @@
-/* spfy_sapi64.dll — 64-bit SAPI shim for the Speechify engine. */
+/* spfy_sapi64.dll - 64-bit SAPI shim for the Speechify engine. */
 
 #define INITGUID 1
 
@@ -378,7 +378,7 @@ static HRESULT stream_wav_with_events(ISpTTSEngineSite *site,
     return hr;
 }
 
-/* Emit `n_samples` of zeros to the SAPI site — used for SilenceMSecs +
+/* Emit `n_samples` of zeros to the SAPI site - used for SilenceMSecs +
  * SPVA_Silence. */
 static HRESULT emit_silence64(ISpTTSEngineSite *site, ULONG n_samples,
                               uint64_t *cum_samples)
@@ -627,13 +627,13 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     HRESULT hr = S_OK;
     int abort_flag = 0;
 
-    /* See spfy_sapi.c::tts_Speak for the rationale — host rate sliders call
+    /* See spfy_sapi.c::tts_Speak for the rationale - host rate sliders call
      * ISpVoice::SetRate which surfaces here only via
      * ISpTTSEngineSite::GetRate (NOT in SPVSTATE.RateAdj). */
     long site_base_rate = 0;
     ISpTTSEngineSite_GetRate(pOutputSite, &site_base_rate);
 
-    /* SPFY_SAPI_DEBUG diagnostic — see spfy_sapi.c::tts_Speak for the full
+    /* SPFY_SAPI_DEBUG diagnostic - see spfy_sapi.c::tts_Speak for the full
      * description. */
     FILE *dbg = NULL;
     if (getenv("SPFY_SAPI_DEBUG")) {
@@ -684,7 +684,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         }
     }
 
-    /* Per-fragment iteration mirroring the 32-bit DLL — see
+    /* Per-fragment iteration mirroring the 32-bit DLL - see
      * spfy_sapi.c::tts_Speak for the rationale. */
     int frag_idx = 0;
     for (const SPVTEXTFRAG *f = pTextFragList; f && !abort_flag;
@@ -703,7 +703,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         if (vol > 100u) vol = 100u;
         float gain = (float)vol / 100.0f;
 
-        /* Pitch split — see spfy_synth_split_pitch in
+        /* Pitch split - see spfy_synth_split_pitch in
          * spfy/src/synth/spfy_synth_lib.c. */
         float target_st = (float)f->State.PitchAdj.MiddleAdj;
         float sel_st = target_st;
@@ -762,7 +762,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
             break;
         }
     }
-    /* See spfy_sapi.c::tts_Speak — don't propagate per-frag failure if any
+    /* See spfy_sapi.c::tts_Speak - don't propagate per-frag failure if any
      * audio was written, otherwise consumers (Balabolka) drop the entire
      * playback queue. */
     if (FAILED(hr) && cum_samples > 0 && !abort_flag) {
@@ -928,7 +928,7 @@ HRESULT WINAPI DllCanUnloadNow(void)
     return g_dll_refs == 0 ? S_OK : S_FALSE;
 }
 
-/* Registration is owned by the 32-bit DLL — but we still need
+/* Registration is owned by the 32-bit DLL - but we still need
  * DllRegisterServer / DllUnregisterServer for regsvr32 to succeed. */
 HRESULT WINAPI DllRegisterServer(void) { return S_OK; }
 HRESULT WINAPI DllUnregisterServer(void) { return S_OK; }

@@ -9,12 +9,12 @@ Usage:
                                 [--include-corpus]
 
 Output columns:
-  word          — lowercase
-  pos           — most-common POS observed
-  n_observed    — how many times the (word, pos) pairing was seen
-  n_total       — how many times the word was seen across all POS
-  alt_pos       — semicolon-list of secondary POS (pos:count)
-  open_class    — 1 if pos in {noun, adj, verb, adv, interj, quant,
+  word          - lowercase
+  pos           - most-common POS observed
+  n_observed    - how many times the (word, pos) pairing was seen
+  n_total       - how many times the word was seen across all POS
+  alt_pos       - semicolon-list of secondary POS (pos:count)
+  open_class    - 1 if pos in {noun, adj, verb, adv, interj, quant,
                   noun_adj, noun_verb}, else 0 (drives accent gating)
 
 The open_class bit is the actionable output: at LTS time, gate accent
@@ -36,7 +36,7 @@ OPEN_CLASS_POS = {
     # Combinations of open classes (always accent)
     "noun_adj", "noun_verb", "verb_adj", "noun_verb_adj", "adj_adv",
     # Context-dependent (kept "open" so spfy_synth's FUNC_WORDS fallback
-    # handles them — baked_pos can't disambiguate from single-word context).
+    # handles them - baked_pos can't disambiguate from single-word context).
     "pro", "pro2", "wh", "undef",
 }
 

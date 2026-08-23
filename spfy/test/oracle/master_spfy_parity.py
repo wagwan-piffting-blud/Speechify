@@ -261,7 +261,7 @@ def load_engine_unified(tid: str, traces_master: Path,
     # and resulting path lengths 74/78/54). Picking "first leave" gives
     # one of the preliminary DP runs (cand pruning or sub-utterance),
     # NOT the final chosen path. The FINAL path is the one whose HP-
-    # expanded length matches n_hp_eng (= len(by_slot)) — that's the
+    # expanded length matches n_hp_eng (= len(by_slot)) - that's the
     # full-corpus DP over the actual HP layout.
     #
     # Fix: compute the path for every viterbi_leave event; pick the one
@@ -317,7 +317,7 @@ def load_engine_unified(tid: str, traces_master: Path,
     # Positions inside an utt that has no matching viterbi_leave are
     # marked False so the audit can exclude them from positional/LCS
     # counts (otherwise we compare synth UIDs against a fabricated
-    # fallback path, which inflates the wrong-UID count — see
+    # fallback path, which inflates the wrong-UID count - see
     # 2026-05-14 nat_035 trace-completeness finding).
     path_mask: list[bool] = []
     incomplete_utts: list[int] = []
@@ -338,7 +338,7 @@ def load_engine_unified(tid: str, traces_master: Path,
                     path_mask.extend([True] * n)
                     bucket.pop(0)
                 else:
-                    # No engine DP for this utt — likely a truncated
+                    # No engine DP for this utt - likely a truncated
                     # master capture. Pad with sentinel UIDs and a
                     # False mask so the audit skips these positions.
                     incomplete_utts.append(uidx)
@@ -356,7 +356,7 @@ def load_engine_unified(tid: str, traces_master: Path,
                 path_uids = max(candidates, key=lambda x: len(x[1]))[1]
             path_mask = [True] * len(path_uids)
 
-    # ⭐ EMITTED units — the engine's post-selection ground truth.
+    # ⭐ EMITTED units - the engine's post-selection ground truth.
     #
     # Everything above reconstructs what the engine SELECTED (prsl_slot +
     # viterbi). `wsola_in` records what it actually handed to synthesis, and
@@ -885,7 +885,7 @@ def audit_voice(args, vname: str, exe: Path, mtime: str) -> dict:
         pairs = [(it["id"], it["text"]) for it in items]
         # The engine reference is TRACKED in the repo, so this stage runs
         # without the proprietary engine installed. Ours still renders fresh
-        # every time, in a cleaned environment — it is the thing under test.
+        # every time, in a cleaned environment - it is the thing under test.
         eng_dir = ac.engine_ref_dir(vname)
         our_dir = ac.SCRATCH / "ours" / vname
         ac.render_engine(pairs, eng_dir, vname)
@@ -916,7 +916,7 @@ def audit_voice(args, vname: str, exe: Path, mtime: str) -> dict:
         # 235 either way and would never have caught this.
         if ac.ENGINE_PROVENANCE.startswith("UNAVAILABLE"):
             print("  >>> NO REFERENCE AUDIO. Install the engine, or restore "
-                  "spfy/test/oracle/engine_ref/ — this stage proved nothing.")
+                  "spfy/test/oracle/engine_ref/ - this stage proved nothing.")
         for tid, why in audio_bad[:12]:
             print(f"  DIFFERS:      {tid} -- {why}")
         if len(audio_bad) > 12:

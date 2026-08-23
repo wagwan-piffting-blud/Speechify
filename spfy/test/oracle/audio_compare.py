@@ -263,7 +263,14 @@ def render_engine(items, out_dir, voice="tom"):
 
     # Speechify fixes its voice at startup, so the server must be serving
     # THIS voice before a single reference byte is rendered.
-    import bin.server_ctl as server_ctl
+    try:
+        import bin.server_ctl as server_ctl
+    except ImportError:
+        try:
+            import server_ctl as server_ctl
+        except ImportError:
+            ENGINE_PROVENANCE = "UNAVAILABLE (server_ctl not importable)"
+            return set()
     if not server_ctl.use(voice):
         ENGINE_PROVENANCE = f"UNAVAILABLE (server would not serve {voice})"
         return set()

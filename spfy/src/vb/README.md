@@ -4,7 +4,7 @@ Seven stages, derived from Festival's clunits build as it maps onto the shipped
 VIN chunks. Evidence and derivation: `reveng/README_TECHNICAL.md`, section
 "Festival 1.4.2/1.4.3 provenance sweep".
 
-The interface is `vb.h`. Nothing is implemented yet — this directory currently
+The interface is `vb.h`. Nothing is implemented yet - this directory currently
 defines the contract and records what already exists in Python, so the port has
 a target and the gaps are visible rather than discovered halfway through.
 
@@ -34,25 +34,25 @@ worked from it.
 
 ## Implemented so far
 
-- `join_cost.{c,h}` — the S4 join cost, ported from the shipped `edgeFrames`
+- `join_cost.{c,h}` - the S4 join cost, ported from the shipped `edgeFrames`
   scorer in `SWIttsUSel.dll`. Kernel, inverse-SD weight derivation, 3-point
   boundary distance with the seam doubled, the affine map, and the hard-zero
   rule for natural continuations. Covered by four tests in
   `test/unit/test_common.c` that pin the vendor-specific behaviours rather than
   generic distance behaviour.
-- `../usel/hash_build.{c,h}` + `spfy_hash_roundtrip` — packing and the S4
+- `../usel/hash_build.{c,h}` + `spfy_hash_roundtrip` - packing and the S4
   acceptance gate.
-- `../common/riff_write.{c,h}` + `spfy_riff_roundtrip` — the container writer,
+- `../common/riff_write.{c,h}` + `spfy_riff_roundtrip` - the container writer,
   byte-identical on four vendor containers.
 
-- `edge_frames.{c,h}` — builds the two frames per unit out of the VDB: dim 0
+- `edge_frames.{c,h}` - builds the two frames per unit out of the VDB: dim 0
   from the unit record's `f0_start`/`f0_end`, dim 1 dead, dims 2–13 as 12 MFCC.
   31 of jill's 185,475 units fail to resolve (0.02%).
-- `spfy_vb_joincost` — calibration harness. On jill the derived weights come out
+- `spfy_vb_joincost` - calibration harness. On jill the derived weights come out
   at exactly `1/(2*dim-4)` and the cost shape matches the vendor to **4%** on
   `p99/p50`; scale is a free gauge carried by `spfy_jc_t.raw_scale`.
 
-**S4 is generative, and the formula is fully derived** — the 3-point
+**S4 is generative, and the formula is fully derived** - the 3-point
 combination was resolved by tracking ESP through `FUN_08e8d3a0`: it is
 `kernel(end(L),end(R-1)) + 2*kernel(end(L),start(R)) + kernel(start(L+1),start(R))`,
 a **sum**, with no scaling anywhere in the function.
@@ -61,7 +61,7 @@ a **sum**, with no scaling anywhere in the function.
 reasons" is **RETRACTED** (2026-08-16). It reasoned about the reader; `hash` is
 1.71 M measurements of the vendor's own metric, and once the 3-point
 combination is known, recovering the spectral representation is a well-posed
-least-squares problem — one quadratic form, 352 unknowns against 1,711,648
+least-squares problem - one quadratic form, 352 unknowns against 1,711,648
 observations. It is fitted, not guessed, by `spfy_vb_jcfit`:
 
 ```
@@ -73,14 +73,14 @@ CEILING control (known M)           1.0000     FLOOR control (shuffled) 0.0004
 
 The fit also corroborates `FUN_08e8d3a0` from data the disassembly never saw:
 with edge-anchored frames the 3-point form beats seam-only by +0.107, and with
-centre-anchored frames — where `end(R-1)` and `start(R)` are literally the same
-frame — it does not, exactly as the degeneracy predicts. Byte-identity is still
+centre-anchored frames - where `end(R-1)` and `start(R)` are literally the same
+frame - it does not, exactly as the degeneracy predicts. Byte-identity is still
 not demonstrated, but the gap is bounded on every axis tested and is **not**
 explained by our holding u-law audio. See `SPEC_S4_hash.md`.
 
 ⛔⛔ **AND THE COST MATTERS MORE THAN THIS FILE USED TO SAY.** The guidance
 "selection is insensitive to the exact metric, calibrate the distribution
-instead" is **REFUTED**. Measured in the only currency that counts — units the
+instead" is **REFUTED**. Measured in the only currency that counts - units the
 engine actually picks differently, over 6,070 slots:
 
 ```
@@ -97,9 +97,9 @@ shown able to detect a change.
 
 ## Stage specs
 
-- [`SPEC_S2_feat.md`](SPEC_S2_feat.md) — the feature registry. `feat` is the
+- [`SPEC_S2_feat.md`](SPEC_S2_feat.md) - the feature registry. `feat` is the
   *schema* (wagon's `.desc`), not the per-unit rows; those live in `unit`.
-- [`SPEC_S4_hash.md`](SPEC_S4_hash.md) — the join-cost table. Format closed and
+- [`SPEC_S4_hash.md`](SPEC_S4_hash.md) - the join-cost table. Format closed and
   verified against jill.vin; generation decomposed into domain / packing / cost.
 
 ## S4 has been run on a voice of ours
@@ -107,7 +107,7 @@ shown able to detect a change.
 `spfy_vb_hashgen --fix-domain --rows-units --mode const` over **donnart**, the
 first application of any of this to a voice we built. It found a defect the
 Python packer had been shipping silently: `vb_hash_pack.c` leaves its cell array
-uninitialised, an unwritten cell reads back as key **0** — a valid `uid_right` —
+uninitialised, an unwritten cell reads back as key **0** - a valid `uid_right` -
 and the ones landing inside row 0's window **resolve**, handing 196,850 left
 units a free join into one specific unit. A further 5.10 M live cells (38.9 MB)
 were unreachable by any lookup. Both vendors carry zero of either, which is the
@@ -120,7 +120,7 @@ genuine continuation from the engine's own same-rec test.
 
 ```
                     hash      n_cells     fill   S4 gate         slots moved
-donnart           78.7 MB   9,668,472   43.7%   SEMANTIC FAIL         —
+donnart           78.7 MB   9,668,472   43.7%   SEMANTIC FAIL         -
 donnafix          60.7 MB   7,417,121   58.3%   SEMANTIC PASS    267 (3.16%)
 donnas4           60.7 MB   7,417,121   58.3%   SEMANTIC PASS  1,011 (11.96%)
 ```
@@ -129,7 +129,7 @@ Container **100.5 MB → 82.4 MB**. `donnafix` fixes only the domain; `donnas4`
 also ships the constant this spec recommends. Not yet judged by ear.
 
 **Remaining in S4:** generating the domain from prsl + adjacency rather than
-recovering it from an existing table, and the density gap — 58% fill against the
+recovering it from an existing table, and the density gap - 58% fill against the
 vendor's 67–72%. See `SPEC_S4_hash.md`.
 
 ## The remaining real gap
@@ -142,7 +142,7 @@ still substantially Tom's.
 It has the shape S4 used to have: the chunk is understood well enough to read
 and patch, but not yet produced from our own corpus. That is worth naming,
 because it means a voice built today is partly **the base voice wearing our
-audio** (Jill, for current work) — which is a plausible contributor to the
+audio** (Jill, for current work) - which is a plausible contributor to the
 friction of "building from scratch". S4 was ~65% of the container by bytes and
 is now ours; `ckls`/`cklx`/`mean`/`f0tr`/`durt` still are not.
 

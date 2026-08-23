@@ -942,10 +942,35 @@ static int cmp_strptr(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* ⛔ AN ALLOW-LIST OF REAL, NOT A DENY-LIST OF SYNTHETIC.
+ *
+ * This used to answer "does the stem start with rvc_ or st2_". Every synthetic
+ * source added since -- `genph_` (Brown renders), `place_` (place-name
+ * carriers) -- therefore counted as the speaker's OWN AUDIO, and
+ * --rvc-policy prefer-real silently protected nothing. It fails quietly: the
+ * build log reports "converted (rvc_*): 0 of N recordings" and looks correct.
+ *
+ * Measured consequence, crstom 2026-08-22: 125 carrier lines carried a
+ * StyleTTS2 rendition of "the national weather service" stretched to 1.15x, and
+ * the selector preferred them over the real recordings. The phrase came out
+ * audibly wrong in a build that verified 46/0.
+ *
+ * A REAL recording is named <office>_<timestamp>_<product>: three lowercase
+ * letters, underscore, then at least eight digits (akq_20041105142049_WBCEFPSBY,
+ * psr_20041101200020_pil=PHXHWRNW1). Anything that does not match that shape did
+ * not come off a broadcast feed, so it is synthetic -- INCLUDING a source nobody
+ * has invented yet, which is the point of inverting the test.
+ */
 int spfy_vb_stem_is_synth(const char *stem)
 {
-    if (!stem) return 0;
-    return !strncmp(stem, "rvc_", 4u) || !strncmp(stem, "st2_", 4u);
+    if (!stem) return 1;
+    size_t i;
+    for (i = 0; i < 3u; ++i)
+        if (stem[i] < 'a' || stem[i] > 'z') return 1;
+    if (stem[3] != '_') return 1;
+    size_t digits = 0;
+    for (i = 4u; stem[i] >= '0' && stem[i] <= '9'; ++i) ++digits;
+    return digits < 8u;
 }
 
 /* ⭐ PREFER-REAL, AT THE ANCHOR LEVEL.

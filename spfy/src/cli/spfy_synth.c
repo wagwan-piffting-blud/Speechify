@@ -2,6 +2,23 @@
 
 #include <spfy/spfy.h>
 #include "env.h"
+#include "voice_find.h"
+
+/* ⚠ GUARDED, and it has to be. This file is not only spfy_synth.exe: the WASM
+ * target (spfy/wasm/CMakeLists.txt) and the Android app (app/src/main/cpp/)
+ * compile it into their own spfy_synth_lib with SPFY_SYNTH_NO_MAIN, from
+ * CMakeLists of their own that never run the version block and never put
+ * src/update on the include path. An unconditional #include here builds fine
+ * on Windows and breaks both of those on the next push -- and the wasm one
+ * breaks in CI, because deploy-wasm-pages.yml triggers on any path under
+ * spfy/src.
+ *
+ * Defined by the spfy_synth / spfy_synth_trace targets only. Without it this
+ * file compiles exactly as it did before the update check existed. */
+#ifdef SPFY_HAVE_UPDATE_CHECK
+#  include <spfy/version.h>
+#  include "spfy_update.h"
+#endif
 
 #include "../synth/spfy_synth_lib.h"
 
@@ -36,7 +53,7 @@
 #include "../common/le.h"
 #include "../common/log.h"
 
-/* In-house FE — used when SPFY_FE_INTERNAL=1 to bypass the SWIttsFe
+/* In-house FE - used when SPFY_FE_INTERNAL=1 to bypass the SWIttsFe
  * DLL drive entirely. Lets us A/B audit the new path vs the hosted FE. */
 #include "../fe_internal/fe_internal.h"
 #  include "../fe_host/fe_parse.h"
@@ -207,7 +224,7 @@
  * <voice>/tom8.vdb -> <voice>/tom8{.pmindex,.pmdata}, which is where
  * reveng/spfy4/tools/gen_pitchmarks_real.py writes them. */
 
-/* Remembered VDB path, for `\s4m` — see spfy4_note_vdb_path() in
+/* Remembered VDB path, for `\s4m` - see spfy4_note_vdb_path() in
  * spfy_synth_lib.h for why it cannot just use argv. */
 static char g_s4_vdb[512];
 
@@ -538,7 +555,7 @@ static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_m
      *
      * We previously over-read AFTER the unit and let the blend eat the
      * unit's first `ola_samples`, losing an extra ~80 per join on top of
-     * the lag — which is why our renders stayed long in a way no constant
+     * the lag - which is why our renders stayed long in a way no constant
      * could fix.
      *
      * `pre` is how much history we actually got; it may be short at the very
@@ -681,14 +698,14 @@ typedef struct {
     spfy_contour_t   contour;
     /* Per-slot output length, from prosody_slot_out_dur(). */
     uint32_t        *slot_dur;
-    /* Global output sample count at the start of THIS phrase — for the
+    /* Global output sample count at the start of THIS phrase - for the
      * end-of-phrase sanity check only. */
     uint64_t         out0;
     /* phone_center label of `pau`, or 0xFFFF if the voice has none.
      *
      * The real engine's WsolaVoiceDatabase::getPitchMarks (FUN_08EE4200,
      * reveng/DLL_ANALYSIS.md) guards every sub-unit with
-     * `strncmp(sub_unit->name, "pau", 3) != 0` — pauses carry NO marks. We
+     * `strncmp(sub_unit->name, "pau", 3) != 0` - pauses carry NO marks. We
      * read them, and Tom's pau units supply 15.6% of all marks with periods
      * down to 2 samples (4000 Hz), which is silence being warped by values
      * that are not pitch periods at all. SPFY_PROSODY_PM_PAU=0 restores the
@@ -1146,19 +1163,19 @@ static int32_t cart_feat(uint32_t q_type, void *user)
 {
     const cart_feat_ctx_t *c = (const cart_feat_ctx_t *)user;
     if (c->is_f0tr) {
-        /* engine's f0tr CART is syllable-level — only q1, q2, q7, q8 are
+        /* engine's f0tr CART is syllable-level - only q1, q2, q7, q8 are
          * populated. */
         if (q_type == 3 || q_type == 4 || q_type == 5 || q_type == 9)
             return 0;
     } else {
         /* engine's durt walker (FUN_08e87d90) executes XOR EBX,EBX before
          * each dispatcher call (verified disasm + cart_walker_args hook
-         * — ebx field always 0). For q_type=7 the dispatcher reads EBX,
+         * - ebx field always 0). For q_type=7 the dispatcher reads EBX,
          * so q7 is forced to 0 in durt walks. (q3/q4/q5/q8/q9 come from
          * stack args populated by the walker, and slot-level sp[]/ctx[]
          * are the correct sources for those.) Without this clamp, our
          * durt walks at q_type=7 nodes use sp[2] and diverge from engine
-         * — accounted for all 6 durt-mismatch slots in nat_036
+         * - accounted for all 6 durt-mismatch slots in nat_036
          * (slot 7/10/12/16/18/20). */
         if (q_type == 7)
             return 0;
@@ -1719,7 +1736,7 @@ static float *build_unit_power(const spfy_voice_t *v, uint32_t *out_n,
 }
 
 /* Read candidate i from whichever candidate pool is live for this slot. */
-/* SPFY_UID_DUMP=<path>|- — the UID capture harness. */
+/* SPFY_UID_DUMP=<path>|- - the UID capture harness. */
 static FILE *spfy_uid_dump_fp(void)
 {
     static FILE *fp = NULL;
@@ -1743,7 +1760,7 @@ static FILE *spfy_uid_dump_fp(void)
     return fp;
 }
 
-/* SPFY_UID_DUMP, emit half — WHERE each slot's audio actually landed. */
+/* SPFY_UID_DUMP, emit half - WHERE each slot's audio actually landed. */
 static void uid_dump_emit(const spfy_voice_t *v, uint32_t phrase_idx,
                           uint32_t slot0, const uint32_t *path_uids,
                           uint32_t run_n, uint32_t lp_first,
@@ -1767,7 +1784,7 @@ static void uid_dump_emit(const spfy_voice_t *v, uint32_t phrase_idx,
     }
 }
 
-/* SPFY_UID_OVERRIDE=<path> — force specific units into the chosen path.
+/* SPFY_UID_OVERRIDE=<path> - force specific units into the chosen path.
  *
  * THE POINT: a recovered unit id is only a hypothesis until somebody hears
  * it. This renders the substitution so the claim can be judged by ear rather
@@ -1783,7 +1800,7 @@ static void uid_dump_emit(const spfy_voice_t *v, uint32_t phrase_idx,
  * original path exactly. That is the identity case, and it is worth checking
  * before trusting any substitution.
  *
- * ⚠ THIS ONE DOES CHANGE THE AUDIO — unlike the dump, which is inert. It is
+ * ⚠ THIS ONE DOES CHANGE THE AUDIO - unlike the dump, which is inert. It is
  * still off unless the variable is set, so the shipped path and the audit are
  * untouched, but it must never be left set during a comparison run.
  *
@@ -1902,7 +1919,7 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
         path_kind = 1;
         goto dump;
     }
-    /* Hash miss — engine-exact (FUN_08e8b620):
+    /* Hash miss - engine-exact (FUN_08e8b620):
      *   miss = MISSING_JOIN_COST + (gate ? F0_EDGE_CHANGE_WEIGHT * curve[idx]
      *                                    : CCOS_DEFAULT)
      * MISSING_JOIN_COST is 1000.0 when the VCF omits it -- which EVERY
@@ -2021,7 +2038,7 @@ static const char *spr_to_arpabet(char c)
     return NULL;
 }
 
-/* SWIttsSSML.dll, UPSTREAM of the FE — the FE DLL has no tag parser    */
+/* SWIttsSSML.dll, UPSTREAM of the FE - the FE DLL has no tag parser    */
 
 static const char *etag_digit_name(int c)
 {
@@ -2112,7 +2129,7 @@ static int etag_cardinal_4(int n, char *buf, size_t cap)
 }
 
 /* If `p` begins with "\!"<kw> AND the char after <kw> is a valid tag
- * boundary (not alphanumeric — a tag "cannot be followed immediately by an
+ * boundary (not alphanumeric - a tag "cannot be followed immediately by an
  * alphanumeric character"), return p advanced past the keyword; else NULL. */
 static const char *etag_after(const char *p, const char *kw)
 {
@@ -2126,7 +2143,7 @@ static const char *etag_after(const char *p, const char *kw)
 /* True when `text` carries an embedded \! */
 static int spfy_etags_need_resolve(const char *text)
 {
-    /* Bare `[ToBI:` — see the resolver for why the `\!` may already be gone
+    /* Bare `[ToBI:` - see the resolver for why the `\!` may already be gone
      * by the time the text reaches us (Balabolka splits Speak() calls on
      * it). */
     if (strstr(text, "[ToBI:")) return 1;
@@ -2567,8 +2584,8 @@ static const char *find_inline_token(const char *s, int *kind,
     return NULL;
 }
 
-/* True when `text` carries inline markup the DLL FE can't read — an
- * `\![...]` SPR escape, a `\!pN` pause, or a `<pron ...>` tag — and so must
+/* True when `text` carries inline markup the DLL FE can't read - an
+ * `\![...]` SPR escape, a `\!pN` pause, or a `<pron ...>` tag - and so must
  * be routed through build_inline_mixed_tagged (which also covers the
  * lone-... */
 static int spfy_text_has_inline_markup(const char *text)
@@ -2622,8 +2639,8 @@ static char spr_break_marker(int c)
 }
 
 /* Build ONE flowing tagged-output utterance from text that mixes plain
- * words with inline markup — `\![...]` SPR escapes, `\!pN` pause tags,
- * and/or `<pron ...>` tags — none of which the DLL FE can read (it would
+ * words with inline markup - `\![...]` SPR escapes, `\!pN` pause tags,
+ * and/or `<pron ...>` tags - none of which the DLL FE can read (it would
  * spell... */
 static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
 {
@@ -2663,7 +2680,7 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         p = seg_end;
         if (seg_len == 0) continue;
 
-        /* `\!pN` pause: not a phonemizable run — record the duration and
+        /* `\!pN` pause: not a phonemizable run - record the duration and
          * whether it sits immediately before punctuation, then apply it at
          * the next junction (or before the closing pad). */
         if (kind == SEG_PAUSE) {
@@ -2675,7 +2692,7 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         }
 
         /* Skip whitespace-only plain runs (the space between a word and a
-         * markup token) — no phonemes, and the FE would emit an empty utt. */
+         * markup token) - no phonemes, and the FE would emit an empty utt. */
         if (!is_markup) {
             int ws_only = 1;
             for (size_t i = 0; i < seg_len; i++)
@@ -2694,7 +2711,7 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         }
 
         /* A markup run is phrase-final when the next non-whitespace content
-         * is phrase-breaking punctuation or end-of-text — i.e. */
+         * is phrase-breaking punctuation or end-of-text - i.e. */
         int seg_final = 0;
         if (is_markup) {
             const char *la = p;
@@ -2749,7 +2766,7 @@ static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
         any_core = 1;
 
         /* Remember break punct trailing this seg (last non-ws char) for the
-         * NEXT junction — covers `word, \![...]` as well as `\![...],
+         * NEXT junction - covers `word, \![...]` as well as `\![...],
          * word`. */
         pend_break = 0;
         {
@@ -2777,7 +2794,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                        const spfy_synth_callbacks_t *cb,
                        spfy_synth_stats_t *out_stats)
 {
-    /* `\s4m` — Speechify 4 mode, for hosts that cannot pass a CLI flag or
+    /* `\s4m` - Speechify 4 mode, for hosts that cannot pass a CLI flag or
      * set an environment variable. */
     /* ---- REJOIN A TAG A HOST CUT IN HALF -------------------------------
      * Balabolka hands tagged text to the engine in pieces, splitting so
@@ -2966,8 +2983,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             rc = spfy_fe_synth_tagged(v->fe, tagged, &hints, &utt_unused);
             free(tagged);
         } else if (spfy_text_has_inline_markup(text)) {
-            /* Inline pronunciation markup — `\![...]` SPR escapes and/or
-             * `<pron ...>` tags — that the DLL FE can't read. */
+            /* Inline pronunciation markup - `\![...]` SPR escapes and/or
+             * `<pron ...>` tags - that the DLL FE can't read. */
             char *mixed = build_inline_mixed_tagged(v->fe, text);
             if (!mixed) {
                 fprintf(stderr, "build_inline_mixed_tagged: bad inline markup\n");
@@ -2975,7 +2992,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
             if (spfy_env("SPFY_ETAGS_DUMP"))
                 fprintf(stderr, "[etags] tagged: %s\n", mixed);
-            /* Refinement must be ON for THIS parse — same reasoning as the
+            /* Refinement must be ON for THIS parse - same reasoning as the
              * SPFY_FE_INTERNAL branch below, and the same symptom.
              *
              * The SPR runs here come from spr_inline_to_tagged, which emits
@@ -3014,7 +3031,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     "(SPFY_FE_INTERNAL forced override)\n");
                 logged = 1;
             }
-            /* 64 KB tagged buffer — accommodates long passages (the sioux
+            /* 64 KB tagged buffer - accommodates long passages (the sioux
              * pangram in the audit corpus runs ~30 KB tagged). */
             static char tagged_buf_[65536];
             int frc = spfy_fe_internal_text_to_tagged(
@@ -3083,7 +3100,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     int g_wseq = -1;
 #endif
 
-    /* Inter-phrase silence — DEFAULT OFF as of 2026-05-19 evening. */
+    /* Inter-phrase silence - DEFAULT OFF as of 2026-05-19 evening. */
     int inter_phrase_ms_override = -1;
     {
         const char *e = spfy_env("SPFY_INTERPHRASE_MS");
@@ -3102,10 +3119,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
            total_paired_cross = 0, total_interword_pauses = 0;
 
     /* sentence_idx_in_para tracks engine's `*param_1` value in
-     * FUN_08e8c7d0 — starts at 0, increments for each non-end-punct
+     * FUN_08e8c7d0 - starts at 0, increments for each non-end-punct
      * phrase ('.', '?', '!' reset to 0; ',', ';', etc increment).
      * Affects the slot's sp3 (wordInPhrase) code for words at
-     * syl_idx=0 — phrase-initial words get code 5 only when
+     * syl_idx=0 - phrase-initial words get code 5 only when
      * sentence_idx_in_para==0 AND voice config_d4==0; otherwise code 1.
      * SPFY_NO_SENTENCE_IDX_PARA=1 reverts to the legacy hardcoded 0. */
     uint32_t sentence_idx_in_para = 0;
@@ -3159,7 +3176,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 for (uint32_t i = 0; i < dp_f0.n_units; ++i)
                     if (dp_f0.f0[i] > 0.0f) ++voiced;
                 dp_f0_on = 1;
-                spfy_log_warn("dp-f0: ON — w=%.3f/st, dead=%.2f st, "
+                spfy_log_warn("dp-f0: ON - w=%.3f/st, dead=%.2f st, "
                               "up=%.2fx, break=%.2f st, slope=%+.3f st/join, "
                               "scope=%d, seam=%.3f, "
                               "%u/%u units voiced (%.1f%%)",
@@ -3219,7 +3236,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             if (d && *d) pow_join_dead = (float)atof(d);
             if (pow_join_w    < 0.0f) pow_join_w    = 0.0f;
             if (pow_join_dead < 0.0f) pow_join_dead = 0.0f;
-            spfy_log_warn("pow-cont (join): ON — w=%.3f/log-unit, dead=%.3f",
+            spfy_log_warn("pow-cont (join): ON - w=%.3f/log-unit, dead=%.3f",
                           (double)pow_join_w, (double)pow_join_dead);
         }
         if (unit_pow && want_tgt) {
@@ -3245,7 +3262,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 v->av.pow_rows   = rows;
                 v->av.w_pow_t    = (float)atof(e_tgt);
                 if (v->av.w_pow_t < 0.0f) v->av.w_pow_t = 0.0f;
-                spfy_log_warn("pow-tgt: ON — w=%.4f, %u rows, "
+                spfy_log_warn("pow-tgt: ON - w=%.4f, %u rows, "
                               "scale %.4f*x%+.4f, mean[0..2]=%.3f/%.3f/%.3f",
                               (double)v->av.w_pow_t, rows,
                               (double)v->av.pow_a, (double)v->av.pow_b,
@@ -3311,7 +3328,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
            != SPFY_OK) {
         free(seg_names); goto fail;
     }
-    /* SPFY_SP_OVERRIDE — force the prosodic-position target on chosen
+    /* SPFY_SP_OVERRIDE - force the prosodic-position target on chosen
      * half-phones. */
     {
         const char *ov = spfy_env("SPFY_SP_OVERRIDE");
@@ -3861,7 +3878,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             || !cand_c70[hp] || !cand_c78[hp]) {
             rc = SPFY_E_NOMEM; goto fail;
         }
-        /* SPFY_UID_DUMP — see spfy_uid_dump_fp(). One NDJSON record per
+        /* SPFY_UID_DUMP - see spfy_uid_dump_fp(). One NDJSON record per
          * half-phone slot listing EVERY candidate the DP was allowed to
          * consider. The matching "pick" record is emitted after the DP, and
          * the two join on (phrase, slot).
@@ -3872,7 +3889,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * introduce a lifetime bug into the shipped path.
          *
          * ⚠ ENV-GATED AND SIDE-EFFECT FREE. Unset, this costs one getenv per
-         * phrase and changes nothing — the byte-exact audit must stay
+         * phrase and changes nothing - the byte-exact audit must stay
          * 226/226 with it absent AND present. */
         if (spfy_uid_dump_fp()) {
             FILE *uf = spfy_uid_dump_fp();
@@ -3924,7 +3941,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 if (spfy_cart_traverse(&v->f0tr_cart, 0, cart_feat, &cfc,
                                        &cart.f0tr_mean, &cart.f0tr_var) == SPFY_OK) {
                     cart.f0tr_valid = 1;
-                    /* Pitch shift via unit-selection bias — see
+                    /* Pitch shift via unit-selection bias - see
                      * spfy_synth_set_pitch_semitones(). */
                     cart.f0tr_mean *= v->pitch_scale;
                 }
@@ -4011,7 +4028,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             int rcs = spfy_hp_innerscorer(&v->av, &ctx_in, &sp_in, &cart,
                                           cbuf[hp][i], &c);
             tbuf[hp][i] = (rcs != SPFY_OK || isnan(c) || isinf(c)) ? 1e9f : c;
-            /* [live-trace] one event per scored candidate — the raw search
+            /* [live-trace] one event per scored candidate - the raw search
              * space the viz shows filling in and then getting pruned by the
              * Viterbi. */
             spfy_trace_eventf("cand",
@@ -4066,7 +4083,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
         }
 
-        /* SPFY_TC_DUMP — per-cand target cost dump (post-inner-scorer,
+        /* SPFY_TC_DUMP - per-cand target cost dump (post-inner-scorer,
          * pre-hist-prune). */
         if (spfy_env("SPFY_TC_DUMP")) {
             fprintf(stderr, "{\"tc_dump\":1,\"hp\":%u,\"post\":%u,\"pool_n\":%u,\"uids\":[", hp, s, pool_n);
@@ -4133,14 +4150,14 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 /* Engine FUN_08e9504c binning is TRUNCATION (round-toward
                  * -zero), NOT round-to-nearest. The decomp shows FRNDINT
                  * (banker's round) followed by an adjustment subtracting
-                 * 1 whenever the input wasn't exactly integer — net effect
+                 * 1 whenever the input wasn't exactly integer - net effect
                  * is floor for positive values.
                  *
                  * Verified 2026-05-14 via Frida trace of FUN_08e88830 on
                  * text_002 HP=4: engine bin_dist=0.725 (break at k=28),
                  * matching truncation binning. Previously we used lroundf
                  * which rounded 29.86 up to 30, putting 33584 in bin 29
-                 * instead of bin 28 — engine breaks at k=29 instead of
+                 * instead of bin 28 - engine breaks at k=29 instead of
                  * k=28 and keeps 17 cands instead of 16.
                  *
                  * SPFY_HP_BIN_LROUND=1 reverts to lroundf for A/B audit. */
@@ -4463,7 +4480,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     adapter.sp[i]  = sp_tab.sp[post][i];
                 }
                 cfc.slot = &adapter;
-                /* Plan 03-04: silence-pad CART traversal — see primary
+                /* Plan 03-04: silence-pad CART traversal - see primary
                  * spfy_cart_traverse call site for rationale. */
                 int silence = ctx_is_silence(v, slice_ctx.ctx[post][2]);
                 if (!silence || !spfy_env("SPFY_NO_SILENCE_CART")) {
@@ -4491,13 +4508,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     hp_feat_per[k].sp[i]  = sp_tab.sp[post][i];
                 }
                 hp_feat_per[k].q5 = q5_per_slot[post];
-                /* 2026-05-14: real syl_idx per HP — walk parent_idx up the
+                /* 2026-05-14: real syl_idx per HP - walk parent_idx up the
                  * tree until we hit an SK_SYLLABLE node. The anchor-score
                  * advance walk uses this to step target_idx at syllable
                  * boundaries (engine FUN_08e89530 walks `param_2+0x18`
                  * forward until value changes from prior). Previously this
                  * was always -1, making advance jump to last_hp on first
-                 * non-initial iter — wrong for multi-syllable Word spans. */
+                 * non-initial iter - wrong for multi-syllable Word spans. */
                 {
                     int32_t syl_idx = -1;
                     uint32_t cur = post;
@@ -4592,7 +4609,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     /* Engine-faithful anchor cand state init from
                      * FUN_08e8ce60 @ 0x08e8ce60 (decomp 2026-05-14):
                      * iterate v->units in [ss..se]; per qualifying unit
-                     * (voicing[hp_class] != 0 — Tom has weight_8c =
+                     * (voicing[hp_class] != 0 - Tom has weight_8c =
                      * weight_90 = 0 so only voicing gates), update
                      *   c70 = MAX of unit.f0_start
                      *   c6c = FIRST unit.f0_end where f0_end >= 21
@@ -4748,7 +4765,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     adapter.sp[i]  = sp_tab.sp[post][i];
                 }
                 cfc.slot = &adapter;
-                /* Plan 03-04: silence-pad CART traversal — see primary
+                /* Plan 03-04: silence-pad CART traversal - see primary
                  * spfy_cart_traverse call site for rationale. */
                 int silence = ctx_is_silence(v, slice_ctx.ctx[post][2]);
                 if (!silence || !spfy_env("SPFY_NO_SILENCE_CART")) {
@@ -4776,13 +4793,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     hp_feat_per[k].sp[i]  = sp_tab.sp[post][i];
                 }
                 hp_feat_per[k].q5 = q5_per_slot[post];
-                /* 2026-05-14: real syl_idx per HP — walk parent_idx up the
+                /* 2026-05-14: real syl_idx per HP - walk parent_idx up the
                  * tree until we hit an SK_SYLLABLE node. The anchor-score
                  * advance walk uses this to step target_idx at syllable
                  * boundaries (engine FUN_08e89530 walks `param_2+0x18`
                  * forward until value changes from prior). Previously this
                  * was always -1, making advance jump to last_hp on first
-                 * non-initial iter — wrong for multi-syllable Word spans. */
+                 * non-initial iter - wrong for multi-syllable Word spans. */
                 {
                     int32_t syl_idx = -1;
                     uint32_t cur = post;
@@ -4865,7 +4882,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 uint32_t se = out_cands[c].se;
                 if (se < ss) continue;
                 uint32_t span_uid_n = se - ss + 1;
-                /* 2026-05-14: removed strict span filter — see WORD-pass
+                /* 2026-05-14: removed strict span filter - see WORD-pass
                  * comment for rationale. */
                 if (spfy_env("SPFY_ANCHOR_STRICT_SPAN")
                     && span_uid_n != span_n) continue;
@@ -4995,7 +5012,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         spfy_vcf_f32(&v->vcf, "F0_EDGE_CHANGE_WEIGHT", 0.6f);
     /* MISSING_JOIN_COST = 1000.0 from FE-init default (FUN_08e90dc0
      * sets param_3[0x21] = 0x447a0000 = 1000.0 before VCF override;
-     * no shipped VCF overrides it). Huge by design — makes the DP almost
+     * no shipped VCF overrides it). Huge by design - makes the DP almost
      * exclusively use same-rec runs and v->hash hits. */
     jc.missing_join_cost     =
         spfy_vcf_f32(&v->vcf, "MISSING_JOIN_COST", 1000.0f);
@@ -5146,7 +5163,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 uint32_t hp = post_to_hp[s];
                 if (hp < n_slots) path_uids[hp] = uid;
                 /* [live-trace] the Viterbi's winning candidate for this
-                 * half-phone — the viz uses this to collapse the candidate
+                 * half-phone - the viz uses this to collapse the candidate
                  * cloud onto the chosen unit. */
                 spfy_trace_eventf("pick", "{\"slot\":%u,\"uid\":%u}", hp, uid);
                 ++expand_hps;
@@ -5258,7 +5275,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                         dag_slots[s].n_preds, dag_slots[s].n_cands);
             }
             for (uint32_t hp = 0; hp < n_hp; ++hp) {
-                /* Skip partial-anchor overshoot positions — engine's path
+                /* Skip partial-anchor overshoot positions - engine's path
                  * doesn't emit these either. */
                 if (path_uids[hp] == 0xFFFFFFFFu) continue;
                 fprintf(stdout, "  hp %2u: uid=%u\n", hp, path_uids[hp]);
@@ -5274,7 +5291,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         free(path_slots_buf); free(path_uids_buf);
     }
 
-    /* SPFY_PATH_DUMP — the chosen UID per half-phone slot, one JSON line
+    /* SPFY_PATH_DUMP - the chosen UID per half-phone slot, one JSON line
      * per phrase. */
     if (spfy_env("SPFY_PATH_DUMP")) {
         fprintf(stderr, "{\"path_dump\":1,\"phrase\":%u,\"uids\":[",
@@ -5285,7 +5302,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         fprintf(stderr, "]}\n");
     }
 
-    /* SPFY_UID_DUMP, pick half — the DP's winner per half-phone. */
+    /* SPFY_UID_DUMP, pick half - the DP's winner per half-phone. */
     if (spfy_uid_dump_fp()) {
         FILE *uf = spfy_uid_dump_fp();
         for (uint32_t hp = 0; hp < n_slots; ++hp)
@@ -5295,7 +5312,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     path_uids[hp] == 0xFFFFFFFFu ? -1 : (int)path_uids[hp]);
     }
 
-    /* SPFY_UID_OVERRIDE — substitute chosen units and hear the result. */
+    /* SPFY_UID_OVERRIDE - substitute chosen units and hear the result. */
     uid_override_apply(phrase_idx, path_uids, n_slots);
 
     /* (Was: SPFY_NO_FORCE_END_SILENCE / force-set last UID to silence
@@ -5304,7 +5321,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     /* Decode chosen v->units to audio via WSOLA streamer. */
     int      prev_have = 0;
     uint16_t prev_file_idx = 0, prev_local_pos = 0, prev_dur_like = 0;
-    /* F0 at the trailing edge of the last emitted span — fed into WSOLA for
+    /* F0 at the trailing edge of the last emitted span - fed into WSOLA for
      * PSOLA voiced-join detection. */
     uint8_t  prev_f0_end = 0;
     /* Inter-word silence: engine inserts visible breathing gaps between
@@ -5315,7 +5332,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * per phrase so the first content word of each phrase ticks g_wseq. */
     uint32_t g_wprev = 0xFFFFFFFFu;
 #endif
-    /* Set up below, once silence_n is known — the contour's timeline has to
+    /* Set up below, once silence_n is known - the contour's timeline has to
      * account for inter-word silence. */
     prosody_stage_t pros;
     memset(&pros, 0, sizeof pros);
@@ -5381,7 +5398,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 pros.phone_center = NULL;
                 pros.phone_stride = 0;
                 pros.n_units      = v->units.n_units;
-                /* SPFY_PROSODY_F0_TABLE=<path> — every unit's F0 by the
+                /* SPFY_PROSODY_F0_TABLE=<path> - every unit's F0 by the
                  * engine's own definition, written once per process. */
                 {
                     static int f0_table_done = 0;
@@ -5489,7 +5506,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                         pros.on       = 1;
                         pros.out0     = sink->n_samples_written;
                         pros.slot_dur = cdur;
-                        /* SPFY_TIMELINE_DUMP=1 — the authoritative map from
+                        /* SPFY_TIMELINE_DUMP=1 - the authoritative map from
                          * half-phone to OUTPUT SAMPLES, on the same axis
                          * the mark dump's `wpos` uses. */
                         /* The contour's OWN accent positions, in nominal
@@ -5539,7 +5556,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                             }
                         }
                         cdur          = NULL;
-                        spfy_log_warn("prosody: ON — total %.0f smp, %d accent(s), "
+                        spfy_log_warn("prosody: ON - total %.0f smp, %d accent(s), "
                                       "base %.1f Hz, accent %.2f st, "
                                       "fall %.2f st%s",
                                       pros.contour.total, pros.contour.n_acc,
@@ -5547,7 +5564,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                                       (double)cp.accent_st,
                                       (double)cp.fall_st,
                                       pros.contour.have_fall ? " (L-L%)" : "");
-                        /* SPFY_PROSODY_SLOT_DUMP=1 — SELECTION against the
+                        /* SPFY_PROSODY_SLOT_DUMP=1 - SELECTION against the
                          * contour, which nothing emitted before.
                          *
                          * The mark dump answers "what did the warp do"; it
@@ -5646,7 +5663,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                                   env_f("SPFY_PROSODY_F0_CEIL_HZ", 0.0f));
                         if (band_mode && band_lo <= 0.0f && band_hi <= 0.0f)
                             spfy_log_warn("prosody: RESELECT_BAND set but no "
-                                          "F0_FLOOR_HZ/F0_CEIL_HZ — inert");
+                                          "F0_FLOOR_HZ/F0_CEIL_HZ - inert");
                         for (uint32_t k = 0; k < n_c2; ++k) {
                             uint32_t uid0 = path_uids[k];
                             uint32_t dur_s = pros.slot_dur[k];
@@ -5698,13 +5715,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                             tpos += (double)dur_s;
                         }
                         spfy_log_warn("prosody: reselect substituted %d unit(s)"
-                                      " — %d free join, %d same recording,"
+                                      " - %d free join, %d same recording,"
                                       " %d CROSS recording",
                                       n_sub, n_free, n_same, n_cross);
                         spfy_reselect_free(&rs);
                     }
                 }
-                /* SPFY_PROSODY_SLOT_DUMP — see the note at the contour build. */
+                /* SPFY_PROSODY_SLOT_DUMP - see the note at the contour build. */
                 if (pros.on && spfy_env("SPFY_PROSODY_SLOT_DUMP")) {
                     double sp = 0.0;
                     for (uint32_t k = 0; k < n_slots; ++k) {
@@ -5833,7 +5850,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     while (s < n_slots) {
         uint32_t u = path_uids[s];
         if (u == 0xFFFFFFFFu) {
-            /* Partial-anchor overshoot — audio for these HPs is supplied by
+            /* Partial-anchor overshoot - audio for these HPs is supplied by
              * the anchor's UID range above; don't emit silence here. */
             if (pros.on) nom_pos += pros.slot_dur[s];
             ++s; continue;
@@ -5852,8 +5869,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * ⚠ BUT EMITTING THEM IN FULL IS ALSO WRONG, so this is OFF by
          * default until the amount is understood. Tested: letting uid 0
          * through moved the FIRST DIFFERING SAMPLE from index 0 to index 2 on
-         * every corpus text — samples 0 and 1 then match the engine exactly,
-         * which confirms the engine really does open on this unit — but the
+         * every corpus text - samples 0 and 1 then match the engine exactly,
+         * which confirms the engine really does open on this unit - but the
          * length ratio went the wrong way, 1.27 -> 1.85 median, because uid 0
          * carries dur_like 203 (1624 samples) and the engine emits only ~65-80
          * of them. It uses the pau to PRIME THE CROSSFADE TAIL, not as body.
@@ -5959,7 +5976,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 if (v_next != v_prev + 1u) break;
                 /* A uid+1 run can STRADDLE A WORD BOUNDARY (the live-trace
                  * block below documents the same thing: "a run straddling a
-                 * word boundary — e.g. */
+                 * word boundary - e.g. */
                 if (silence_n > 0
                     && hp_word_idx[s + run_n] != hp_word_idx[s + run_n - 1])
                     break;
@@ -6101,7 +6118,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
              * WSOLA's crossfade shortens the real output slightly, but far
              * better than reporting the run's start for every word in it.
              *
-             * ⚠ local_pos is MILLISECONDS, not samples — this added the raw
+             * ⚠ local_pos is MILLISECONDS, not samples - this added the raw
              * delta and so placed intra-run word events at 1/8 of their true
              * offset (at 8 kHz), i.e. essentially back at the run start,
              * which is the very failure the block exists to fix. Scale by
@@ -6183,7 +6200,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         double nominal = pros.contour.total;
         if ((double)nom_pos != nominal)
             spfy_log_warn("prosody: timeline walk ended at %llu, contour "
-                          "total is %.0f — accents are displaced; "
+                          "total is %.0f - accents are displaced; "
                           "prosody_slot_out_dur() is out of sync with the "
                           "concat loop",
                           (unsigned long long)nom_pos, nominal);
@@ -6286,7 +6303,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     fe_utt = (spfy_fe_utt_t){0};
     n_slots = 0;
 
-    /* Inter-phrase silence — DEFAULT OFF (rely on FE pad slots). */
+    /* Inter-phrase silence - DEFAULT OFF (rely on FE pad slots). */
     if (phrase_idx + 1 < n_phrases) {
         int sil_ms = (inter_phrase_ms_override > 0) ? inter_phrase_ms_override : 0;
         /* User `\!pN` pause before the NEXT phrase, threaded from the FE
@@ -6504,10 +6521,10 @@ static int spfy_f0_flatten_wav_file(const char *path, float base, float ratio)
  * that leave the assets alone and necessarily changes when they do.
  *
  * Two candidates, in order:
- *   1. beside the executable — durable, and SHARED with spfy_sapi.dll when
+ *   1. beside the executable - durable, and SHARED with spfy_sapi.dll when
  *      both are installed in the same directory, so the installer's elevated
  *      regsvr32 populates it once for every user on the machine;
- *   2. %TEMP% / $TMPDIR — for a read-only install dir, or a CLI run from a
+ *   2. %TEMP% / $TMPDIR - for a read-only install dir, or a CLI run from a
  *      location this user cannot write to.
  *
  * Returns the directory in use, or NULL if neither candidate worked. */
@@ -6541,6 +6558,29 @@ static const char *resolve_assets(const char *argv0, spfy_asset_paths_t *out)
         && spfy_assets_extract(dir, out) == 0)
         return dir;
     return NULL;
+}
+
+/* Print every voice the search path can see. Used by --list-voices and by
+ * the "no such voice" error, because a name that did not match is only
+ * actionable next to the names that would have. */
+static void print_voice_list(const char *argv0, FILE *fp)
+{
+    static spfy_voice_paths v[256];
+    size_t n = spfy_voice_list(argv0, v, sizeof v / sizeof v[0]);
+    size_t i;
+
+    if (n == 0) {
+        fprintf(fp, "no voices found. searched:\n");
+        if (*spfy_voice_search_path())
+            fprintf(fp, "  %s\n", spfy_voice_search_path());
+        else
+            fprintf(fp, "  (no directory holding a language folder was found "
+                        "-- set SPFY_VOICE_DIR)\n");
+        return;
+    }
+    fprintf(fp, "%zu voice%s:\n", n, n == 1 ? "" : "s");
+    for (i = 0; i < n; ++i)
+        fprintf(fp, "  %-12s %-7s %s\n", v[i].name, v[i].lang, v[i].dir);
 }
 
 /* Read an entire text file into a malloc'd, NUL-terminated buffer, with
@@ -6630,6 +6670,10 @@ int main(int argc, char **argv)
     /* --s4 / -4 turn on Speechify 4 mode; --no-s4 forces it off even when
      * SPFY_4_MODE is exported. */
     int s4_flag = 0;
+    /* The once-a-week update check, which runs AFTER the WAV is written and
+     * never before it -- a synth the user is waiting on does not stop to
+     * talk to GitHub. */
+    int update_check = 1;
     {
         int w = 1;
         for (int r = 1; r < argc; r++) {
@@ -6655,6 +6699,25 @@ int main(int argc, char **argv)
                 spfy_synth_verbose = 1;
             } else if (strcmp(a, "--trace-stream") == 0) {
                 trace_stream = 1;
+            } else if (strcmp(a, "--list-voices") == 0) {
+                print_voice_list(argv[0], stdout);
+                return 0;
+#ifdef SPFY_HAVE_UPDATE_CHECK
+            } else if (strcmp(a, "--version") == 0) {
+                printf("%s\n", SPFY_VERSION);
+                return 0;
+            } else if (strcmp(a, "--no-update-check") == 0) {
+                update_check = 0;
+            } else if (strcmp(a, "--check-update") == 0) {
+                /* Ignores the interval and reports "up to date" out loud --
+                 * the automatic check is silent unless there is news. */
+                int urc = spfy_upd_run(argv[0], 1, 0, stdout);
+                if (urc == 0) printf("up to date (spfy %s)\n", SPFY_VERSION);
+                else if (urc < 0)
+                    fprintf(stderr, "update check failed (offline, or %s is "
+                                    "unreachable)\n", spfy_upd_url());
+                return urc < 0 ? 1 : 0;
+#endif
             } else {
                 argv[w++] = argv[r];
             }
@@ -6662,20 +6725,39 @@ int main(int argc, char **argv)
         argc = w;
     }
 
+    /* Three positional layouts, told apart by count alone -- 1 path, 3 paths
+     * or 7 paths -- so nothing has to guess at what a token means. */
     int short_form;
-    if (argc == (file_path_arg ? 5 : 6)) {
+    int name_form = 0;
+    if (argc == (file_path_arg ? 3 : 4)) {
+        short_form = 1;
+        name_form = 1;
+    } else if (argc == (file_path_arg ? 5 : 6)) {
         short_form = 1;
     } else if (argc == (file_path_arg ? 9 : 10)) {
         short_form = 0;
     } else {
         fprintf(stderr,
-            "usage: %s <voice.vin> <voice.vdb> <voice.vcf> \"<text>\" <out.wav>\n"
+            "usage: %s <voice> \"<text>\" <out.wav>\n"
+            "   or: %s <voice.vin> <voice.vdb> <voice.vcf> \"<text>\" <out.wav>\n"
             "   or: %s <voice.vin> <voice.vdb> <voice.vcf> <hpclass.bin>\n"
             "          <vocab.json> <fe_tables_a> <fe_tables_b>\n"
             "          \"<text>\" <out.wav>          (legacy)\n"
             "\n"
+            "  <voice> is a voice FOLDER NAME, matched case-insensitively --\n"
+            "  `tom`, `Tom` and `TOM` all find en-US/tom/tom.{vin,8.vdb,vcf}.\n"
+            "  A path to the voice directory works too. Searched, in order:\n"
+            "  $SPFY_VOICE_DIR, the working directory and its parents, the\n"
+            "  directory holding this binary and its parents, then\n"
+            "  ~/Documents/Speechify. `--list-voices` prints what that finds.\n"
+            "\n"
             "  -f, --file <path>   read input text from <path> instead of the\n"
             "                      \"<text>\" argument (which is then omitted)\n"
+            "      --list-voices   print every discoverable voice and exit\n"
+            "      --version       print the build version and exit\n"
+            "      --check-update  check now for a newer engine or voice\n"
+            "      --no-update-check   skip the automatic check this run\n"
+            "                      (SPFY_NO_UPDATE_CHECK=1 disables it for good)\n"
             "  -q, --quiet         suppress per-synth diagnostics, keeping only\n"
             "                      the FE-backend banner (default)\n"
             "  -v, --verbose       print the full FE/synth pipeline diagnostics\n"
@@ -6685,7 +6767,7 @@ int main(int argc, char **argv)
             "                      override it; see SPFY4_* near the top of\n"
             "                      spfy_synth.c for the values.\n"
             "      --no-s4         force the mode off, ignoring SPFY_4_MODE\n",
-            argv[0], argv[0]);
+            argv[0], argv[0], argv[0]);
         return 2;
     }
 
@@ -6698,11 +6780,43 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Resolved triple for the name form; the three const pointers below
+     * reference it, so it has to outlive them. */
+    static spfy_voice_paths found;
+
     {
         int i = 1;
-        vin_path = argv[i++];
-        vdb_path = argv[i++];
-        vcf_path = argv[i++];
+        if (name_form) {
+            const char *want = argv[i++];
+            int rc = spfy_voice_resolve(want, argv[0], &found);
+            if (rc == -1) {
+                fprintf(stderr, "%s: no voice named '%s'.\n", argv[0], want);
+                print_voice_list(argv[0], stderr);
+                free(file_text);
+                return 1;
+            }
+            if (rc == -2) {
+                fprintf(stderr,
+                        "%s: voice '%s' is incomplete in %s -- missing%s%s%s\n",
+                        argv[0], want, found.dir,
+                        found.vin[0] ? "" : " .vin",
+                        found.vdb[0] ? "" : " .vdb",
+                        found.vcf[0] ? "" : " .vcf");
+                free(file_text);
+                return 1;
+            }
+            vin_path = found.vin;
+            vdb_path = found.vdb;
+            vcf_path = found.vcf;
+            if (spfy_synth_verbose)
+                fprintf(stderr, "[voice] %s (%s) from %s\n",
+                        found.name, found.lang[0] ? found.lang : "-",
+                        found.dir);
+        } else {
+            vin_path = argv[i++];
+            vdb_path = argv[i++];
+            vcf_path = argv[i++];
+        }
         if (!short_form) {
             hpc_path = argv[i++];
             vocab    = argv[i++];
@@ -6802,7 +6916,7 @@ int main(int argc, char **argv)
         cbp = &cb;
     }
 
-    /* SPFY_PITCH_SEMITONES — shift target F0 via unit-selection bias. */
+    /* SPFY_PITCH_SEMITONES - shift target F0 via unit-selection bias. */
     {
         const char *pe = spfy_env("SPFY_PITCH_SEMITONES");
         if (pe && *pe) {
@@ -6827,7 +6941,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "warning: F0-flatten post-process rc=%d\n", frc);
     }
     if (rc == SPFY_OK) {
-        /* [live-trace] terminal event — lets the viz finalize and fetch the WAV. */
+        /* [live-trace] terminal event - lets the viz finalize and fetch the WAV. */
         spfy_trace_eventf("done", "{\"samples\":%u,\"n_phrases\":%u}",
                           stats.samples_emitted, stats.n_phrases);
         /* Keep stdout pure NDJSON in stream mode; the human summary would
@@ -6865,6 +6979,30 @@ int main(int argc, char **argv)
     }
     free(file_text);
     spfy_voice_free(&voice);
+
+    /* Last thing before the exit code, and only on the success path: the
+     * user has their WAV, stdout has already been written, and the check
+     * gets a 5-second leash that it only ever spends once a week. Output
+     * goes to stderr so a caller parsing the "wrote ..." line never sees it,
+     * and trace mode skips it entirely to keep stdout pure NDJSON. */
+#ifdef SPFY_HAVE_UPDATE_CHECK
+    if (update_check && !trace_stream && rc == SPFY_OK) {
+        if (spfy_upd_console_visible()) {
+            (void)spfy_upd_run(argv[0], 0, 0, stderr);
+        } else if (spfy_upd_due_now()) {
+            /* No console: this is spfy_sapi64.dll rendering for a 64-bit SAPI
+             * client, and the shim is WAITING on us to exit before it can
+             * return audio. So hand off and leave -- an inline check would
+             * print into a pipe nobody reads, and showing the balloon here
+             * would hold the speaking application for the length of the
+             * notification. */
+            spfy_upd_spawn_helper(NULL);
+        }
+    }
+#else
+    (void)update_check;
+#endif
+
     return rc == SPFY_OK ? 0 : 1;
 }
 #endif

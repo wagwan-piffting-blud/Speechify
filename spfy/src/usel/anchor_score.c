@@ -558,7 +558,7 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
          * local_34 advances to last_hp, target_feat[last_hp] gives the
          * SAME feat as target_feat[first_hp+u_idx] for u_idx=last. For
          * Syl anchors with all HPs in one syl, advance walks all the way,
-         * so engine target_feat[local_34=last] for u_idx=1+ — but apparently
+         * so engine target_feat[local_34=last] for u_idx=1+ - but apparently
          * that produces SAME means as preselect per-slot, which is what u_idx
          * gets us via cart_per_hp[]. Leaving u_idx as the engine-equivalent
          * indexing scheme until further decomp clarifies. SPFY_D_IDX_TARGET=1
@@ -688,7 +688,7 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
              * mem+0x14 = disk+0x14 = phone_center (current unit's phoneme
              * ID), NOT the target HP's phone_label. Engine's CART forest
              * is indexed by phone_id. Frida durt_walk hook's
-             * "is_first_half" field is misnamed — values like 22, 32, 33,
+             * "is_first_half" field is misnamed - values like 22, 32, 33,
              * 37 are phone IDs. */
             if (spfy_cart_traverse(in->durt_cart,
                                     (uint32_t)u_rec.phone_center,
@@ -754,7 +754,7 @@ static float compute_anchor_full_cost(const spfy_anchor_voice_t *av,
          * the in-memory unit record, where phone_id_alpha follows the
          * "name" feat chunk's alphabetical positional index). Our
          * hpclass_table[u] is bit-exactly that value (verified against
-         * the 'name' feat positions for tom voice — 27944 hpclass=72
+         * the 'name' feat positions for tom voice - 27944 hpclass=72
          * matches name index 72 = "t1", etc.).
          *
          * The second engine branch (weight+0x8c != 0 && f0_start != 0)
@@ -1102,7 +1102,7 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
 
     *out_cost = sp_cost + flag_cost + ccos4 + d_cost + f0_cost + pow_cost;
 
-    /* SPFY_HP_COMP_DUMP — emit per-cand component costs for ALL cands (vs
+    /* SPFY_HP_COMP_DUMP - emit per-cand component costs for ALL cands (vs
      * SPFY_HP_COMP_UID which gates on a single uid for verbose diagnostic). */
     /* Per CANDIDATE. Resolve once; pass a path, not "1" (stderr is
      * unbuffered, so "1" costs a syscall per candidate scored). */

@@ -6,7 +6,7 @@ pre-init ctrl/state into our hosted-FE process via SPFY_FE_HOST_BISECT_*
 env vars. See RESUME_K2.md.
 
 Usage:
-    # default — extract ctrl blob
+    # default - extract ctrl blob
     python spfy/tools/extract_pre_init_ctrl.py \
         spfy/test/oracle/traces/fe_ctrl_watch/nat_018.jsonl \
         spfy/test/oracle/traces/fe_pre_init_ctrl/nat_018.bin

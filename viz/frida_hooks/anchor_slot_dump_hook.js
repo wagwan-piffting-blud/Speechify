@@ -1,14 +1,14 @@
 'use strict';
 /*
- * anchor_slot_dump_hook.js — dump the slot arrays at FUN_08e8ce60 entry
+ * anchor_slot_dump_hook.js - dump the slot arrays at FUN_08e8ce60 entry
  * to localize per-phrase slot-data divergence.
  *
  * Engine's anchor TC for SAME UID span (e.g. edge_024 ss=74338) varies
  * across phrases (n_call=4 tc=0.270 vs n_calls 20/36/53/71/89 tc=1.604).
- * The 6 events have different anchor_slot pointers — engine processes
+ * The 6 events have different anchor_slot pointers - engine processes
  * each phrase's sub-tree independently. Slot fidelity audit is 100%
  * (per-slot HP-cand CART q-vectors match engine), so the divergence
- * must be in slot data fields NOT exposed via cart_walks_safe — most
+ * must be in slot data fields NOT exposed via cart_walks_safe - most
  * likely workspace arrays at param_2+0x18..+0x40 on the USelNet
  * (filled by FUN_08e8cbb0 → FUN_08e8c7d0 → FUN_08e8a670/880).
  *
@@ -21,7 +21,7 @@
  *   - param_3+0x24 array[first_hp..last_hp] (stress_per_hp)
  *   - param_3+0x28 array[first_hp..last_hp] (stress code)
  *   - param_3+0x2c array[first_hp..last_hp] (position code)
- *   - param_3+0x30 array[first_hp..last_hp] (f0_curve_idx — F0 mean adj)
+ *   - param_3+0x30 array[first_hp..last_hp] (f0_curve_idx - F0 mean adj)
  *   - param_3+0x34/38/3c arrays[first_hp..last_hp] (sp_target indices)
  *
  * Safety: function-entry only, bounded reads.
@@ -81,7 +81,7 @@ Interceptor.attach(ADDR_ANCHOR_CE60, {
 
         if (p3 && p3 >= 0x100000 && first_hp >= 0 && last_hp >= first_hp) {
             var net = ptr(p3);
-            /* The arrays live at net+0x18..+0x40 — see FUN_08e8cbb0
+            /* The arrays live at net+0x18..+0x40 - see FUN_08e8cbb0
              * decomp. Each is an int pointer. */
             var ptr_18 = safeReadU32(net.add(0x18));
             var ptr_1c = safeReadU32(net.add(0x1c));

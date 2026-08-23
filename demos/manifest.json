@@ -1,5 +1,5 @@
 {
-  "generated": "2026-08-21T06:29:28",
+  "generated": "2026-08-22T11:06:35",
   "format_khz": 8,
   "renders": [
     {
@@ -32,6 +32,22 @@
         "samples": 147138,
         "rate": 8000,
         "seconds": 18.392
+      }
+    },
+    {
+      "kind": "engine",
+      "id": "crstom",
+      "voice": "crstom",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_crstom.txt",
+      "wav": "demos/engine/crstom.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 125516,
+        "rate": 8000,
+        "seconds": 15.69
       }
     },
     {
@@ -144,6 +160,22 @@
         "samples": 145148,
         "rate": 8000,
         "seconds": 18.143
+      }
+    },
+    {
+      "kind": "spfy",
+      "id": "crstom",
+      "voice": "crstom",
+      "lang": "en-US",
+      "synthetic": true,
+      "text_file": "demos/text/demo_crstom.txt",
+      "wav": "demos/spfy/crstom.wav",
+      "rc": 0,
+      "ok": true,
+      "audio": {
+        "samples": 123826,
+        "rate": 8000,
+        "seconds": 15.478
       }
     },
     {

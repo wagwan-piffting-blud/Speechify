@@ -1,10 +1,10 @@
 'use strict';
 /*
- * fe_lts_access_trace.js — Memory-access trace on the LTS rule index.
+ * fe_lts_access_trace.js - Memory-access trace on the LTS rule index.
  *
  * Goal: identify the compiled-code locations that READ from the runtime
  * phoneme blob (state[+0x28], 18,870 bytes). Each access fault tells us
- * `(reader_code_address, blob_offset)` — the offset reveals which rule
+ * `(reader_code_address, blob_offset)` - the offset reveals which rule
  * is being consulted, and the address pinpoints the dispatch / match /
  * emit functions in Ghidra.
  *
@@ -12,7 +12,7 @@
  *   1. Hook FUN_0836835a (FE-init call 1) to capture the engine state
  *      pointer. On exit, read state[+0x28] = malloc'd phoneme blob.
  *   2. Enable MemoryAccessMonitor on the blob's page range.
- *   3. Each read triggers an event — log (from_address, accessed_offset).
+ *   3. Each read triggers an event - log (from_address, accessed_offset).
  *   4. RPC `arm()` re-enables monitoring after a faulted page (because
  *      MemoryAccessMonitor disables a page once it traps on it).
  *
@@ -31,8 +31,8 @@
 
 var TARGET_MODULE = 'SWIttsFe-en-US.dll';
 /* RVAs derived from absolute Ghidra addresses minus preferred base 0x07dd0000. */
-var RVA_INIT1     = 0x0059835a;   /* FUN_0836835a — FE init call 1, allocs state[+0x28] */
-var RVA_DISPATCH  = 0x005c1d20;   /* FUN_08391d20 — runtime LTS dispatch */
+var RVA_INIT1     = 0x0059835a;   /* FUN_0836835a - FE init call 1, allocs state[+0x28] */
+var RVA_DISPATCH  = 0x005c1d20;   /* FUN_08391d20 - runtime LTS dispatch */
 var BLOB_SIZE = 0x49b6;           /* 18,870 */
 var BLOB_OFFSET_IN_STATE = 0x28;
 
@@ -124,7 +124,7 @@ function armMonitor(blob_base, blob_size) {
 function rearm() {
     /* Each synthesis triggers a fresh FE init (state recreated), so we
      * reset the init counters. The blob_base may also change (new heap
-     * allocation) — but we only track the most-recent capture; if the
+     * allocation) - but we only track the most-recent capture; if the
      * old one has been freed, MemoryAccessMonitor will simply not fault
      * on it anymore. */
     captured.init_calls = 0;
@@ -254,7 +254,7 @@ function scanForBlob() {
     /* Direct hook on the runtime LTS dispatch FUN_08391d20.
      * __fastcall: ECX = param_1_00, EDX = param_2_00 (caller_struct).
      * Stack: [esp+4]=param_1 (state ptr), [esp+8]=param_2 (flag).
-     * Each call consults a (symbol_id, registry_idx) pair — symbol_id
+     * Each call consults a (symbol_id, registry_idx) pair - symbol_id
      * lives at caller_struct+8, registry_idx is in EBX (unaff_EBX in
      * decomp). We capture both. */
     var addr_dispatch = base.add(RVA_DISPATCH);
@@ -306,11 +306,11 @@ function scanForBlob() {
 
     /* Watch the STATIC .data copy of the phoneme blob.
      *
-     * The heap copy is the engine's working set — but per testing, after
+     * The heap copy is the engine's working set - but per testing, after
      * init the runtime LTS dispatch does NOT read the heap copy (state
      * [+0x28]). Instead it likely reads the .data tables via state[+0x54]
      * registry pointers. By watching the .data static copy of the phoneme
-     * blob, we catch any code that reads the rule index at runtime —
+     * blob, we catch any code that reads the rule index at runtime -
      * which gives us the dispatch function address. */
     try {
         var static_blob = base.add(STATIC_PHON_BLOB_RVA);

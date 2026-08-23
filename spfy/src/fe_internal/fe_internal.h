@@ -1,4 +1,4 @@
-/* In-house front-end — text → tagged-output assembler. */
+/* In-house front-end - text → tagged-output assembler. */
 
 #ifndef SPFY_FE_INTERNAL_H
 #define SPFY_FE_INTERNAL_H

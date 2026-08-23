@@ -1,4 +1,4 @@
-/* spfy_text_norm_dump — print tokens produced by the text normalizer. */
+/* spfy_text_norm_dump - print tokens produced by the text normalizer. */
 
 #include "text_norm.h"
 
@@ -49,7 +49,7 @@ int main(int argc, char **argv)
         return 0;
     }
     fprintf(stderr,
-        "spfy_text_norm_dump — tokenize + normalize text\n"
+        "spfy_text_norm_dump - tokenize + normalize text\n"
         "usage: %s \"<text>\"\n"
         "       %s --pipe       (one line per stdin)\n",
         argv[0], argv[0]);

@@ -1,6 +1,6 @@
 'use strict';
 
-// Hook stock's S (context) cost — captures the fVar13 value at 0x8E89232
+// Hook stock's S (context) cost - captures the fVar13 value at 0x8E89232
 // (right before it's added to the candidate's total score). Per README
 // §2185-2188 this is a 4-component sum weighted by CONTEXT_COST_WEIGHT.
 //
@@ -36,7 +36,7 @@ Interceptor.attach(ADDR_SCORER, {
 
 // Simpler approach: hook the STORE of S at candidate+0x14 (the logging path).
 // The code at 0x08e8932a writes `*(candidate+0x14) = fVar13 * voice[0x44]`.
-// But this only fires when debug/log flag is set — may not fire in prod.
+// But this only fires when debug/log flag is set - may not fire in prod.
 
 // Pragmatic: capture the 4 context bytes per candidate. That's cheap and
 // might let us reverse the formula from data.
@@ -47,7 +47,7 @@ Interceptor.attach(ADDR_CAND_LOOP_ITER, {
         // At loop iteration start, EBX = cand_idx * 0x18 (per decomp)
         // Actually the loop structure per decomp: local_20 = cand_idx,
         // param_1 = cand_idx * 0x18.
-        // Let me just log ESI (this), ESP, and the registers — we'll dig in.
+        // Let me just log ESI (this), ESP, and the registers - we'll dig in.
         // Non-critical; skip for now to avoid perf hit.
     }
 });

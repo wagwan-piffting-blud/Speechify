@@ -1,7 +1,7 @@
 """Per-stage required-field + type validator for engine-trace JSONLs.
 
 Hand-rolled schema dict transcribed from `TRACE_SCHEMA.md` per CONTEXT.md
-D-13. NO `jsonschema`, NO `pydantic` — pure stdlib. The schema doc remains
+D-13. NO `jsonschema`, NO `pydantic` - pure stdlib. The schema doc remains
 the human-readable source of truth; this validator is a runtime
 transcription. When the doc and the validator disagree, the validator
 wins at runtime (Pitfall 2 in 01-RESEARCH.md). BLOCKER-05 mandates that
@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Schema dict — transcribed from TRACE_SCHEMA.md (D-13).
+# Schema dict - transcribed from TRACE_SCHEMA.md (D-13).
 # Each entry: record `type` -> { field_name: type | tuple[type, ...] }.
 # Nullable fields use `type(None)` in the tuple per Pitfall 2 / RESEARCH Q*.
 # BLOCKER-05: `prsl_slot.sp_target` and `inner_scorer.components` MUST
@@ -74,7 +74,7 @@ SCHEMAS: dict[str, dict[str, object]] = {
         "sym":   str,
         "pairs": list,
     },
-    # SOURCE: TRACE_SCHEMA.md ## prsl_slot — BLOCKER-05: sp_target added
+    # SOURCE: TRACE_SCHEMA.md ## prsl_slot - BLOCKER-05: sp_target added
     "prsl_slot": {
         "utt":       int,
         "slot":      int,
@@ -83,7 +83,7 @@ SCHEMAS: dict[str, dict[str, object]] = {
         "pool":      list,
         "sp_target": (list, type(None)),
     },
-    # SOURCE: TRACE_SCHEMA.md ## cart_walks (RETIRED — seed-32 only per D-15)
+    # SOURCE: TRACE_SCHEMA.md ## cart_walks (RETIRED - seed-32 only per D-15)
     "cart_walks": {
         "utt":       int,
         "slot":      int,
@@ -92,14 +92,14 @@ SCHEMAS: dict[str, dict[str, object]] = {
         "questions": list,
     },
     # SOURCE: TRACE_SCHEMA.md ## cart_walker_args
-    # ACTIVE — covers all 200 phrases per D-15
+    # ACTIVE - covers all 200 phrases per D-15
     "cart_walker_args": {
         "utt":  int,
         "slot": int,
         "tree": str,
         "args": dict,
     },
-    # SOURCE: TRACE_SCHEMA.md ## inner_scorer — BLOCKER-05: components added
+    # SOURCE: TRACE_SCHEMA.md ## inner_scorer - BLOCKER-05: components added
     "inner_scorer": {
         "utt":        int,
         "slot":       int,
@@ -107,7 +107,7 @@ SCHEMAS: dict[str, dict[str, object]] = {
         "tc":         (float, int),
         "components": (dict, type(None)),
     },
-    # SOURCE: TRACE_SCHEMA.md ## inner_scorer_durt — plan 02-05 D-17 Path R
+    # SOURCE: TRACE_SCHEMA.md ## inner_scorer_durt - plan 02-05 D-17 Path R
     "inner_scorer_durt": {
         "utt":     int,
         "slot":    int,
@@ -124,7 +124,7 @@ SCHEMAS: dict[str, dict[str, object]] = {
         "utt":   int,
         "phase": str,
     },
-    # SOURCE: TRACE_SCHEMA.md ## ccos_apply — plan 02-02 D-05
+    # SOURCE: TRACE_SCHEMA.md ## ccos_apply - plan 02-02 D-05
     "ccos_apply": {
         "n_call":            int,
         "type_arg":          int,
@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
     summaries: list[dict] = []
     n_malformed_total = 0
     unknown_total: set[str] = set()
-    # Flat 2-level glob — DO NOT rglob (avoid sweeping unrelated files).
+    # Flat 2-level glob - DO NOT rglob (avoid sweeping unrelated files).
     for path in sorted(args.traces_dir.glob("*/*.jsonl")):
         summary = validate_file(path, args.type)
         summaries.append(summary)

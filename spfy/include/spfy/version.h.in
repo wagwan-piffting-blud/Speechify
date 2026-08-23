@@ -1,0 +1,27 @@
+/* Generated from include/spfy/version.h.in by CMake -- DO NOT EDIT the copy
+ * in the build tree.
+ *
+ * The version string is the ONLY place the engine learns what release it is.
+ * CI passes -DSPFY_VERSION=<calver> (the same YYYY.MM.DD the release tag and
+ * the installer's AppVersion use). A tree built by hand has no release behind
+ * it and gets `dev-<short-sha>`, which the update checker treats as "never
+ * notify" -- nagging a developer about a release older than their working
+ * copy would be backwards.
+ */
+
+#ifndef SPFY_VERSION_H
+#define SPFY_VERSION_H
+
+#define SPFY_VERSION       "@SPFY_VERSION@"
+
+/* Manifest the update checker fetches. A rolling `updates` release tag holds
+ * exactly one asset, so the URL is stable across every engine and voice
+ * release. Overridable at configure time (-DSPFY_UPDATE_URL=...) and at run
+ * time (SPFY_UPDATE_URL=...), which is how the checker is tested against a
+ * local file:// or http:// copy. */
+#define SPFY_UPDATE_URL    "@SPFY_UPDATE_URL@"
+
+/* Where a notification sends the user. */
+#define SPFY_RELEASES_URL  "@SPFY_RELEASES_URL@"
+
+#endif

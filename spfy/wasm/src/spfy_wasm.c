@@ -1,4 +1,4 @@
-/* spfy_wasm.c — WebAssembly entry layer for the in-browser demo.
+/* spfy_wasm.c - WebAssembly entry layer for the in-browser demo.
  *
  * Exposes C functions to JavaScript via EMSCRIPTEN_KEEPALIVE:
  *
@@ -7,14 +7,14 @@
  *       Loads a voice triplet <prefix>.vin / <prefix>8.vdb / <prefix>.vcf
  *       from voice_dir on the emscripten virtual FS. JS fetches those
  *       files over the network and writes them into the FS (see
- *       web/index.js) BEFORE calling this — nothing is baked into the
+ *       web/index.js) BEFORE calling this - nothing is baked into the
  *       module's .data anymore. The hp_class table is derived from the
  *       VIN (exact for every voice), so no hpclass.bin is needed.
  *
  *       Reloadable: calling it with a DIFFERENT prefix frees the current
  *       voice and loads the new one; calling it with the SAME prefix that
  *       is already loaded is a no-op that returns SPFY_OK. Switching
- *       LANGUAGE works too — freeing the voice closes the FE, and opening
+ *       LANGUAGE works too - freeing the voice closes the FE, and opening
  *       one whose VCF names another language re-boots the emulator on that
  *       language's DLL. Tearing the module down is no longer required.
  *
@@ -217,6 +217,6 @@ void spfy_wasm_reset(void)
  * don't actually do any work here; JS drives via cwrap'd functions. */
 int main(void)
 {
-    fprintf(stderr, "spfy_wasm ready — call Module.cwrap('spfy_wasm_init', ...)\n");
+    fprintf(stderr, "spfy_wasm ready - call Module.cwrap('spfy_wasm_init', ...)\n");
     return 0;
 }

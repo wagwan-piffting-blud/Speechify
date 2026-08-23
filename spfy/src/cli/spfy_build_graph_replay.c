@@ -875,7 +875,7 @@ static void process_entry(const char *fe_path, const char *vit_path,
     for (const char *q = fe_path; *q; ++q)
         if (*q == '/' || *q == '\\') base = q + 1;
     char eid[64] = {0};
-    /* Display id only — a pathologically long basename is deliberately
+    /* Display id only - a pathologically long basename is deliberately
      * truncated. */
     if (snprintf(eid, sizeof eid, "%s", base) < 0) eid[0] = '\0';
     char *dot = strrchr(eid, '.');

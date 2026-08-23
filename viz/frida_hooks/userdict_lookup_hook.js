@@ -20,11 +20,11 @@
  *
  *   self        = ecx       (thiscall this)
  *   key         = [esp+4]   (NUL-terminated C string)
- *   out_value   = [esp+8]   (int* — filled with translation cstring ptr on success)
+ *   out_value   = [esp+8]   (int* - filled with translation cstring ptr on success)
  *
  *   Returns 0 on success, negative err on miss.
  *
- *   self+0x1e = name (cstring ptr) — the dict name we filter by.
+ *   self+0x1e = name (cstring ptr) - the dict name we filter by.
  *   self[6]   = type code.
  *
  * Output: send() events with type='userdict_lookup' for every entry+leave.
@@ -102,7 +102,7 @@ Interceptor.attach(ADDR_LOOKUP, {
     onLeave: function (retval) {
         // Skip silently if key wasn't readable.
         if (this._key === null) return;
-        // (debug pass: no name filter — see every dict name)
+        // (debug pass: no name filter - see every dict name)
         var rc = retval.toInt32();
         var value = null;
         if (rc === 0 && this._outv_p !== null) {

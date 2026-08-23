@@ -62,7 +62,7 @@ typedef struct {
     /* Optional per-cand static state for engine-faithful join cost
      * (FUN_08e8b620 reads cand+0x68/+0x6c/+0x70/+0x78). All four are
      * parallel arrays of length n_cands. NULL means callers don't want
-     * the engine F0-curve gate logic — the DAG falls back to the
+     * the engine F0-curve gate logic - the DAG falls back to the
      * legacy callback that ignores per-cand state.
      *
      *   c68 = unit_mem+0x11 (f0_mid). Used as gate threshold (>= 21
@@ -72,7 +72,7 @@ typedef struct {
      *   c70 = unit_mem+0x0f (f0_start). Stored on cand+0x70.
      *   c78 = NOT f0_start. FUN_08e8ce60 (decompiled 2026-08-14) walks the
      *         anchor's units and accumulates unit.dur_like into cand+0x78,
-     *         RESETTING it to 0 at every unit whose f0_mid >= 21 — so it is
+     *         RESETTING it to 0 at every unit whose f0_mid >= 21 - so it is
      *         "milliseconds since the last voiced pitch mark", not a pitch
      *         byte at all. That is what makes the join gate's `prev.c80 < 15`
      *         mean "the previous unit was voiced within the last 15 ms",

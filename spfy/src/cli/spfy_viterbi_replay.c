@@ -667,7 +667,7 @@ done:
 
     /* Fallback: voice-wide events (join_consts / hp_class_remap /
      * s_ctx_remap) are dumped by the Frida hook only on the FIRST trace of
-     * a session — typically text_001.jsonl. */
+     * a session - typically text_001.jsonl. */
     if (rc == 0 && out->n > 0 &&
         (!out->utts[0].voicing.has  ||
          !out->utts[0].hp_remap.has ||
@@ -922,7 +922,7 @@ typedef struct {
     float                    miss_default;
     /* Engine-faithful F0-prob curve (VIN `hist` chunk + voice+0xc8) for
      * the CCOS-gate hash-miss path (FUN_08e8b620 @ 0x08e8b7f8). Same
-     * shape as spfy_synth.c's join_ctx_t — see plan 02-02 §"THIRD scope
+     * shape as spfy_synth.c's join_ctx_t - see plan 02-02 §"THIRD scope
      * revision" in 02-DP-AUDIT.md. When curve == NULL the dag callback
      * falls back to miss_default for any hash miss (legacy behaviour).
      * Raw bytes read via spfy_le_f32() -- see common/le.h. */
@@ -971,7 +971,7 @@ static void load_f0_hist_curve(const spfy_vin_t *vin, join_ctx_t *jc)
  *   else if (hash hit):                                  J = hash_value
  *   else (hash miss):                                    J = miss_default
  *
- * NOTE: this lacks the engine's CCOS-gate hash-miss path — for that
+ * NOTE: this lacks the engine's CCOS-gate hash-miss path - for that
  * use dag_join_cb. Kept here for SPFY_LEGACY_VIT=1 diagnostic mode. */
 static float join_cb(uint32_t prev_uid, uint32_t curr_uid, void *user)
 {
@@ -992,7 +992,7 @@ static float join_cb(uint32_t prev_uid, uint32_t curr_uid, void *user)
     return jc->miss_default;
 }
 
-/* DAG join callback — engine-exact FUN_08e8b620 hash-miss CCOS-gate.
+/* DAG join callback - engine-exact FUN_08e8b620 hash-miss CCOS-gate.
  * Lifted from spfy_synth.c::dag_join_cb (plan 02-02 THIRD scope revision).
  *
  *   if (same-rec adjacent):              J = 0
@@ -1340,7 +1340,7 @@ static int replay_utterance(const uid_list_t              *chosen,
      * UID if it's missing). */
     uint32_t **cand_buf = (uint32_t **)calloc(n_slots, sizeof *cand_buf);
     float    **tc_buf   = (float    **)calloc(n_slots, sizeof *tc_buf);
-    /* Plan 02-02 — per-cand engine F0-state bytes for the DAG join cost. */
+    /* Plan 02-02 - per-cand engine F0-state bytes for the DAG join cost. */
     uint8_t  **cand_c68 = (uint8_t **)calloc(n_slots, sizeof *cand_c68);
     uint8_t  **cand_c6c = (uint8_t **)calloc(n_slots, sizeof *cand_c6c);
     uint8_t  **cand_c70 = (uint8_t **)calloc(n_slots, sizeof *cand_c70);
@@ -1565,7 +1565,7 @@ static int replay_utterance(const uid_list_t              *chosen,
         slots[s].n_cands     = k;
     }
 
-    /* Run Viterbi. Plan 02-02 (THIRD scope revision) — switched from
+    /* Run Viterbi. Plan 02-02 (THIRD scope revision) - switched from
      * the legacy 3-arg `spfy_viterbi_run` (flat miss_default) to the
      * engine-faithful DAG variant `spfy_viterbi_run_dag` with
      * `dag_join_cb` reproducing FUN_08e8b620's CCOS-gate hash-miss

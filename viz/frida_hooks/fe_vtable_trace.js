@@ -1,10 +1,10 @@
 'use strict';
 /*
- * fe_vtable_trace.js — capture every FE-vtable call into SWIttsFe-en-US.dll
+ * fe_vtable_trace.js - capture every FE-vtable call into SWIttsFe-en-US.dll
  * during a Speechify.exe synthesis.
  *
  * Goal: identify the per-utterance call sequence the engine uses against
- * the FE COM object — which slots configure, which carries the input
+ * the FE COM object - which slots configure, which carries the input
  * text, which delivers the per-slot output. This closes the Task-4
  * BLOCKED status in host_notes.md by replacing static guesses with the
  * empirical protocol.
@@ -86,11 +86,11 @@ var SLOTS = [
     { slot: 48, va: '0x0836d290', name: 'installHookB',       u: 3 },
 ];
 
-/* getObject — the entry that creates an FE COM object. Hooking it
+/* getObject - the entry that creates an FE COM object. Hooking it
  * gives us a clean "FE session opened" marker. */
 var GETOBJECT_VA = ptr('0x0836bd70');
 
-/* FUN_0836c420 — the indirect call inside delegate-A/B dispatch. The
+/* FUN_0836c420 - the indirect call inside delegate-A/B dispatch. The
  * caller's first arg is the delegate object pointer (= state[+0x2d4]
  * or state[+0x2dc]). Hooking it captures every delegate invocation
  * with arg0 = the delegate, args 1..3 = whatever the engine is reading
@@ -102,7 +102,7 @@ var FUN_0836c420_VA = ptr('0x0836c420');
  * ============================================================ */
 
 /* Hard caps so a runaway hook doesn't drown the engine. Adjust if you
- * see clipping in the captures — per-utterance counts should be well
+ * see clipping in the captures - per-utterance counts should be well
  * under these. */
 var PER_SLOT_CAP = 1000;
 var DELEGATE_CAP = 5000;
@@ -318,7 +318,7 @@ function install_vtable_hooks() {
     }
 }
 
-/* getObject(int kind, IObject **out) — track FE session creation. */
+/* getObject(int kind, IObject **out) - track FE session creation. */
 function install_getobject_hook() {
     Interceptor.attach(GETOBJECT_VA, {
         onEnter: function () {
@@ -341,7 +341,7 @@ function install_getobject_hook() {
     });
 }
 
-/* FUN_0836c420(delegate, a, b, c) — the indirect dispatch through a
+/* FUN_0836c420(delegate, a, b, c) - the indirect dispatch through a
  * delegate's vtable. Hooks every fire to capture the (delegate, args)
  * tuple. arg0 reveals which delegate; reading *arg0 yields the
  * delegate's vtable pointer; the vtable contents tell us the method
@@ -402,7 +402,7 @@ function install_delegate_hook() {
         if (fe_mod.base.compare(IMAGE_BASE_EXPECTED) !== 0) {
             send({
                 type: 'fe_vtable_trace_warn',
-                msg: 'image base differs from expected — slot VAs will be wrong',
+                msg: 'image base differs from expected - slot VAs will be wrong',
                 expected: IMAGE_BASE_EXPECTED.toString(),
                 actual: fe_mod.base.toString()
             });

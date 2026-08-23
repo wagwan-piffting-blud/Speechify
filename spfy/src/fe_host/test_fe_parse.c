@@ -1,4 +1,4 @@
-/* spfy/src/fe_host/test_fe_parse.c — exercise the FE-output parser against
+/* spfy/src/fe_host/test_fe_parse.c - exercise the FE-output parser against
  * the empirically captured tagged streams. */
 
 #include "fe_parse.h"
@@ -11,7 +11,7 @@
 /* ============================================================ Captured
  * fixtures ============================================================ */
 
-/* Capture 1 — "Hello, world." (host/PROTOCOL.md / vt_001.jsonl
+/* Capture 1 - "Hello, world." (host/PROTOCOL.md / vt_001.jsonl
  * concatenated). */
 static const char FIXTURE_HELLO[] =
     "%% #{, pau(p25) <hello (0,6) interj,2 "

@@ -1,6 +1,6 @@
 'use strict';
 /*
- * fe_lts_hot_hook.js — Targeted argument-capture on the FE functions
+ * fe_lts_hot_hook.js - Targeted argument-capture on the FE functions
  * identified by the Stalker calltree as runtime-frequent.
  *
  * Hooks each "hot" candidate, logs its first 3 args and (where available)

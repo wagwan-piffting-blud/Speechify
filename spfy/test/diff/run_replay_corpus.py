@@ -65,13 +65,13 @@ def run_one(replay: Path, phrase_id: str, env: dict,
     Uses the cart_walks trace (engine-faithful safe-hook captures land
     here; spfy_viterbi_replay.c::parse_cart_walk_line consumes
     slot/tree/leaf_mean/leaf_var from this schema). The earlier driver
-    pointed at cart_walker_args/ — wrong schema — which silently fell
+    pointed at cart_walker_args/ - wrong schema - which silently fell
     back to chosen-UID-as-target proxy and depressed UID match.
 
     If mismatch_writer is given (a callable taking dict), it is invoked
     once per per-slot mismatch line emitted by the binary under
     SPFY_DEBUG_MISMATCH=1. The dict has corpus_id, utt_idx, slot_idx,
-    engine_uid, engine_tc, our_uid, our_tc, tc_diff, pool_n — the
+    engine_uid, engine_tc, our_uid, our_tc, tc_diff, pool_n - the
     fields the 02-DP-AUDIT.jsonl schema needs for triage.
     """
     tp = trace_paths(phrase_id)
@@ -293,9 +293,9 @@ def main() -> int:
             pct = 100.0 * agg_match / agg_slots
             print(f"corpus UID match  : {pct:.4f}% (exact integer)")
             if agg_match == agg_slots:
-                print("RESULT: 100.0% — ROADMAP §Phase 2 SC1 met.")
+                print("RESULT: 100.0% - ROADMAP §Phase 2 SC1 met.")
             else:
-                print(f"RESULT: SC1 NOT met — gap = {agg_slots - agg_match}")
+                print(f"RESULT: SC1 NOT met - gap = {agg_slots - agg_match}")
     return 0
 
 

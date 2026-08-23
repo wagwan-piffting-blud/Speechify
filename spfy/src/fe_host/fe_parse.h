@@ -1,4 +1,4 @@
-/* spfy/src/fe_host/fe_parse.h — public interface for the tagged-text
+/* spfy/src/fe_host/fe_parse.h - public interface for the tagged-text
  * FE-output parser. */
 
 #ifndef SPFY_FE_HOST_FE_PARSE_H

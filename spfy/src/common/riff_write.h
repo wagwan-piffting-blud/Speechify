@@ -7,13 +7,13 @@
 
 #include "obfuscation.h"
 
-/* RIFF writer — reconstruction of SWIttsRiffWriter (SWIttsEngineUtil.dll
+/* RIFF writer - reconstruction of SWIttsRiffWriter (SWIttsEngineUtil.dll
  * ordinals 2/4/7/9/12/16/29-44, image base 0x06b40000).
  *
  * The shipped runtime imports only SWIttsRiffReader; nothing imports a single
  * writer symbol. The writer is in the DLL because ttsEngine/src/util was
  * shared with the offline voice compiler, which is the only thing that ever
- * called it. Contract recovered by decompilation — see
+ * called it. Contract recovered by decompilation - see
  * reveng/DLL_ANALYSIS.md section 9.
  *
  * Three details a naive implementation gets wrong:
@@ -58,7 +58,7 @@ int spfy_riff_write_fourcc(spfy_riff_writer *w, const char *id);
 int spfy_riff_write_str_z(spfy_riff_writer *w, const char *s);
 
 /* writeStringW: uint16 LE length, then bytes, NO terminator. The vendor's "W"
- * is word-prefixed, not wide — the mangled parameter is char const *. */
+ * is word-prefixed, not wide - the mangled parameter is char const *. */
 int spfy_riff_write_str_w(spfy_riff_writer *w, const char *s);
 
 /* LIST/INFO carrying ICOP and ICRD, as writeInfoChunk emits them.

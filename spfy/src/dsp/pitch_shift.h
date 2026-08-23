@@ -37,7 +37,7 @@ int spfy_pitch_shift_block(const int16_t *in, size_t n_in,
 int spfy_pitch_shift_inplace(int16_t *samples, size_t n,
                              float semitones, int sample_rate);
 
-/* Time-varying TD-PSOLA F0 RETARGET — tame over-high pitch ACCENTS while
+/* Time-varying TD-PSOLA F0 RETARGET - tame over-high pitch ACCENTS while
  * preserving the natural rise-and-fall. */
 int spfy_f0_retarget_block(const int16_t *in, size_t n_in,
                            int16_t *out,

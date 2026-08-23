@@ -132,7 +132,7 @@ static int32_t find_best_lag(const int16_t *tail, size_t tail_n,
         lag_raw = (spfy_env("SPFY_WSOLA_LAG_RAW") != NULL);
 
     /* Engine's search STRIDE (FUN_08ee1330 reads it from this+0x28): 2 at
-     * 8 kHz, 4 at 16 kHz — i.e. W/40, where W is the base window that also
+     * 8 kHz, 4 at 16 kHz - i.e. W/40, where W is the base window that also
      * gives max_lag. It applies in BOTH places:
      *
      *   - the lag loop advances by `step`, so the engine only ever evaluates
@@ -171,7 +171,7 @@ static int32_t find_best_lag(const int16_t *tail, size_t tail_n,
     /* ⚠ The energy is recomputed per lag rather than updated incrementally.
      * The engine keeps a running update (subtract the leaving sample, add the
      * entering one) but advances the cursor by `step`, so it accounts for only
-     * ONE of the `step` samples that actually enter and leave — an
+     * ONE of the `step` samples that actually enter and leave - an
      * approximation baked into its own arithmetic. Recomputing is exact and
      * cheap at this size; matching the engine's approximation bit-for-bit is
      * left until something is shown to depend on it, rather than reproducing
@@ -538,7 +538,7 @@ static int do_ola_blend(spfy_wsola_streamer_t *s,
      *
      * ⚠ THIS IS THE WINDOW THAT ACTUALLY REACHES THE OUTPUT. g_hann_in/out
      * (built by hann_init) are NOT used here, so changing only that function
-     * silently does nothing to the blend — which is exactly what happened
+     * silently does nothing to the blend - which is exactly what happened
      * when the engine's linear window was first ported.
      *
      * Engine shape, FUN_08ee11e0: accumulate 1.0f/W, win[i] = i/W on the
@@ -675,7 +675,7 @@ static int do_ola_blend(spfy_wsola_streamer_t *s,
     return SPFY_OK;
 }
 
-/* Internal entry — both push_unit and push_unit_psola route here. */
+/* Internal entry - both push_unit and push_unit_psola route here. */
 static int push_unit_impl(spfy_wsola_streamer_t *s,
                           const int16_t *samples, size_t n,
                           size_t nominal_n,
@@ -708,7 +708,7 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
     /* No prior tail: write everything except the last OLA samples (those
      * become the new tail). */
     if (s->tail_n == 0) {
-        /* No tail to crossfade against, so the pre-roll has no job here —
+        /* No tail to crossfade against, so the pre-roll has no job here -
          * skip it, exactly as the engine starts its first unit at
          * this+0x35d0 (= the pre-roll length) rather than at 0. */
         samples += pre;
@@ -802,7 +802,7 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
      *
      * ⚠ THIS LOOKS WRONG AGAINST THE DECOMPILE AND IS NOT. FUN_08ee3560 sets
      * the read cursor to `this+8 + lag` after a join, which reads like a
-     * `lag`-sized duration loss per join — and subtracting it here IS what
+     * `lag`-sized duration loss per join - and subtracting it here IS what
      * closed the length gap while our blend width was still wrong (26).
      * Once the blend was corrected to the engine's W=80 the two changes were
      * found to be compensating for each other. Measured on the seven
@@ -889,7 +889,7 @@ static int push_unit_impl(spfy_wsola_streamer_t *s,
      * window instead of 10 ms.
      *
      * Re-enable per-voice with SPFY_WSOLA_PSOLA=1 (for voices that
-     * actually run the engine's PSOLA branch — verify with the
+     * actually run the engine's PSOLA branch - verify with the
      * wsola_unit_probe Frida hook first). */
     static int psola_enabled = -1;
     if (psola_enabled < 0) {

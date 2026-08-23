@@ -1,4 +1,4 @@
-/* fe_internal.c — text → tagged-output assembler. */
+/* fe_internal.c - text → tagged-output assembler. */
 
 #include "fe_internal.h"
 #include "g2p.h"
@@ -39,7 +39,7 @@ static void emit_int(emit_t *e, int v)
 }
 
 
-/* Phoneme inventory — vowels carry stress digits, consonants don't. */
+/* Phoneme inventory - vowels carry stress digits, consonants don't. */
 static int is_vowel_arpa(const char *p)
 {
     /* CMU ARPAbet vowels: AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW. */
@@ -293,7 +293,7 @@ static const func_red_t FUNC_RED[] = {
      * stressed vowel but the engine reduces (syl `.0`). */
     { "if",    "IH0 F"   },
     { "it",    "IH0 T"   },
-    /* "until" — engine has [.0 ax n .1 t ih l] — first syl reduced, second
+    /* "until" - engine has [.0 ax n .1 t ih l] - first syl reduced, second
      * syl keeps lexical stress. */
     { "until", "AX0 N T IH1 L" },
     { NULL, NULL }
@@ -317,10 +317,10 @@ static const lex_override_t LEX_OVERRIDE[] = {
     /* nat_027 "arrive": CMU has ER0 AY1 V (3 phon); engine splits ER → AX +
      * R: AX0 R AY1 V (4 phonemes). */
     { "arrive",    "AX0 R AY1 V" },
-    /* nat_040 "galleries": CMU "G AE1 L ER0 IY0 Z" — engine emits the
+    /* nat_040 "galleries": CMU "G AE1 L ER0 IY0 Z" - engine emits the
      * "gallerys" base form with ER → AX + R: G AE1 L AX0 R IY0 Z. */
     { "galleries", "G AE1 L AX0 R IY0 Z" },
-    /* nat_049 "duration": CMU "D UH1 R EY1 SH AH0 N" — engine collapses the
+    /* nat_049 "duration": CMU "D UH1 R EY1 SH AH0 N" - engine collapses the
      * unstressed first syl (UH+R → ER) and lowers AH0→IH0: D ER0 EY1 SH IH0
      * N. */
     { "duration",  "D ER0 EY1 SH IH0 N" },
@@ -385,7 +385,7 @@ static int is_spell_out_letter_word(const char *word_lower)
     return 0;
 }
 
-/* "Mmm.", "Sssss." — engine spells repeated-CONSONANT onomatopoeias letter
+/* "Mmm.", "Sssss." - engine spells repeated-CONSONANT onomatopoeias letter
  * by letter ("em em em" / "ess ess ess ess ess"). */
 static int is_repeated_consonant_word(const char *word_lower)
 {
@@ -527,7 +527,7 @@ static int lower_copy(const char *src, char *dst, size_t cap)
     return (int)i;
 }
 
-/* Strip a trailing 's apostrophe-s from `word_lower` for POS lookup —
+/* Strip a trailing 's apostrophe-s from `word_lower` for POS lookup -
  * baked_pos has lemma forms ("today") not possessives ("today's"). */
 static void strip_possessive(char *w)
 {
@@ -848,7 +848,7 @@ int spfy_fe_internal_text_to_tagged(const char *text,
 
     int char_off = 0;
     int is_first_utt = 1;
-    /* SSML <break time="..."> — when set, overrides the next inter-utt
+    /* SSML <break time="..."> - when set, overrides the next inter-utt
      * opener pause. */
     uint16_t pending_custom_pause_ms = 0;
     utt_buf_t utt;
@@ -867,12 +867,12 @@ int spfy_fe_internal_text_to_tagged(const char *text,
                 { char tmp[2] = { (term_char), 0 }; emit_str(&e, tmp); } \
                 emit_str(&e, " pau(p25) "); \
                 is_first_utt = 0; \
-                /* Pending pause is NOT cleared here — the first utt's
+                /* Pending pause is NOT cleared here - the first utt's
                  * leading pau is fixed at p25, so any SSML break that
                  * triggered THIS flush is semantically about the gap
                  * BETWEEN this utt and the next. */ \
             } else { \
-                /* Only consume pending here — this opener represents the \
+                /* Only consume pending here - this opener represents the \
                  * silence between the previous utt's end and this utt's \
                  * start, which is exactly what SSML <break time> means. */ \
                 if (pending_custom_pause_ms > 0) { \
@@ -943,7 +943,7 @@ int spfy_fe_internal_text_to_tagged(const char *text,
                     WRITE_UTT(',');
                 }
             }
-            /* Complementizer "that" after a verb (no length threshold —
+            /* Complementizer "that" after a verb (no length threshold -
              * engine breaks even after short prefixes like "Our records
              * indicate that..." in nat_035). */
             if (utt.n_words >= 2) {
@@ -972,7 +972,7 @@ int spfy_fe_internal_text_to_tagged(const char *text,
             w->pitch_st = toks[i].pitch_st;
             w->rate_pct = toks[i].rate_pct;
 
-            /* SSML <phoneme ph="..."> — caller-supplied ARPAbet override. */
+            /* SSML <phoneme ph="..."> - caller-supplied ARPAbet override. */
             if (toks[i].phonemes[0]) {
                 w->n_phs = split_phonemes(toks[i].phonemes, w->phs,
                                           MAX_PHONS_PER_WORD);
@@ -1061,7 +1061,7 @@ int spfy_fe_internal_text_to_tagged(const char *text,
             break;
         }
         case SPFY_TOKEN_PHRASE_BREAK:
-            /* Comma / semicolon — separate utt in the DLL's convention,
+            /* Comma / semicolon - separate utt in the DLL's convention,
              * with `{,` opener and L-L% boundary on the focus word. */
             WRITE_UTT(',');
             break;
@@ -1072,7 +1072,7 @@ int spfy_fe_internal_text_to_tagged(const char *text,
             break;
         }
         case SPFY_TOKEN_CUSTOM_PAUSE:
-            /* SSML <break time="..." /> — stash the explicit duration so
+            /* SSML <break time="..." /> - stash the explicit duration so
              * the next utt's opener emits pau(p<ms>) instead of the
              * terminator-class default, then close the current utt as a
              * phrase break. */

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "jill",
+  "display": "Jill",
+  "lang": "en-US",
+  "version": "2026.08.22",
+  "files": [
+    {
+      "name": "jill.vin",
+      "bytes": 37343530,
+      "sha256": "b06ca5dd11637ac389918a03f15adbb5a61cea48b51254f500d0d9021615452e"
+    },
+    {
+      "name": "jill8.vdb",
+      "bytes": 71249014,
+      "sha256": "53d620e8c4f74f949cd46a87aa20f8559c5ade03af3d348c07a0a6f0f1556664"
+    },
+    {
+      "name": "jill.vcf",
+      "bytes": 52976,
+      "sha256": "ef159c6495fd780b521ed4d39ab7fe1011b4da2e41f4d2021d9d83bcf4cd25e2"
+    }
+  ]
+}

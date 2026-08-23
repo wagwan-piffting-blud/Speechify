@@ -5,6 +5,7 @@ add_library(spfy_common STATIC
     log.c
     file_io.c
     env.c
+    voice_find.c
 )
 # CMAKE_CURRENT_SOURCE_DIR is PUBLIC, not PRIVATE: env.h is consumed by the
 # usel / wsola / prosody / cli targets now, and log.h + le.h were already

@@ -8,7 +8,7 @@ onLeave with first_cand_uid) and match by (cand_uid, cand_jk).
 import json, glob, os, struct, sys
 
 def _f32(x):
-    """Round a Python float to nearest float32 — engine uses 32-bit floats
+    """Round a Python float to nearest float32 - engine uses 32-bit floats
     throughout the cost path; this matches its accumulator precision."""
     return struct.unpack("<f", struct.pack("<f", float(x)))[0]
 sys.path.insert(0, "c:/tmp")
@@ -379,7 +379,7 @@ def main():
                 # like (15254, 15255) appears as a posting in BOTH _SYL_['ay']
                 # and _WORD_['i'], so iterating _SYL_-first and stopping on
                 # first hit (the old code) misclassifies WORD-anchor slots.
-                # The as_ev.type (2=Syl, 4=Word) is authoritative — use it.
+                # The as_ev.type (2=Syl, 4=Word) is authoritative - use it.
                 # When the SAME (uid, jk) is first_cand for BOTH a SYL and a
                 # WORD anchor (e.g. "Eight." text_023), disambiguate via
                 # final_n_cands matching this slot's n_cands.

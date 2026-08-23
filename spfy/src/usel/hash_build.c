@@ -325,6 +325,42 @@ int spfy_hash_build(const spfy_hash_pair *pairs, size_t n_pairs,
         if (last > high_water) high_water = last;
     }
 
+    /* ⛔ THE VENDOR PROBE IS UNBOUNDED, SO THE TABLE NEEDS A TAIL.
+     *
+     * SWIttsUSel.dll+0xb7e6 is `cmp [cells + (rows[uid_right] + uid_left)*8],
+     * uid_right` with NO comparison against n_cells in front of it. Our own
+     * hash.c returns SPFY_E_OOB for an index past the end; theirs reads the
+     * memory. Sizing the table to the last POPULATED cell therefore builds a
+     * voice that our engine renders and Speechify access-violates on, at
+     * whichever phrase first asks for a big uid_left against the row with the
+     * largest displacement.
+     *
+     * Measured on crstom, 2026-08-22: "attention signal." probed
+     * rows[222144] = 4,449,427 + uid_left 278,391 = 4,727,818 against
+     * n_cells 4,724,617, and read 25,616 bytes past a 37,797,888-byte
+     * allocation. crsmara shipped 6,506 cells short of the same bound and had
+     * simply not been asked yet. The vendors carry the tail: tom 522,611
+     * spare cells, jill 375,059.
+     *
+     * The bound is not a margin, it is the vendor's own construction rule --
+     * every vendor voice satisfies n_cells == max(rows[]) + n_rows EXACTLY:
+     *
+     *     tom 1,724,291 + 692,190 = 2,416,481      jill 2,059,585 + 560,534
+     *     javier 1,638,488 + 668,348               paulina 1,367,589 + 663,410
+     *     felix 2,906,700 + 737,394                all delta +0
+     *
+     * uid_left is a unit id and n_rows >= n_units always (vb_stages.c passes
+     * n_units; the vendors pass ~4x that), so this covers every probe the
+     * engine can make. The cost is bounded by n_rows -- 44,816 bytes on
+     * crstom. */
+    {
+        size_t max_row = 0;
+        for (uint32_t r = 0; r < n_rows; ++r)
+            if ((size_t)rows[r] > max_row) max_row = rows[r];
+        size_t need = max_row + (size_t)n_rows;
+        if (need > high_water) high_water = need;
+    }
+
     if (high_water > 0xFFFFFFFFu) {
         spfy_log_err("hash_build: %zu cells overflows the u32 n_cells field",
                      high_water);

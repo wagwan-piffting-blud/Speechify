@@ -1,5 +1,5 @@
 /*
- * spfy/src/fe_host/fe_stub.c — C Native-flavored spfy_fe_t shim.
+ * spfy/src/fe_host/fe_stub.c - C Native-flavored spfy_fe_t shim.
  *
  * Same opaque-handle surface as fe_host.c, but with the SWIttsFe-en-US.dll
  * hosting machinery stripped out. ARM CPUs can't decode 32-bit x86 PE, so
@@ -154,7 +154,7 @@ int spfy_fe_text_to_tagged(spfy_fe_t *opaque,
     /* In-house FE already produces tagged text directly.
      * spfy_fe_internal_text_to_tagged returns 0 ok / 1 truncated / -1 bad
      * args; the public contract (fe.h) is "string length (>0) on success,
-     * <=0 on failure", so translate — otherwise callers that gate on a
+     * <=0 on failure", so translate - otherwise callers that gate on a
      * positive length (build_inline_mixed_tagged) drop every plain run. */
     int rc = spfy_fe_internal_text_to_tagged(text, out, out_n);
     if (rc < 0) return rc;

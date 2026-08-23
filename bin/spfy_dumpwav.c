@@ -8,9 +8,11 @@
 //   --16k         Use 16kHz output (default: 8kHz)
 //   --dictionary F Apply a substitution dictionary (word/phrase -> SPR or text)
 //
-// Conversion (no server needed... just kidding, still needs server):
+// Offline -- pure text, no server, no socket, no SWItts.dll:
 //   --bal2spr "..." Convert Balabolka/ARPAbet phonemes to SPR format
 //   --spr2bal "..." Convert SPR phonemes to Balabolka/ARPAbet format
+//   --expand "..."  Show the \! codes a text expands to (or -f FILE)
+//   --help          Usage and the SPR symbol table
 //
 // Diagnostic:
 //   --rawdump     Dump raw callback bytes to stderr
@@ -752,11 +754,18 @@ static void print_usage(const wchar_t *exe) {
         L"  --phonemes      Write phoneme timing to .phn file alongside WAV\n"
         L"  --pron \"...\"    Synthesize raw SPR phonemes (see symbol table below)\n"
         L"  --g2p           Print phoneme sequence for text (ARPAbet + SPR)\n"
-        L"  --bal2spr \"...\" Convert Balabolka phonemes to SPR format\n"
-        L"  --spr2bal \"...\" Convert SPR phonemes to Balabolka/ARPAbet format\n"
         L"  --dictionary F  Apply a substitution dictionary (e.g. vip_dicta.txt)\n"
         L"  --rawdump       Dump raw callback bytes to stderr (diagnostic)\n"
         L"  --16k           Use 16kHz output (default: 8kHz)\n"
+        L"\n"
+        L"Offline -- these need NO server, no socket and no SWItts.dll, and\n"
+        L"run before anything else is touched:\n"
+        L"  --bal2spr \"...\" Convert Balabolka phonemes to SPR format\n"
+        L"  --spr2bal \"...\" Convert SPR phonemes to Balabolka/ARPAbet format\n"
+        L"  --expand \"...\"  Print the \\! codes a text expands to; accepts -f FILE\n"
+        L"  --help, -h      This message\n"
+        L"(--g2p is NOT offline: the grapheme-to-phoneme tables live in the\n"
+        L" server's front end, so it needs Speechify running.)\n"
         L"\n"
         L"\n"
         L"SPR phoneme symbols (case-sensitive):\n"
@@ -934,7 +943,145 @@ static int run_batch(SWIttsAPI *api, SWIttsPort *portInOut, Ctx *ctx,
     return failed ? 1 : 0;
 }
 
+// ---- offline operations -------------------------------------------------
+//
+// These four are pure text transforms. They need no server, no socket and no
+// SWItts.dll, and this pre-pass is what GUARANTEES that rather than leaving it
+// to the order of an else-if chain 100 lines long: run_offline_op() executes
+// before the option loop, before server_reachable(), before LoadSWItts(), and
+// exits the process itself. Nothing added to wmain() later can accidentally
+// put work in front of them.
+//
+// The header of this file used to say "no server needed... just kidding,
+// still needs server". It does not, and now it cannot.
+
+static void print_bal2spr(const wchar_t *warg) {
+    char balUtf8[4096], sprOut[4096];
+    WideCharToMultiByte(CP_UTF8, 0, warg, -1, balUtf8, sizeof(balUtf8), NULL, NULL);
+    bal_to_spr(balUtf8, sprOut, sizeof(sprOut));
+    printf("SPR: %s\n", sprOut);
+    printf("Use: spfy_dumpwav.exe --pron \"%s\" output.wav\n", sprOut);
+}
+
+static void print_spr2bal(const wchar_t *warg) {
+    // Stress in Balabolka goes AFTER the vowel, not before the syllable.
+    char sprUtf8[4096];
+    WideCharToMultiByte(CP_UTF8, 0, warg, -1, sprUtf8, sizeof(sprUtf8), NULL, NULL);
+    printf("BAL: ");
+    int first = 1;
+    int pending_stress = 0;
+    for (const char *p = sprUtf8; *p; ) {
+        if (*p == '.') { p++; continue; }
+        if (*p == '0' || *p == '1' || *p == '2') {
+            pending_stress = *p - '0';
+            p++;
+            continue;
+        }
+        int found = 0;
+        for (int j = 0; ARPA_TO_SPR[j].arpabet; j++) {
+            int slen = (int)strlen(ARPA_TO_SPR[j].spr);
+            if (slen > 0 && strncmp(p, ARPA_TO_SPR[j].spr, slen) == 0 &&
+                strcmp(ARPA_TO_SPR[j].spr, "_") != 0 &&
+                strcmp(ARPA_TO_SPR[j].spr, "?") != 0) {
+                if (!first) printf(" ");
+                // Balabolka uses "h", not "hh".
+                if (strcmp(ARPA_TO_SPR[j].arpabet, "hh") == 0) printf("h");
+                else                                           printf("%s", ARPA_TO_SPR[j].arpabet);
+                first = 0;
+                if (is_vowel_spr(*p) && pending_stress > 0) printf(" %d", pending_stress);
+                pending_stress = 0;
+                p += slen;
+                found = 1;
+                break;
+            }
+        }
+        if (!found) p++;
+    }
+    printf("\n");
+}
+
+// --expand: what the tag expander makes of a text. Same code path the synth
+// takes, so this is the thing to reach for when a <pron>/<prosody>/<say-as>
+// does not come out as expected -- the answer is visible without a server and
+// without waiting for audio.
+static int print_expand(const wchar_t *warg, const wchar_t *file) {
+    char *raw = NULL;
+    if (file) {
+        raw = read_file_utf8(file);
+        if (!raw) {
+            fwprintf(stderr, L"ERROR: could not read input file %ls\n", file);
+            return 8;
+        }
+    } else {
+        int n = WideCharToMultiByte(CP_UTF8, 0, warg, -1, NULL, 0, NULL, NULL);
+        raw = (char *)malloc((size_t)(n > 0 ? n : 1));
+        if (!raw) return 1;
+        WideCharToMultiByte(CP_UTF8, 0, warg, -1, raw, n, NULL, NULL);
+    }
+    size_t cap = strlen(raw) * 2 + 4096;
+    char *out = (char *)malloc(cap);
+    if (!out) { free(raw); return 1; }
+    expand_tags(raw, out, cap);
+    printf("%s\n", out);
+    free(out);
+    free(raw);
+    return 0;
+}
+
+// Returns an exit code, or -1 when no offline operation was requested.
+static int run_offline_op(int argc, wchar_t **wargv) {
+    const wchar_t *file = NULL;
+    int i;
+
+    // -f/--file is a modifier for --expand, so it has to be seen first
+    // whichever side of the operation it was typed on.
+    for (i = 1; i < argc; i++)
+        if ((wcscmp(wargv[i], L"-f") == 0 || wcscmp(wargv[i], L"--file") == 0)
+            && i + 1 < argc)
+            file = wargv[i + 1];
+
+    for (i = 1; i < argc; i++) {
+        const wchar_t *a = wargv[i];
+        const wchar_t *arg = (i + 1 < argc) ? wargv[i + 1] : NULL;
+
+        if (wcscmp(a, L"--help") == 0 || wcscmp(a, L"-h") == 0) {
+            print_usage(wargv[0]);
+            return 0;
+        }
+        if (wcscmp(a, L"--bal2spr") == 0) {
+            if (!arg) {
+                fwprintf(stderr, L"ERROR: --bal2spr requires a phoneme string argument\n");
+                return 2;
+            }
+            print_bal2spr(arg);
+            return 0;
+        }
+        if (wcscmp(a, L"--spr2bal") == 0) {
+            if (!arg) {
+                fwprintf(stderr, L"ERROR: --spr2bal requires an SPR string argument\n");
+                return 2;
+            }
+            print_spr2bal(arg);
+            return 0;
+        }
+        if (wcscmp(a, L"--expand") == 0) {
+            if (!arg && !file) {
+                fwprintf(stderr, L"ERROR: --expand requires a text argument or -f FILE\n");
+                return 2;
+            }
+            return print_expand(arg, file);
+        }
+    }
+    return -1;
+}
+
 int wmain(int argc, wchar_t **wargv) {
+    // Offline operations first, unconditionally. See run_offline_op().
+    {
+        int off = run_offline_op(argc, wargv);
+        if (off >= 0) return off;
+    }
+
     // Parse options
     int enablePhonemes = 0;
     int rawDump = 0;
@@ -969,68 +1116,6 @@ int wmain(int argc, wchar_t **wargv) {
         } else if (wcscmp(wargv[i], L"--g2p") == 0) {
             g2pMode = 1;
             enablePhonemes = 1;
-        } else if (wcscmp(wargv[i], L"--bal2spr") == 0) {
-            if (i + 1 < argc) {
-                // Convert Balabolka phonemes to SPR and print
-                char balUtf8[4096];
-                WideCharToMultiByte(CP_UTF8, 0, wargv[++i], -1, balUtf8, sizeof(balUtf8), NULL, NULL);
-                char sprOut[4096];
-                bal_to_spr(balUtf8, sprOut, sizeof(sprOut));
-                printf("SPR: %s\n", sprOut);
-                printf("Use: spfy_dumpwav.exe --pron \"%s\" output.wav\n", sprOut);
-                return 0;
-            } else {
-                fwprintf(stderr, L"ERROR: --bal2spr requires a phoneme string argument\n");
-                return 2;
-            }
-        } else if (wcscmp(wargv[i], L"--spr2bal") == 0) {
-            if (i + 1 < argc) {
-                // Convert SPR to Balabolka/ARPAbet phonemes
-                // Stress in Balabolka goes AFTER the vowel, not before syllable
-                char sprUtf8[4096];
-                WideCharToMultiByte(CP_UTF8, 0, wargv[++i], -1, sprUtf8, sizeof(sprUtf8), NULL, NULL);
-                printf("BAL: ");
-                int first = 1;
-                int pending_stress = 0;
-                for (const char *p = sprUtf8; *p; ) {
-                    if (*p == '.') { p++; continue; }
-                    if (*p == '0' || *p == '1' || *p == '2') {
-                        pending_stress = *p - '0';
-                        p++;
-                        continue;
-                    }
-                    // Find matching SPR symbol
-                    int found = 0;
-                    for (int j = 0; ARPA_TO_SPR[j].arpabet; j++) {
-                        int slen = (int)strlen(ARPA_TO_SPR[j].spr);
-                        if (slen > 0 && strncmp(p, ARPA_TO_SPR[j].spr, slen) == 0 &&
-                            strcmp(ARPA_TO_SPR[j].spr, "_") != 0 &&
-                            strcmp(ARPA_TO_SPR[j].spr, "?") != 0) {
-                            if (!first) printf(" ");
-                            // Balabolka uses "h" not "hh"
-                            if (strcmp(ARPA_TO_SPR[j].arpabet, "hh") == 0)
-                                printf("h");
-                            else
-                                printf("%s", ARPA_TO_SPR[j].arpabet);
-                            first = 0;
-                            // If this is a vowel, output pending stress AFTER it
-                            if (is_vowel_spr(*p) && pending_stress > 0) {
-                                printf(" %d", pending_stress);
-                            }
-                            pending_stress = 0;
-                            p += slen;
-                            found = 1;
-                            break;
-                        }
-                    }
-                    if (!found) p++;
-                }
-                printf("\n");
-                return 0;
-            } else {
-                fwprintf(stderr, L"ERROR: --spr2bal requires an SPR string argument\n");
-                return 2;
-            }
         } else if (wcscmp(wargv[i], L"--pron") == 0) {
             if (i + 1 < argc) {
                 pronPhonemes = wargv[++i];
@@ -1059,9 +1144,6 @@ int wmain(int argc, wchar_t **wargv) {
             enablePhonemes = 1;  // need to enable marks to get callbacks
         } else if (wcscmp(wargv[i], L"--16k") == 0) {
             sampleRate = 16000;
-        } else if (wcscmp(wargv[i], L"--help") == 0 || wcscmp(wargv[i], L"-h") == 0) {
-            print_usage(wargv[0]);
-            return 0;
         } else if (!wtext) {
             wtext = wargv[i];
         } else if (!woutPath) {
@@ -1213,10 +1295,19 @@ int wmain(int argc, wchar_t **wargv) {
     // alphanumeric, skipping inline \! code letters so "\!p500" alone still
     // counts as empty. Batch and g2p modes are exempt (batch guards per line;
     // g2p wants marks, not audio).
+    //
+    // ⛔ `\![...]` IS SPEAKABLE AND WAS BEING SKIPPED WITH THE REST. A phoneme
+    // token is not a control code -- it is the only content there is in
+    // --pron mode, and in text that is nothing but <pron sym=".."/>. The
+    // documented example `--pron ".0Dx.1wE.0DR"` therefore wrote a 44-byte
+    // silent WAV and said "no speakable content", which reads as a bad
+    // phoneme string rather than a bug here. Every OTHER \! code (\!p500,
+    // \!vd80, \!bmX) still counts as empty, which is what the guard is for.
     if (!batchMode && !g2pMode && speakBuf) {
         int hasSpeakable = 0;
         for (const char *q = speakBuf; *q; q++) {
-            if (*q == '\\' && q[1] == '!') {       // skip an inline \!code token
+            if (*q == '\\' && q[1] == '!') {       // inline \!code token
+                if (q[2] == '[') { hasSpeakable = 1; break; }   // phonemes
                 q += 2;
                 while (*q && !isspace((unsigned char)*q)) q++;
                 if (!*q) break;

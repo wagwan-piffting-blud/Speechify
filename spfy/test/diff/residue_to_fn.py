@@ -144,7 +144,7 @@ FIELD_HOOK = {
 }
 
 # FE-side candidate-pool tags. Functions in analysis.db tagged with any of
-# these are the natural RE targets for FE-input divergence — they belong
+# these are the natural RE targets for FE-input divergence - they belong
 # to the FE module's TTS subsystem (vs runtime/dllmain/io/struct.*).
 FE_CANDIDATE_TAGS = (
     "speechify.core",

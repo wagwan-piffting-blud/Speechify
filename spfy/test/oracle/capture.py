@@ -1,7 +1,7 @@
 """Make-style dependency tracker for the Phase 1 engine-trace capture pipeline.
 
 Wraps `run_frida_capture.HookSession` (DO NOT re-implement Frida lifecycle,
-synthesis invocation, or JSONL flattening — they are imported verbatim).
+synthesis invocation, or JSONL flattening - they are imported verbatim).
 The 200-phrase corpus times 6 LIVE hooks ~= 1,200 trace files; Frida is
 flaky and the capture is long-running, so partial failure must be
 tolerable. This script turns "1,200 captures in one shot" into "any
@@ -44,7 +44,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Reuse the existing battle-tested Frida driver — DO NOT re-implement.
+# Reuse the existing battle-tested Frida driver - DO NOT re-implement.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_frida_capture import (  # noqa: E402
     HookSession,
@@ -182,7 +182,7 @@ def run_one_hook(hook: str, entries: list[dict], out_root: Path,
     """Capture all stale entries for a single hook. Outer-loop=hook so
     Frida attach is amortized across 168+ corpus rows.
 
-    Bails (returns) early if MAX_CONSECUTIVE_FAILURES hit — engine
+    Bails (returns) early if MAX_CONSECUTIVE_FAILURES hit - engine
     likely dead; resume picks up here on next run. State is written
     after every (id, hook) for crash safety.
     """
@@ -211,7 +211,7 @@ def run_one_hook(hook: str, entries: list[dict], out_root: Path,
                 n_consec_fail += 1
                 if n_consec_fail >= MAX_CONSECUTIVE_FAILURES:
                     print(
-                        "  [warn] engine appears dead — restart "
+                        "  [warn] engine appears dead - restart "
                         "bin/Speechify.exe and re-run capture.py "
                         "(will resume)",
                         file=sys.stderr,
@@ -270,7 +270,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument(
         "--only", default=None,
-        help='single key "<id>::<hook>" — restrict capture to one row',
+        help='single key "<id>::<hook>" - restrict capture to one row',
     )
     ap.add_argument("--force", action="store_true",
                     help="re-capture even fresh entries")
@@ -300,7 +300,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"traces: {args.out}")
     for hook in PHASE1_HOOKS:
         out_dir = args.out / hook
-        # hook JS sha — guard for missing JS file (e.g. partial install)
+        # hook JS sha - guard for missing JS file (e.g. partial install)
         hook_js_sha = (file_sha256(HOOK_JS[hook])
                        if hook in HOOK_JS and HOOK_JS[hook].exists()
                        else None)
@@ -355,7 +355,7 @@ def cmd_dry_run(args: argparse.Namespace) -> int:
     n_hook_skipped = 0
     for hook in args.hooks:
         if hook in RETIRED_HOOKS:
-            print(f"  [skip] {hook}: RETIRED — no new captures (D-15)")
+            print(f"  [skip] {hook}: RETIRED - no new captures (D-15)")
             n_hook_skipped += 1
             continue
         if hook not in HOOK_JS:
@@ -413,14 +413,14 @@ def _preflight_engine(dumpwav: Path, scratch: Path) -> int:
     text_probe = {"id": "_probe", "mode": "text", "text": "Hi.", "tags": []}
     ok, msg = synth_one(dumpwav, text_probe, scratch)
     if not ok:
-        print("engine not running — start bin/Speechify.exe first "
+        print("engine not running - start bin/Speechify.exe first "
               f"(probe failed: {msg})", file=sys.stderr)
         return 3
     spr_probe = {"id": "_probe_spr", "mode": "spr",
                  "text": "\\![.1Sa.0kIG]", "tags": []}
     ok2, msg2 = synth_one(dumpwav, spr_probe, scratch)
     if not ok2:
-        print("  [warn] SPR probe failed — `\\!` escape may not "
+        print("  [warn] SPR probe failed - `\\!` escape may not "
               f"round-trip on this shell ({msg2})", file=sys.stderr)
     return 0
 
@@ -454,22 +454,22 @@ def cmd_live(args: argparse.Namespace) -> int:
         entries = [by_id[id_]]
         args.hooks = [hook]
 
-    # Pre-flight probes (skip for --only too — operator wants speed).
+    # Pre-flight probes (skip for --only too - operator wants speed).
     rc = _preflight_engine(args.dumpwav, args.scratch)
     if rc != 0:
         return rc
 
     for hook in args.hooks:
         if hook in RETIRED_HOOKS:
-            print(f"  [warn] {hook}: RETIRED for new captures — "
+            print(f"  [warn] {hook}: RETIRED for new captures - "
                   "skipping (D-15)", file=sys.stderr)
             continue
         if hook not in HOOK_JS:
-            print(f"  [warn] {hook}: not registered in HOOK_JS — skipping",
+            print(f"  [warn] {hook}: not registered in HOOK_JS - skipping",
                   file=sys.stderr)
             continue
         if not HOOK_JS[hook].exists():
-            print(f"  [warn] {hook}: JS file missing at {HOOK_JS[hook]} — "
+            print(f"  [warn] {hook}: JS file missing at {HOOK_JS[hook]} - "
                   "skipping", file=sys.stderr)
             continue
         hook_js_sha = file_sha256(HOOK_JS[hook])

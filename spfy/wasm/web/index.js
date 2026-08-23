@@ -4,13 +4,13 @@
 //   1. Load the emscripten factory (createSpfyModule) at RUNTIME via a
 //      <script> tag (not webpack's static import) so the dev server is
 //      happy even before ./build.sh has run.
-//   2. Fetch voices/manifest.json — the catalog of shippable voices and
+//   2. Fetch voices/manifest.json - the catalog of shippable voices and
 //      their asset URLs (produced by tools/stage_voices.py at build time).
 //   3. On voice select: make sure we have a module instance for that
 //      voice's LANGUAGE (the emulator FE boots one DLL per instance, so a
 //      language change means a fresh module), fetch the voice's
-//      vin/vdb/vcf over the network — stitching any >90 MiB file that was
-//      split into <100 MB parts for GitHub Pages — stream them into the
+//      vin/vdb/vcf over the network - stitching any >90 MiB file that was
+//      split into <100 MB parts for GitHub Pages - stream them into the
 //      emscripten FS, then call spfy_wasm_init('/voice', prefix).
 //   4. On Speak: spfy_wasm_synth(text), read the int16 PCM from WASM
 //      memory, convert to Float32 [-1,1], feed an AudioBuffer.
@@ -38,7 +38,7 @@ function loadEmscriptenFactory() {
             else reject(new Error("spfy_wasm.js loaded but createSpfyModule is undefined"));
         };
         s.onerror = () => reject(new Error(
-            "Failed to load spfy_wasm.js — run `./build.sh` to compile the WASM module first."));
+            "Failed to load spfy_wasm.js - run `./build.sh` to compile the WASM module first."));
         document.head.appendChild(s);
     });
 }
@@ -126,7 +126,7 @@ async function fetchVoiceIntoFS(voice, onProgress) {
         let pos = 0;
         for (const part of f.parts) {
             // A part is normally a filename relative to voices/<dir>/, but
-            // may be an absolute URL — that lets an over-100 MB voice be
+            // may be an absolute URL - that lets an over-100 MB voice be
             // hosted off-Pages (e.g. a GitHub Release asset or CDN) while
             // the rest ship from the site.
             const url = /^https?:\/\//i.test(part)
@@ -166,7 +166,7 @@ async function loadVoice(voiceId) {
     // Gate the heavy voices behind an explicit confirm.
     if (voice.large) {
         const ok = window.confirm(
-            `${voice.display} is a large voice — about ${fmtMB(voice.totalBytes)} MB ` +
+            `${voice.display} is a large voice - about ${fmtMB(voice.totalBytes)} MB ` +
             `to download (mostly its unit-selection database). Continue?`);
         if (!ok) {
             if (state.currentVoice) voiceSelect.value = state.currentVoice;
@@ -183,8 +183,8 @@ async function loadVoice(voiceId) {
         // Always mint a fresh module instance for the selected voice. The
         // emulator boots exactly one SWIttsFe DLL per instance and treats
         // the boot as idempotent ("first voice wins"), so a fresh instance
-        // — fresh WASM memory, hence a clean copy of the DLL's data segment
-        // — is the robust way to (re)boot the right-language FE with no
+        // - fresh WASM memory, hence a clean copy of the DLL's data segment
+        // - is the robust way to (re)boot the right-language FE with no
         // carried-over state. The old instance's memory is dropped for GC.
         setStatus(`Loading engine for ${voice.lang}…`);
         await createModuleForLang(voice.lang);
@@ -207,7 +207,7 @@ async function loadVoice(voiceId) {
         state.currentVoice = voice.id;
         state.lastRate = state.api.sampleRate();
         const dt = (performance.now() - t0).toFixed(0);
-        setStatus(`Ready — ${voice.display} loaded in ${dt} ms.`, "ok");
+        setStatus(`Ready - ${voice.display} loaded in ${dt} ms.`, "ok");
         progressEl.value = 100;
         synthSec.hidden = false;
         speakBtn.disabled = false;
@@ -226,7 +226,7 @@ function populateVoicePicker(voices) {
         const opt = document.createElement("option");
         opt.value = v.id;
         const size = `~${fmtMB(v.totalBytes)} MB`;
-        opt.textContent = `${v.display} (${v.lang}) — ${size}${v.large ? " ⚠" : ""}`;
+        opt.textContent = `${v.display} (${v.lang}) - ${size}${v.large ? " ⚠" : ""}`;
         voiceSelect.appendChild(opt);
     }
     voiceSelect.disabled = false;
@@ -239,7 +239,7 @@ async function boot() {
     try {
         resp = await fetch(MANIFEST_URL);
     } catch (e) {
-        throw new Error("Could not fetch voices/manifest.json — run `./build.sh` first.");
+        throw new Error("Could not fetch voices/manifest.json - run `./build.sh` first.");
     }
     if (!resp.ok) throw new Error(`voices/manifest.json → HTTP ${resp.status}`);
     state.manifest = await resp.json();
@@ -381,7 +381,7 @@ function packWav(pcm, rate) {
     dv.setUint16(34, 16, true);             // bits per sample
     writeStr(36, "data");
     dv.setUint32(40, dataBytes, true);
-    // PCM payload — little-endian s16.
+    // PCM payload - little-endian s16.
     let off = 44;
     for (let i = 0; i < pcm.length; i++, off += 2) dv.setInt16(off, pcm[i], true);
     return new Blob([buf], { type: "audio/wav" });

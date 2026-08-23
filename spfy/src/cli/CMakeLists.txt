@@ -96,7 +96,7 @@ target_link_libraries(spfy_hp_score_test PRIVATE spfy_usel spfy_voice spfy_commo
 # header at configure time that bakes the (otherwise external)
 # fe_symbol_table.json + fe_tables_a + fe_tables blobs straight into
 # spfy_synth.exe. That lets the CLI accept a 5-arg form
-# (vin/vdb/vcf/text/out) instead of the legacy 9-arg form — the
+# (vin/vdb/vcf/text/out) instead of the legacy 9-arg form - the
 # extractor writes the bundled assets to a tempdir on startup.
 #
 # The hp_class table is NOT embedded: it is per-voice, so baking Tom's
@@ -124,7 +124,7 @@ list(LENGTH SPFY_FE_TABLE_FILES _spfy_n_fe_tables)
 if(_spfy_n_fe_tables LESS 700)
     message(FATAL_ERROR
         "spfy: only ${_spfy_n_fe_tables} FE table .bin files found under "
-        "data/fe_tables{,_a} — expected ~728. The embedded blob would be "
+        "data/fe_tables{,_a} - expected ~728. The embedded blob would be "
         "built from an incomplete set and every render would be wrong. "
         "Restore them (they are tracked in git) before building.")
 endif()
@@ -165,7 +165,13 @@ target_include_directories(spfy_synth
             ${CMAKE_CURRENT_BINARY_DIR}      # for generated embedded_assets.h
 )
 target_link_libraries(spfy_synth
-    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common)
+    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common
+            spfy_update_core)
+# The update code in spfy_synth.c is behind this define. The WASM and Android
+# builds compile the SAME FILE from their own CMakeLists, which generate no
+# spfy/version.h and never see src/update -- so it must be opt-in per target,
+# not assumed from the file being present.
+target_compile_definitions(spfy_synth PRIVATE SPFY_HAVE_UPDATE_CHECK=1)
 
 # Live-trace fork of spfy_synth: the SAME engine source compiled with
 # -DSPFY_TRACE=1, so the spfy_trace_eventf() instrumentation in spfy_synth.c
@@ -189,7 +195,9 @@ target_include_directories(spfy_synth_trace
             ${CMAKE_CURRENT_BINARY_DIR}      # for generated embedded_assets.h
 )
 target_link_libraries(spfy_synth_trace
-    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common)
+    PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common
+            spfy_update_core)
+target_compile_definitions(spfy_synth_trace PRIVATE SPFY_HAVE_UPDATE_CHECK=1)
 
 # A/B test tool for the TD-PSOLA pitch shifter (used to tune quality
 # before wiring into the SAPI shim's <prosody pitch=...> path).
@@ -210,14 +218,14 @@ target_include_directories(spfy_f0_flatten
     PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
 target_link_libraries(spfy_f0_flatten PRIVATE spfy_dsp)
 
-# G2P module smoke test — CMU dict ARPAbet lookup. Foundation of the
+# G2P module smoke test - CMU dict ARPAbet lookup. Foundation of the
 # in-house FE that replaces SWIttsFe-en-US.dll on ARM targets.
 add_executable(spfy_g2p_dump spfy_g2p_dump.c)
 target_include_directories(spfy_g2p_dump
     PRIVATE ${CMAKE_SOURCE_DIR}/src/g2p)
 target_link_libraries(spfy_g2p_dump PRIVATE spfy_g2p)
 
-# Phase 3 text normalizer smoke test — pre-G2P tokenizer.
+# Phase 3 text normalizer smoke test - pre-G2P tokenizer.
 add_executable(spfy_text_norm_dump spfy_text_norm_dump.c)
 target_include_directories(spfy_text_norm_dump
     PRIVATE ${CMAKE_SOURCE_DIR}/src/text_norm)
@@ -274,7 +282,7 @@ target_link_libraries(spfy_synth_replay
 if(NOT SPFY_FE_HOSTED)
 # These two exercise the legacy hand-written FE stage functions directly, so
 # they link spfy_fe_handwritten (the public `spfy_fe` target is now the
-# in-house adapter — see src/fe/CMakeLists.txt).
+# in-house adapter - see src/fe/CMakeLists.txt).
 add_executable(spfy_fe_test spfy_fe_test.c)
 target_include_directories(spfy_fe_test
     PRIVATE ${CMAKE_SOURCE_DIR}/src/fe

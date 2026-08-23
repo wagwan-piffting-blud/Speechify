@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "felix",
+  "display": "Felix",
+  "lang": "fr-CA",
+  "version": "2026.08.22",
+  "files": [
+    {
+      "name": "felix.vin",
+      "bytes": 49955046,
+      "sha256": "04a3df9776fd46a1bfe252cc3b0c7a2282bd6b87efab9d4d342fac6a0777f619"
+    },
+    {
+      "name": "felix8.vdb",
+      "bytes": 87578332,
+      "sha256": "e3b33b0bb89e607a8245d5ec706f457da0b1dce888ec6f724125818225753ae1"
+    },
+    {
+      "name": "felix.vcf",
+      "bytes": 47284,
+      "sha256": "137a111f7142c9cdfafd0c1e78c8f762baa545b8a5e7cecfbfe54a222c9345ff"
+    }
+  ]
+}

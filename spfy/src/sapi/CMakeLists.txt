@@ -1,4 +1,4 @@
-# SAPI 5 voice DLL — wraps the spfy synth library into a Windows TTS voice.
+# SAPI 5 voice DLL - wraps the spfy synth library into a Windows TTS voice.
 # Built as a 32-bit COM in-proc server. Both the DLL itself and the synth
 # core (spfy_synth.c minus main(), gated by SPFY_SYNTH_NO_MAIN) are linked
 # in so SAPI's Speak() call goes straight into spfy_synth_to_sink.
@@ -28,6 +28,7 @@ target_include_directories(spfy_sapi
             ${CMAKE_SOURCE_DIR}/src/fe_internal
             ${CMAKE_SOURCE_DIR}/src/cart
             ${CMAKE_SOURCE_DIR}/src/prosody
+            ${CMAKE_SOURCE_DIR}/src/update
 )
 # spfy_prosody is required even though the stage is off by default: the calls
 # are compiled into spfy_synth.c unconditionally and only gated at RUNTIME by
@@ -36,14 +37,18 @@ target_include_directories(spfy_sapi
 # spfy_embedded_assets carries the SAME fe_symbol_table + fe_tables blob that
 # spfy_synth.exe does. Before this, the DLL built literal paths to
 # %USERPROFILE%\Documents\Speechify\spfy\{build,data} and the installer had to
-# lay that tree out per user — so a moved Documents folder, a second Windows
+# lay that tree out per user - so a moved Documents folder, a second Windows
 # account, or a partial uninstall broke every voice while the CLI kept working.
 # Defined in src/cli (add_subdirectory order puts it first), because that is
 # where the generating custom_command lives.
+# spfy_update_TRIGGER, never spfy_update_core: the trigger half is paths,
+# state and CreateProcess. Linking the core here would put a fetch and a
+# 96 MB SHA-256 inside a screen reader's process, which is exactly what the
+# split exists to prevent.
 target_link_libraries(spfy_sapi
     PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart
             spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common
-            spfy_embedded_assets
+            spfy_embedded_assets spfy_update_trigger
             ole32 oleaut32 advapi32 shell32 uuid)
 target_include_directories(spfy_sapi
     PRIVATE ${CMAKE_SOURCE_DIR}/src/dsp)
@@ -51,7 +56,7 @@ target_include_directories(spfy_sapi
 # resolves Dll* by their plain names. --enable-stdcall-fixup silences the
 # matching ld "resolving _DllCanUnloadNow by linking to _DllCanUnloadNow@0"
 # warnings: the .def lists the COM entry points undecorated, so ld matches
-# them to the stdcall-decorated symbols via fixup — which is exactly what
+# them to the stdcall-decorated symbols via fixup - which is exactly what
 # we want here, so do it quietly (keeps the build warning-clean).
 set_target_properties(spfy_sapi PROPERTIES
     PREFIX ""

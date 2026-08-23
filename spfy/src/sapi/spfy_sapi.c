@@ -1,4 +1,4 @@
-/* spfy_sapi.dll — SAPI 5 voice DLL that wraps the spfy synth library. */
+/* spfy_sapi.dll - SAPI 5 voice DLL that wraps the spfy synth library. */
 
 /* INITGUID must precede objbase.h/sapi.h so DEFINE_GUID emits the symbol
  * bodies into this TU. */
@@ -10,6 +10,7 @@
 #include "env.h"
 #include "pitch_shift.h"
 #include "time_stretch.h"
+#include "spfy_update.h"
 
 #include <math.h>
 
@@ -32,7 +33,7 @@ LONG    g_dll_refs = 0;
 
 
 typedef struct {
-    /* Two interfaces — ISpTTSEngine is primary, ISpObjectWithToken surfaced
+    /* Two interfaces - ISpTTSEngine is primary, ISpObjectWithToken surfaced
      * via QueryInterface using offsetof. */
     ISpTTSEngine       tts_iface;
     ISpObjectWithToken token_iface;
@@ -122,7 +123,7 @@ typedef struct {
 
 #define SAPI_PHONEME_HEARTBEAT_SAMPLES  800u
 
-/* Word-boundary ctx — pre-scanned per-word (text_offset, text_len)
+/* Word-boundary ctx - pre-scanned per-word (text_offset, text_len)
  * positions from the UTF-16 input of ONE fragment. */
 typedef struct {
     ISpTTSEngineSite *site;
@@ -262,7 +263,7 @@ static int sapi_psola_flush(sapi_sink_ctx_t *s)
     return wr;
 }
 
-/* Emit `n` zero samples — used for SSML <break>/SPVA_Silence and per-
+/* Emit `n` zero samples - used for SSML <break>/SPVA_Silence and per-
  * fragment SilenceMSecs. */
 static HRESULT sapi_emit_silence(sapi_sink_ctx_t *s, ULONG n)
 {
@@ -406,7 +407,7 @@ static int speak_one_frag_text(SpfyEngineImpl *impl,
         memcpy(w, f->pTextStart, f->ulTextLen * sizeof(WCHAR));
     w[f->ulTextLen] = 0;
 
-    /* Build the UTF-8 text actually handed to the synth — either the
+    /* Build the UTF-8 text actually handed to the synth - either the
      * verbatim source text, or an inline SPR-phoneme escape. */
     char *u8 = NULL;
     int   u8n = 0;
@@ -476,6 +477,18 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     SpfyEngineImpl *impl = IMPL_FROM_TTS(This);
     if (!pTextFragList || !pOutputSite) return E_POINTER;
     if (!impl->voice_loaded) return SPERR_UNINITIALIZED;
+
+    /* A voice is being USED -- the only moment this DLL is allowed to care
+     * about updates, and even then it does none of the work.
+     *
+     * ⚠ NOTHING HERE MAY BLOCK. We are on the caller's thread inside
+     * Narrator / Balabolka: a DNS lookup, a TLS handshake or a dialog would
+     * stall a screen reader mid-sentence. So this reads one small file and,
+     * at most once per process AND once per interval, starts a detached
+     * spfy_update.exe that owns the fetch, the hashing and the balloon.
+     * Both calls latch, so from the second Speak on they are two cached
+     * integers. */
+    if (spfy_upd_due_now()) spfy_upd_spawn_helper(NULL);
 
     uint32_t sr = impl->voice.vdb.sample_rate;
     sapi_sink_ctx_t sink_ctx = {0};
@@ -570,7 +583,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         if (vol > 100u) vol = 100u;
         sink_ctx.volume_gain = (float)vol / 100.0f;
 
-        /* Per-fragment pitch — SPVSTATE.PitchAdj.MiddleAdj is the SAPI
+        /* Per-fragment pitch - SPVSTATE.PitchAdj.MiddleAdj is the SAPI
          * convention "approximately one semitone per unit", range [-10,
          * +10]. */
         {
@@ -581,7 +594,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
             sink_ctx.psola_residual_st = psola_st;
             sink_ctx.psola_sr = (int)sr;
         }
-        /* Per-fragment rate — SPVSTATE.RateAdj in [-10, +10]. */
+        /* Per-fragment rate - SPVSTATE.RateAdj in [-10, +10]. */
         {
             long ra = f->State.RateAdj + site_base_rate;
             if (ra > 10) ra = 10;
@@ -732,7 +745,7 @@ static const ISpObjectWithTokenVtbl g_tok_vtbl = {
 };
 
 
-/* %USERPROFILE%\Documents\Speechify\ — the project root in dev. */
+/* %USERPROFILE%\Documents\Speechify\ - the project root in dev. */
 static int get_project_root(char *buf, size_t buf_n)
 {
     WCHAR docs[MAX_PATH] = {0};
@@ -776,7 +789,7 @@ static const char *sapi_asset_dir(void)
     if (!slash) return NULL;
     *slash = '\0';
     /* spfy_assets_dir() appends fe_assets_<content-digest>, the same name
-     * spfy_synth.exe uses — so when both are installed to {app} they share
+     * spfy_synth.exe uses - so when both are installed to {app} they share
      * ONE extracted copy rather than keeping two. */
     return spfy_assets_dir(self, dir, sizeof dir) == 0 ? dir : NULL;
 }
@@ -1052,7 +1065,7 @@ static HRESULT register_voice_token(HKEY base, const WCHAR *voice_name)
     write_reg_str(base, attr_path, L"Gender",   L"Male");
     write_reg_str(base, attr_path, L"Age",      L"Adult");
 
-    /* 64-bit view — only meaningful for HKEY_LOCAL_MACHINE writes (HKCU has
+    /* 64-bit view - only meaningful for HKEY_LOCAL_MACHINE writes (HKCU has
      * no separate 32/64 split). */
     if (base == HKEY_LOCAL_MACHINE) {
         write_reg_str_64(base, base_path, NULL,      display);
@@ -1067,7 +1080,7 @@ static HRESULT register_voice_token(HKEY base, const WCHAR *voice_name)
     return S_OK;
 }
 
-/* Auto-scan %USERPROFILE%\Documents\Speechify\en-US\* — for each subdir
+/* Auto-scan %USERPROFILE%\Documents\Speechify\en-US\* - for each subdir
  * that contains <name>.vin + <name>8.vdb + <name>.vcf, register a SAPI
  * voice token. */
 static HRESULT scan_and_register_voices(void)

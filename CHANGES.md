@@ -2,9 +2,25 @@
 
 ## 2026-08-22
 
+- **spfy now tells you when there is a newer engine, or a rebuilt version of a voice you already have.** It checks at most once a week, and only when you actually use the engine - there is no background service, no scheduled task and nothing running when you are not synthesizing. `spfy_synth --check-update` asks immediately; `spfy_update --status` shows what it knows; `spfy_update --disable`, `--no-update-check` or `SPFY_NO_UPDATE_CHECK=1` turn it off, as does clearing the "Check for engine and voice updates" box in the installer (which switches it off for every account on that machine).
+
+  - Voices are compared by **content**, not by a version string: the manifest carries each file's size and SHA-256, sizes are checked first and the hash only when they match, and a computed hash is cached against the file's size and mtime - so a 96 MB VDB is read once per rebuild, not once per check. That is what makes "CRS Mara and CRS Tom will keep being rebuilt" a thing the update check can actually notice.
+
+  - **The SAPI voice never checks for updates itself.** It runs in-process inside Narrator and Balabolka, so on the first `Speak` it stats one small file and, at most once per process, starts a detached helper. No network call, no hashing and no window ever happens on a screen reader's thread, and the result arrives as a tray balloon that takes no focus. Verified: rendering "The quick brown fox jumps over the lazy dog." through Tom with the check firing is byte-identical to rendering it with the check disabled, and both match the CI reference hash.
+
+- **Voices are now published as release assets**, one zip per voice plus one per language, on the rolling `voices` tag. Per voice rather than per language because a rebuilt CRS Tom is then a 107 MB download instead of the 413 MB the whole en-US bundle costs. Every zip already contains the `<lang>\<voice>\` folders, so unzipping it into `%USERPROFILE%\Documents\Speechify\` puts each file exactly where the SAPI scan looks. See [installer/updates/README.md](installer/updates/README.md).
+
+- **Paulina is downloadable again without git-lfs.** Her 264 MB VDB is over GitHub's per-file push limit, which is why `es-MX/paulina/` is not in the repo - but that limit applies to files pushed *into* a repository, not to release assets, which are not git objects. Her zip is packed on a machine that has the files and published like any other; `installer/updates/external_voices.json` (1.7 KB of hashes, committed) is what lets CI carry the entry forward without repacking her. A language bundle that would be incomplete without her is not rebuilt at all, and the publish fails outright if any manifest URL names an asset nobody uploaded.
+
+- Binaries now know what version they are. `spfy_synth --version` prints the calver CI stamped in, or `dev-<sha>` for a build made by hand - and a `dev-` build is never told about an engine release, because a working copy is by definition ahead of the newest one.
+
 - Overall engine and WASM deployment updates. Also backport the Inno installer for spfy to as far back as Windows 7. The Inno installer is the recommended way to install spfy/Speechify voices on Windows overall.
 
 - Fix build error in WASM/Windows builds due to the recent changes made last commit. Non-CI local testing can only catch so much...
+
+- CRS Tom is now available for use in both Speechify and spfy. See the note below for CRS Mara for more info.
+
+- CRS Mara has been fixed to work in both Speechify and spfy reliably and more correctly than the previous build. [See the rationale for the fix here](https://github.com/wagwan-piffting-blud/Speechify/blob/a64b342f5230ccd0724ef7713496c8103e90bea9/en-US/crsmara/README.md#L228-L256). In short, the previous build of CRS Mara was not fully compatible with the Speechify base engine due to spfy_voice_vb generating a malformed container. The new build of CRS Mara has been fixed to be fully compatible with the Speechify base engine and should work correctly in both Speechify and spfy. CRS Tom revealed this issue when it was being built, and the fix has been applied to both CRS Mara and CRS Tom. If you downloaded CRS Mara before this fix, you will need to re-download the VIN **ONLY** to get the fix. If the voice crashes in Speechify, that is why. Tom should not have this issue (nor should Mara any longer), but if either do, please report it in the repository issue tracker. Thank you!
 
 ---
 

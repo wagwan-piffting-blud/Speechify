@@ -396,10 +396,10 @@ class PhraseReport:
     slot_total: int = 0
     slot_match: int = 0
     cat_counts: dict = field(default_factory=dict)
-    # Path UID match (only meaningful when structure_match) — POSITIONAL
+    # Path UID match (only meaningful when structure_match) - POSITIONAL
     uid_total: int = 0
     uid_match: int = 0
-    # Path UID match — LCS (longest common subsequence). Equals positional
+    # Path UID match - LCS (longest common subsequence). Equals positional
     # when engine and synth path lengths match; for DIFF_PL phrases (engine
     # took anchors we didn't, or vice versa) LCS reflects engine-unit-set
     # faithfulness without being confused by anchor-span misalignment.
@@ -458,7 +458,7 @@ def compare_phrase(tid, text, synth_res, eng):
         #     Reflects "did we pick the same recordings as engine" even
         #     when anchor spans differ (e.g. engine takes a 6-HP anchor
         #     covering HPs 10-15, we take a 4-HP anchor covering HPs
-        #     12-15 — same 4 UIDs end up in both paths, just at different
+        #     12-15 - same 4 UIDs end up in both paths, just at different
         #     positions; positional says 0/6, LCS says 4/6).
         eng_path = eng["path_uids"]
         # Optional engine-coverage mask: positions where engine has no
@@ -475,7 +475,7 @@ def compare_phrase(tid, text, synth_res, eng):
             # change synth's per-utt UID count (the global path_uids list
             # then has different per-utt offsets from engine's). Engine
             # slices path_uids using utt_n_hp; synth uses phrase_n_uid
-            # (NOT phrase_n_hp — overshoot HPs from partial anchors don't
+            # (NOT phrase_n_hp - overshoot HPs from partial anchors don't
             # emit a path UID). See 2026-05-14 edge_042 alignment artifact.
             use_per_utt = (len(eng_utt_n_hp) == len(syn_phrase_n_uid)
                            and len(eng_utt_n_hp) > 0)

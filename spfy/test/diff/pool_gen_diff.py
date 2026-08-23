@@ -19,7 +19,7 @@ Inputs (existing-traces-first per D-13):
 
 Outputs:
   per-(id, slot) JSONL records to stdout, one per gap slot
-  aggregate counts to stderr — DOMINANT class is the highest count
+  aggregate counts to stderr - DOMINANT class is the highest count
 """
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def get_our_pool_per_slot(pid: str) -> dict[int, list[int]]:
     prsl_slot.uids[] is a slot where engine used a different key
     (secondary_lookup). Conversely, if chosen_uid IS in engine's pool
     BUT replay binary reports gap, the gap is OUR lookup missing the
-    cand — in_engine_pool class.
+    cand - in_engine_pool class.
     """
     return {}
 

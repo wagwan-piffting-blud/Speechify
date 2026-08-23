@@ -1,6 +1,6 @@
 'use strict';
 
-// CART feature dump — hooks SWIttsUSel.dll's CART question dispatcher
+// CART feature dump - hooks SWIttsUSel.dll's CART question dispatcher
 // (FUN_08e87c90) and logs every feature value passed in per question.
 //
 // Registers/stack layout (verified from disassembly at 0x08e87c90):

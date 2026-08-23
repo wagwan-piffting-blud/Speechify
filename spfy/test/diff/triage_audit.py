@@ -1,4 +1,4 @@
-"""Plan 02-06 Task 1 — active triage of 02-DP-AUDIT.jsonl.
+"""Plan 02-06 Task 1 - active triage of 02-DP-AUDIT.jsonl.
 
 Reconciles the existing audit JSONL against the current corpus-wide
 spfy_viterbi_replay mismatch set:
@@ -136,7 +136,7 @@ def classify(mm: dict, n_slots: int) -> tuple[str, dict]:
                 "for the same-context per-cand scoring. This is FE-side "
                 "input drift (sp_target / cart leaf / ctx tuple from FE) "
                 "feeding into bit-exact spfy_hp_innerscorer (833/833 in "
-                "02-05). Phase 3 must close FE convergence — see "
+                "02-05). Phase 3 must close FE convergence - see "
                 "ROADMAP §Phase 3 SC1/SC2/SC3.")
         })
     return ("diff_mid", {
@@ -227,7 +227,7 @@ def main() -> int:
             r["audit_change_log"] = "2026-05-09 02-06: bulk-close stale"
             closed_stale += 1
             continue
-        # Still reproduces — reclassify from the live mismatch.
+        # Still reproduces - reclassify from the live mismatch.
         live = mm_by_key[k]
         n_slots = n_slots_map.get((r["corpus_id"], r.get("utt_idx", 1)),
                                   r.get("slot_idx", 0) + 1)
@@ -316,7 +316,7 @@ def main() -> int:
     print(f"records left with status=open: {open_left}")
 
     if args.dry_run:
-        print("\n(dry run — no files written)")
+        print("\n(dry run - no files written)")
         return 0
 
     # Write the updated JSONL (atomic via .tmp + rename). Backup first.

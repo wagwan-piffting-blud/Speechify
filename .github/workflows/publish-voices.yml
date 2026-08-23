@@ -1,0 +1,203 @@
+# Pack the shipped voices and publish them as release assets, then point
+# update.json at them.
+#
+# MANUAL ONLY, deliberately. A push trigger on `en-US/**` would upload ~1.6 GB
+# every time a voice file changed in the tree, and voices change here for
+# experiments far more often than they change for users. Publishing is a
+# decision, so it is a button.
+#
+# Where things go:
+#
+#   voices   (rolling tag)  the .zip payloads. One per voice -- a rebuilt
+#                           CRS Tom is a 112 MB download, not the 433 MB the
+#                           whole en-US bundle would cost. The per-language
+#                           bundles are published alongside for first-time
+#                           installs.
+#   updates  (rolling tag)  update.json, the manifest every installed copy
+#                           polls. build-installer.yml writes the engine half
+#                           of it on every push to main; this workflow writes
+#                           the voices half. Each carries the other forward.
+#
+# Neither tag is "Latest": that badge stays on the dated engine release.
+#
+# The zips unpack as <lang>/<voice>/<files>, which is exactly the layout under
+# %USERPROFILE%\Documents\Speechify\ -- so "unzip it there and re-run
+# refresh_voices.bat" is the whole install instruction.
+#
+# ⚠ voice.json is written INTO the tree by pack_voices.py and is what an
+# installed voice reports as its version. This workflow does NOT commit that
+# back to the repo -- run the packer locally and commit the voice.json files
+# with the voice data, so the tree and the published catalog agree.
+
+name: Publish voices
+
+on:
+  workflow_dispatch:
+    inputs:
+      voices:
+        description: "Comma-separated voice ids (blank = every voice found)"
+        required: false
+        default: ""
+      version:
+        description: "Version stamped into CHANGED voices (blank = today, UTC)"
+        required: false
+        default: ""
+      bundles:
+        description: "Also publish one zip per language"
+        type: boolean
+        default: true
+      force:
+        description: "Repack even voices whose data is unchanged"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Pack and report, upload nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The voice tree is most of this repo's ~2.6 GB. Nothing here needs
+          # spfy/src, reveng/ or demos/, so take the language folders, the
+          # packer, and the one module it imports its identity rules from.
+          sparse-checkout: |
+            installer
+            spfy/wasm/tools
+            en-US
+            es-MX
+            fr-CA
+          sparse-checkout-cone-mode: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tqdm
+        run: pip install --quiet tqdm
+
+      - name: Show what is on disk
+        run: |
+          set -eu
+          df -h / | tail -1
+          for d in en-US es-MX fr-CA; do
+            [ -d "$d" ] && du -sh "$d"
+          done
+
+      # Reuse is keyed on the previous catalog, so pull the one that is live.
+      # Without it every voice repacks and every version bumps -- harmless for
+      # the checker (it compares hashes) but a lie in the manifest.
+      - name: Fetch the published catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p dist current
+          gh release download voices --repo "$GITHUB_REPOSITORY" \
+            --pattern 'voices.json' --dir dist 2>/dev/null \
+            || echo "::notice title=First publish::no voices/voices.json yet"
+          gh release download updates --repo "$GITHUB_REPOSITORY" \
+            --pattern 'update.json' --dir current 2>/dev/null \
+            || echo "::notice title=No manifest::updates/update.json not found"
+
+      # ⚠ The reuse path needs the ZIP to still be in --out, and a fresh
+      # runner has only voices.json. So a voice whose data is unchanged is
+      # repacked anyway -- correct, just not free. It keeps its old version
+      # string either way, which is the part that matters.
+      - name: Pack
+        run: |
+          set -eu
+          args=""
+          [ -n "${{ inputs.voices }}" ] && args="$args --voices ${{ inputs.voices }}"
+          [ -n "${{ inputs.version }}" ] && args="$args --version ${{ inputs.version }}"
+          [ "${{ inputs.bundles }}" = "true" ] && args="$args --bundles"
+          [ "${{ inputs.force }}" = "true" ] && args="$args --force"
+          # shellcheck disable=SC2086
+          python3 installer/updates/pack_voices.py --out dist $args
+          ls -la dist/
+          du -sh dist/
+
+      - name: Upload voice payloads
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release view voices --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create voices --repo "$GITHUB_REPOSITORY" \
+              --title "Voices" --latest=false --prerelease \
+              --notes "Voice data for spfy. Unzip into %USERPROFILE%\\Documents\\Speechify\\ (the zip already carries the <lang>\\<voice>\\ folders), then run refresh_voices.bat. One zip per voice; the <lang>-voices-*.zip bundles hold every voice of a language."
+          # Payloads first, manifest second: update.json must never point at
+          # an asset that is not there yet.
+          gh release upload voices dist/*.zip dist/voices.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Publish the update manifest
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          engine_arg=""
+          if [ -f current/update.json ]; then
+            # Carry the engine block over verbatim, notify flag included: this
+            # workflow has no idea whether the maintainer marked the last
+            # engine release quiet, and must not un-mark it.
+            engine_arg="--engine-from current/update.json"
+          else
+            v="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 20 \
+                   --json tagName,isLatest \
+                 | python3 -c 'import json,sys; r=[x["tagName"] for x in json.load(sys.stdin) if x["isLatest"]]; print(r[0] if r else "")')"
+            [ -n "$v" ] || { echo "no engine release to name"; exit 1; }
+            engine_arg="--engine-version $v"
+            echo "::notice title=Engine version::taken from the latest release, $v"
+          fi
+          # shellcheck disable=SC2086
+          python3 installer/updates/make_manifest.py \
+            --catalog dist/voices.json \
+            --repo "$GITHUB_REPOSITORY" \
+            $engine_arg \
+            -o update.json
+          cat update.json | head -40
+
+          # Before it goes live: every URL in it must be an asset that is
+          # actually attached. The catalog can carry an entry whose zip was
+          # uploaded by hand from another machine (Paulina) -- if that upload
+          # never happened, nothing above looks wrong and the first symptom is
+          # a user clicking a 404.
+          gh release view voices --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' > published.txt
+          python3 installer/updates/verify_manifest_assets.py \
+            --manifest update.json --assets published.txt --tag voices
+
+          gh release view updates --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create updates --repo "$GITHUB_REPOSITORY" \
+              --title "update manifest" --latest=false --prerelease \
+              --notes "Machine-readable manifest polled by installed copies of spfy. Not a download."
+          gh release upload updates update.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Summary
+        run: |
+          set -eu
+          {
+            echo "### Voices packed"
+            echo
+            echo "| file | size |"
+            echo "|---|---:|"
+            for f in dist/*.zip; do
+              printf '| %s | %s |\n' "$(basename "$f")" \
+                "$(du -h "$f" | cut -f1)"
+            done
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo
+              echo "**Dry run - nothing was uploaded.**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

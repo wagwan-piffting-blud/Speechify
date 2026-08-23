@@ -45,7 +45,7 @@ export default (env, argv) => {
         patterns: [
           { from: "web/styles.css", to: "styles.css" },
           // Emscripten outputs. `noErrorOnMissing` lets `npm run dev`
-          // succeed before `./build.sh` has produced the artifacts —
+          // succeed before `./build.sh` has produced the artifacts -
           // the dev server starts; the page surfaces a clear error when
           // it can't fetch spfy_wasm.js, prompting the user to build.
           // Production builds will fail loudly here (as they should).
@@ -69,12 +69,12 @@ export default (env, argv) => {
       ],
       // Force compression for the WASM artifacts. webpack-dev-server's
       // default `compress: true` uses `compression`'s filter which skips
-      // application/octet-stream (our .data, .wasm) — explicit
+      // application/octet-stream (our .data, .wasm) - explicit
       // setupMiddlewares ensures every byte that crosses the wire gets
       // gzipped before transfer.
       compress: false,
       setupMiddlewares: (middlewares, devServer) => {
-        // Force compression on every response — bypasses the default
+        // Force compression on every response - bypasses the default
         // mime-type filter that skips application/octet-stream.
         devServer.app.use(compression({ filter: () => true, threshold: 0 }));
         return middlewares;

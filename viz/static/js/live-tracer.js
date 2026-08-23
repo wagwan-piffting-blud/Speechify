@@ -1,4 +1,4 @@
-/* Live Synthesis Tracer — concatenation animation
+/* Live Synthesis Tracer - concatenation animation
  * ------------------------------------------------
  * Streams core unit-selection events from spfy_synth_trace.exe over SSE and
  * animates the physical story of concatenative synthesis:
@@ -10,11 +10,11 @@
  *      needed (closing brackets), then fly that slice down and stitch it into
  *      a growing, recording-colored output waveform.
  *
- * Two clocks: COMPUTE (C engine + SSE relay — full speed, faithful) and
- * PRESENTATION (this file — a sequential act player advanced by presentation
+ * Two clocks: COMPUTE (C engine + SSE relay - full speed, faithful) and
+ * PRESENTATION (this file - a sequential act player advanced by presentation
  * time = realTime * speed). The speed slider (0.1x .. 4x) only scales the
  * presentation clock; synthesis is never slowed. Every event is already in
- * the browser — we just reveal it slowly and beautifully.
+ * the browser - we just reveal it slowly and beautifully.
  *
  * Event stages (spfy/src/cli/spfy_synth.c): meta, phrase, slot, cand, viterbi,
  * pick, unit, done; Flask appends 'complete' with the wav_url.
@@ -65,7 +65,7 @@
         seenRec: {},               // rec_name -> has its full block been played once
         runToken: 0,               // bumped on reset; invalidates stale scheduled audio
         skip: false,               // fast-forward: reveal everything instantly, no audio
-        words: [],                 // word events {word, phones} — for output boundaries
+        words: [],                 // word events {word, phones} - for output boundaries
         counts: { slots: 0, cands: 0, picks: 0, units: 0 },
         viterbiCost: null,
         phraseIdx: 0,
@@ -80,7 +80,7 @@
     }
     const recColorL = (n) => `hsl(${recHue(n)}, 48%, 46%)`;
     const recColorD = (n) => `hsl(${recHue(n)}, 40%, 30%)`;
-    // Per-word palette — the output timeline is colored by WORD (not recording)
+    // Per-word palette - the output timeline is colored by WORD (not recording)
     // so it reads as words. Fixed hue cycle keeps adjacent words distinct;
     // starts purple → blue → green → amber …
     const WORD_HUES = [265, 210, 150, 35, 0, 320, 175, 95, 55, 235];
@@ -136,11 +136,11 @@
     function resizeStage() {
         if (!stage) return;
         // Measure the canvas's own rendered box (governed by CSS width:100%)
-        // and match the backing store to it exactly — so the drawing fills the
+        // and match the backing store to it exactly - so the drawing fills the
         // container precisely, never overshooting/clipping on the right. Width
         // is left entirely to CSS; we set only the backing resolution + height.
         const rect = stage.getBoundingClientRect();
-        if (rect.width < 2) return;   // tab hidden — wait for the ResizeObserver
+        if (rect.width < 2) return;   // tab hidden - wait for the ResizeObserver
         CW = rect.width;
         CH = STAGE_H;
         dpr = window.devicePixelRatio || 1;
@@ -263,7 +263,7 @@
             const winX1 = a ? x + 8 + ((a.data.lp + a.data.dur) / totMs) * (w - 16) : x + w - 8;
             // Dimmed full waveform.
             drawWave(w0.peaks, w0.maxAbs, x + 8, wy, w - 16, wh, PAL.waveDim);
-            // The kept slice, drawn bright — width interpolates as brackets close.
+            // The kept slice, drawn bright - width interpolates as brackets close.
             if (a) {
                 const cx0 = lerp(x + 8, winX0, trim);
                 const cx1 = lerp(x + w - 8, winX1, trim);
@@ -340,7 +340,7 @@
     // Word → output sample range, from the ENGINE's per-slice word tag: each
     // `unit` event carries `w` = the 0-based spoken-word index (aligned with the
     // `word` events), or -1 for pau/silence. Every slice locks its word at emit
-    // time, so this is exact and STABLE as slices land — no re-derivation from
+    // time, so this is exact and STABLE as slices land - no re-derivation from
     // partial state, no half-phone counting, no proportional squishing.
     function computeWordBounds() {
         if (!S.words.length || !S.outSlices.length) return [];
@@ -552,7 +552,7 @@
                 break;
             case "phrase":
                 act.start = () => { S.phraseIdx = d.idx;
-                    ticker("phrase", ` #${d.idx} — ${d.n_hp} half-phones`); };
+                    ticker("phrase", ` #${d.idx} - ${d.n_hp} half-phones`); };
                 break;
             case "slot": act.start = () => hSlot(d); break;
             case "cand": act.start = () => hCand(d); break;
@@ -704,7 +704,7 @@
         return !(S.playing && (S.queue.length || S.act || !S.streamDone)) && !S.audioPlaying;
     }
 
-    // Advance an audio-driven (walkthrough) act on the REAL clock — its phases
+    // Advance an audio-driven (walkthrough) act on the REAL clock - its phases
     // are timed to the audio, so the Speed slider doesn't apply here.
     function advanceAudioAct(act, dtReal) {
         act.ael = (act.ael || 0) + dtReal;
@@ -728,7 +728,7 @@
         if (idle()) {
             S.running = false; S.lastT = 0;
             if (S.streamDone && !S.queue.length && !S.act) {
-                setStatus(`Done — ${S.counts.units} units stitched from ${countRecs()} recordings`, "ok");
+                setStatus(`Done - ${S.counts.units} units stitched from ${countRecs()} recordings`, "ok");
                 const btn = $("live-run-btn"); btn.disabled = false; btn.textContent = "Run Live Trace";
             }
         } else {
@@ -752,7 +752,7 @@
     }
 
     // Fetch + decode a recording's full audio into an AudioBuffer (cached).
-    // Any slice is then played from this one buffer — no per-unit fetches.
+    // Any slice is then played from this one buffer - no per-unit fetches.
     function ensureAudioBuf(name) {
         if (!name || name === "?" || !S.actx) return;
         if (S.audioBuf[name] || S.audioBufLoading[name]) return;
@@ -766,7 +766,7 @@
             .finally(() => { delete S.audioBufLoading[name]; });
     }
 
-    // Prefetch decoded audio for every recording still queued / on screen —
+    // Prefetch decoded audio for every recording still queued / on screen -
     // used when the user switches audio on mid-run.
     function prefetchQueuedAudio() {
         if (!S.actx) return;
@@ -825,7 +825,7 @@
         audio.addEventListener("pause", () => { S.audioPlaying = false; });
         audio.addEventListener("ended", () => { S.audioPlaying = false; btn.textContent = "▶ Play synthesis"; });
         box.appendChild(audio); box.appendChild(btn);
-        ticker("done", ` render complete — ${S.counts.units} units, ${S.counts.cands} candidates scored`);
+        ticker("done", ` render complete - ${S.counts.units} units, ${S.counts.cands} candidates scored`);
 
         // Finale: auto-play the stitched sentence when audio is enabled (the
         // Run click already unlocked playback). Small delay so the last
@@ -857,7 +857,7 @@
         S.playing = true; S.streamDone = false; S.skip = false;
         $("live-run-btn").disabled = true; $("live-run-btn").textContent = "Streaming…";
         $("live-pause-btn").textContent = "⏸ Pause";
-        setStatus("Synthesizing — streaming events…", "run");
+        setStatus("Synthesizing - streaming events…", "run");
 
         const es = new EventSource(`/api/synth/stream?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}`);
         S.es = es;
@@ -865,7 +865,7 @@
             let obj; try { obj = JSON.parse(e.data); } catch (err) { return; }
             S.total++;
             // Prefetch source waveforms (and, if audio is on, decoded audio)
-            // the moment a recording is named — well before the paced
+            // the moment a recording is named - well before the paced
             // animation reaches it.
             if ((obj.stage === "unit" || obj.stage === "pick") && obj.data && obj.data.rec_name) {
                 ensureWave(obj.data.rec_name);
@@ -880,7 +880,7 @@
         es.onerror = () => {
             S.streamDone = true; try { es.close(); } catch (err) {} S.es = null;
             if (S.total === 0) {
-                setStatus("Stream failed — is spfy_synth_trace.exe built? (spfy/build.bat)", "err");
+                setStatus("Stream failed - is spfy_synth_trace.exe built? (spfy/build.bat)", "err");
                 $("live-run-btn").disabled = false; $("live-run-btn").textContent = "Run Live Trace";
                 S.playing = false;
             }
@@ -914,7 +914,7 @@
         if (!active) {
             // Nothing running: start a fresh trace, then fast-forward it. start()
             // sets skip=false and schedules the frame loop via rAF, which runs
-            // AFTER this returns — so setting skip here makes the first frame
+            // AFTER this returns - so setting skip here makes the first frame
             // fast-forward. Events still arrive over SSE; the loop drains each
             // batch instantly until the stream completes.
             start();
@@ -931,7 +931,7 @@
     async function probe() {
         try {
             const s = await (await fetch("/api/synth/stream/status")).json();
-            if (s.available) setStatus("Ready — spfy_synth_trace.exe found", "ok");
+            if (s.available) setStatus("Ready - spfy_synth_trace.exe found", "ok");
             else setStatus("spfy_synth_trace.exe not built. Run spfy/build.bat.", "err");
         } catch (e) { setStatus("Backend unreachable", "err"); }
     }
@@ -944,7 +944,7 @@
         window.addEventListener("resize", () => { resizeStage(); drawStage(); });
         // The tab starts hidden (display:none → clientWidth 0), so the canvas
         // can't be measured at load. A ResizeObserver re-measures and redraws
-        // the instant the tab is shown (and on any later resize) — this is what
+        // the instant the tab is shown (and on any later resize) - this is what
         // makes the stage fill the full available width instead of the 360px
         // fallback it was stuck at.
         if (window.ResizeObserver) {

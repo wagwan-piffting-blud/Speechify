@@ -20,7 +20,7 @@ void spfy_contour_defaults(spfy_contour_params_t *p)
     p->base_hz   = 0.0f;
     /* NOT the measured +5.06 st. */
     p->accent_st = 3.0f;
-    /* 0.70 — restored 2026-08-05 BY EAR, over a measurement that preferred
+    /* 0.70 - restored 2026-08-05 BY EAR, over a measurement that preferred
      * 1.0. */
     p->downstep  = 0.70f;
     /* OFF (-1). */
@@ -191,7 +191,7 @@ int spfy_contour_build(spfy_contour_t *c,
     }
 
     /* Downstep: each successive accent is a fixed fraction of the last, but
-     * floored — see spfy_contour_params_t.downstep_floor. */
+     * floored - see spfy_contour_params_t.downstep_floor. */
     for (int k = 0; k < c->n_acc; ++k) {
         double d = pow((double)p->downstep, k);
         if (d < (double)p->downstep_floor) d = (double)p->downstep_floor;

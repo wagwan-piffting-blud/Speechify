@@ -88,7 +88,7 @@ int  spfy_fe_synth_text(spfy_fe_t                  *fe,
                         spfy_fe_utterance_t       **out_utt);
 
 /* Bypass the FE DLL entirely: feed a pre-built tagged-output string (same
- * syntax the FE emits naturally — see fe_parse.h / fe_parse.c) directly
+ * syntax the FE emits naturally - see fe_parse.h / fe_parse.c) directly
  * through the parser + slot-builder. */
 int  spfy_fe_synth_tagged(spfy_fe_t                  *fe,
                           const char                 *tagged,

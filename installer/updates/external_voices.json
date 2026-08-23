@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "_comment": "Voices whose payload is published as a release asset but whose source is NOT in the repo (over GitHub's 100 MB per-file push limit). pack_voices.py merges these into the catalog when it cannot find the files, and skips rebuilding any language bundle that would be incomplete without them. Regenerate with --emit-external on a machine that has the voice; upload the zips to the voices release once. No git-lfs involved: release assets are not git objects.",
+  "voices": [
+    {
+      "id": "paulina",
+      "display": "Paulina",
+      "lang": "es-MX",
+      "version": "2026.08.22",
+      "files": [
+        {
+          "name": "paulina.vin",
+          "bytes": 45378864,
+          "sha256": "88500582f233b29a25bd28b3c8090f685e57769fd4cc318dd0a238584063035c"
+        },
+        {
+          "name": "paulina8.vdb",
+          "bytes": 264278522,
+          "sha256": "297d1ff03ddb64e12405aa0ddfb71c6a1bb8d260e7b3ee23317c0c09f21fc992"
+        },
+        {
+          "name": "paulina.vcf",
+          "bytes": 45126,
+          "sha256": "f23750ad77308d2f38e25bce58921387a7d8e2185e37e23365383756146bda91"
+        }
+      ],
+      "zip": "paulina-2026.08.22.zip",
+      "zip_bytes": 232936639,
+      "zip_sha256": "922725a22923cb31554968c85b7440817c35db8be1a6b9dcd5ec614b05953d24",
+      "notify": true
+    }
+  ],
+  "bundles": [
+    {
+      "lang": "es-MX",
+      "version": "2026.08.22",
+      "zip": "es-MX-voices-2026.08.22.zip",
+      "zip_bytes": 317858547,
+      "zip_sha256": "46e63432db82e945876b2bfe1dc7e5912ac8a4d07c4bab7faf724dc4d0dfc998",
+      "voices": [
+        "javier",
+        "paulina"
+      ]
+    }
+  ]
+}

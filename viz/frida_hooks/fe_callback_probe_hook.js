@@ -1,6 +1,6 @@
 'use strict';
 /*
- * fe_callback_probe_hook.js — capture what the FE actually asks of the
+ * fe_callback_probe_hook.js - capture what the FE actually asks of the
  * args[1] callback object during a synth.
  *
  * Background (2026-05-11):

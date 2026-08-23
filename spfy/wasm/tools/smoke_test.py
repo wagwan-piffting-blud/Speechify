@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Real-browser smoke test for the spfy WASM demo (Selenium + headless Chrome).
 
-Serves ../build/web (the production bundle — run `npm run build` first) on
+Serves ../build/web (the production bundle - run `npm run build` first) on
 127.0.0.1 with Pages-like headers (no COEP, correct wasm MIME) and drives
 headless Chrome through the lazy-voice path:
 
-    Phase 1  Tom     — default auto-load + synth                 (core runtime)
-    Phase 2  Felix   — switch to fr-CA: fresh module + fetch + synth
-    Phase 3a Paulina — in-page cross-origin fetch of her .vcf    (external CORS)
-    Phase 3b Paulina — full external load from her host + synth  (best effort; ~253 MB)
+    Phase 1  Tom     - default auto-load + synth                 (core runtime)
+    Phase 2  Felix   - switch to fr-CA: fresh module + fetch + synth
+    Phase 3a Paulina - in-page cross-origin fetch of her .vcf    (external CORS)
+    Phase 3b Paulina - full external load from her host + synth  (best effort; ~253 MB)
 
 Exit 0 only if every REQUIRED phase passes (1, 2, 3a). 3b downloads the
 whole Paulina corpus over the network and is reported but non-fatal; pass
@@ -109,7 +109,7 @@ def main():
     args = ap.parse_args()
 
     if not (WEB_DIR / "index.html").is_file():
-        print(f"FAIL: {WEB_DIR / 'index.html'} not found — run `npm run build` first.")
+        print(f"FAIL: {WEB_DIR / 'index.html'} not found - run `npm run build` first.")
         return 2
 
     socketserver.ThreadingTCPServer.allow_reuse_address = True
@@ -134,7 +134,7 @@ def main():
         drv.set_script_timeout(30)
         drv.get(base)
 
-        print("[Phase 1] Tom — default load + synth")
+        print("[Phase 1] Tom - default load + synth")
         wait_status(drv, "Ready", 90, "Tom")
         ids = [o.get_attribute("value")
                for o in drv.find_elements(By.CSS_SELECTOR, "#voice-select option")]
@@ -150,19 +150,19 @@ def main():
         print(f"    voices in picker ({len(ids)}): {ids}")
         print(f"    manifest default: {declared!r}  ·  picker selected: "
               f"{selected!r}")
-        assert declared, ("voices/manifest.json has no \"default\" — "
+        assert declared, ("voices/manifest.json has no \"default\" - "
                           "stage_voices.py must name one")
         assert selected == declared, (
             f"page opened {selected!r} but the manifest declares "
             f"{declared!r} as the default")
         assert "Tom" in status_text(drv), (
-            f"Tom not loaded — manifest default is {declared!r}; if that is "
+            f"Tom not loaded - manifest default is {declared!r}; if that is "
             f"not 'tom', change DEFAULT_VOICE_ID in stage_voices.py rather "
             f"than this assertion")
         do_synth(drv, "The quick brown fox jumps over the lazy dog.", "Tom")
         results["1_tom"] = "PASS"
 
-        print("[Phase 2] Felix — switch to fr-CA (fresh module) + synth")
+        print("[Phase 2] Felix - switch to fr-CA (fresh module) + synth")
         Select(drv.find_element(By.ID, "voice-select")).select_by_value("felix")
         wait_status(drv, "Ready", 120, "Felix")
         assert "Felix" in status_text(drv), "Felix not loaded"
@@ -170,7 +170,7 @@ def main():
         results["2_felix"] = "PASS"
 
         if not args.no_paulina:
-            print("[Phase 3a] Paulina — in-page cross-origin fetch (CORS)")
+            print("[Phase 3a] Paulina - in-page cross-origin fetch (CORS)")
             cors = drv.execute_async_script("""
                 const cb = arguments[arguments.length - 1];
                 fetch('https://wagspuzzle.space/assets/paulina/paulina.vcf')
@@ -184,7 +184,7 @@ def main():
             results["3a_paulina_cors"] = "PASS"
 
             if not args.no_paulina_full:
-                print("[Phase 3b] Paulina — full external load + synth (~253 MB)")
+                print("[Phase 3b] Paulina - full external load + synth (~253 MB)")
                 try:
                     drv.execute_script("window.confirm = () => true;")
                     Select(drv.find_element(By.ID, "voice-select")).select_by_value("paulina")

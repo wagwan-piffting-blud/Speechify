@@ -32,7 +32,7 @@ file to load from a template in the VCF.
 
 Most of this document describes Tom, because Tom is the baseline. The
 container format turns out to be *identical* across all five shipped
-voices — same chunks, same order, same XOR-0xCE, same µ-law 8 kHz VDB.
+voices - same chunks, same order, same XOR-0xCE, same µ-law 8 kHz VDB.
 What varies is inside the chunks:
 
 | Voice | Lang | `unit/vers` | stride | n_units | phones | labl order | phoneset |
@@ -47,12 +47,12 @@ Two things this table is trying to say:
 
 - **Felix and Javier use Tom's exact record format.** Their gap is the
   front end (fr-CA / es-MX phonemes), not the voice data.
-- **Jill differs by a single byte** — a `phoneInSyl` column inserted at
+- **Jill differs by a single byte** - a `phoneInSyl` column inserted at
   `+0x10` that shifts the rest of the record along by one. She is
   otherwise a Tom-shaped en-US voice with the same 46 phones, which is
   why she was the right one to support first.
 
-Per-voice cost weights live in the VCF and differ a lot — Jill weights
+Per-voice cost weights live in the VCF and differ a lot - Jill weights
 joins at 1.75 vs Tom's 0.7, stress mismatch at 0.5 vs 0.05, and
 `PHONE_IN_SYL_MISMATCH_COST` at 0.3 vs Tom's 0. Anything hardcoded to
 Tom's numbers will be quietly wrong on every other voice.

@@ -82,7 +82,7 @@ HOOK_JS = {
     "cart_walker_args": HOOK_DIR / "cart_walker_args_hook.js",  # M3.4r Phase B4.3 per-slot CART feature inputs
     # cart_walks: the original hash_lookup-class mid-loop hook is retired (kills the engine).
     # cart_walks_safe is a function-entry-only replacement that captures slot/tree/leaf_mean/leaf_var
-    # — the only fields spfy_viterbi_replay.c::parse_cart_walk_line consumes. The "questions"
+    # - the only fields spfy_viterbi_replay.c::parse_cart_walk_line consumes. The "questions"
     # array stays empty in new captures; old captures (text_001..030, spr_001..002) keep theirs.
     # We register it under BOTH keys so callers can invoke either name; output goes to whichever
     # subdir the --hook key names. For 02-06 corpus-wide capture, use --hook cart_walks so files
@@ -118,8 +118,8 @@ HOOK_JS = {
     "join_edge":         HOOK_DIR / "join_edge_hook.js",          # 2026-08-10: CHOSEN-path only on FUN_08e8b620 leave; per-edge join cost = dp_20[curr]-dp_20[prev]-pre_dp[curr]. For felix/fr_053, where targets AND pools match but the picked run differs.
     "wsola_unit_probe":  HOOK_DIR / "wsola_unit_probe_hook.js",   # 2026-05-14: WsolaUnit + sub-unit + pmark struct dump at FUN_08EE2960 entry (PSOLA port scoping)
     "userdict_lookup":   HOOK_DIR / "userdict_lookup_hook.js",    # 2026-05-20: dump (dict, key, value) at UserDict::lookup. Used to extract engine's disambigDict contents byte-exact for fe_internal POS port.
-    "probe_fe_module":   HOOK_DIR / "probe_fe_module.js",         # 2026-05-20: one-shot diag — list FE/engine module bases in target process.
-    "fe_feedconfig":     HOOK_DIR / "fe_feedconfig_hook.js",      # 2026-07-20 ESPR: dump exact string engine feeds FE via feedConfigA (TTSFrontEnd::speak) — recovers the \!SWIespr1 header + real values + escaping.
+    "probe_fe_module":   HOOK_DIR / "probe_fe_module.js",         # 2026-05-20: one-shot diag - list FE/engine module bases in target process.
+    "fe_feedconfig":     HOOK_DIR / "fe_feedconfig_hook.js",      # 2026-07-20 ESPR: dump exact string engine feeds FE via feedConfigA (TTSFrontEnd::speak) - recovers the \!SWIespr1 header + real values + escaping.
 }
 
 # ---------------------------------------------------------------------------
@@ -139,8 +139,8 @@ MASTER_CHILDREN: list[Path] = [
     HOOK_DIR / "prsl_slot_hook.js",
     HOOK_DIR / "cart_walks_safe_hook.js",
     HOOK_DIR / "inner_scorer_hook.js",
-    HOOK_DIR / "viterbi_dp_hook.js",         # 2026-05-13 evening: master2 — per-utt DP entry/leave
-    HOOK_DIR / "anchor_components_hook.js",  # 2026-05-13 evening: master2 — per-cand anchor cost sync points
+    HOOK_DIR / "viterbi_dp_hook.js",         # 2026-05-13 evening: master2 - per-utt DP entry/leave
+    HOOK_DIR / "anchor_components_hook.js",  # 2026-05-13 evening: master2 - per-cand anchor cost sync points
 ]
 HOOK_JS["master"] = MASTER_CHILDREN  # type: ignore[assignment]
 
@@ -157,7 +157,7 @@ MASTER_TYPE_TO_HOOK: dict[str, str] = {
     "cart_walk":                "cart_walks",
     "inner_scorer_batch":       "inner_scorer",
     "inner_scorer":             "inner_scorer",
-    # inner_scorer-emitted side channels — co-located in inner_scorer/
+    # inner_scorer-emitted side channels - co-located in inner_scorer/
     "flag_const":               "inner_scorer",
     "join_consts":              "inner_scorer",
     "hp_class_remap":           "inner_scorer",

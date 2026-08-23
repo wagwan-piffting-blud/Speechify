@@ -1,13 +1,13 @@
-# spfy/src/host_emu/CMakeLists.txt — portable x86 PE32 emulator
+# spfy/src/host_emu/CMakeLists.txt - portable x86 PE32 emulator
 #
 # Builds a host-agnostic interpreter that runs the unmodified 32-bit
 # SWIttsFe-en-US.dll on top of any compiler / pointer size. This is the
 # cross-platform alternative to src/host/ (which only works on x86
 # Windows). Used by:
 #
-#   - spfy/src/fe_host/  (the only FE backend)          — phase 2 wiring
-#   - spfy/wasm/                                        — phase 4 cross-build
-#   - D:/Android/Spfy/app/src/main/cpp/CMakeLists.txt   — phase 4 NDK build
+#   - spfy/src/fe_host/  (the only FE backend)          - phase 2 wiring
+#   - spfy/wasm/                                        - phase 4 cross-build
+#   - D:/Android/Spfy/app/src/main/cpp/CMakeLists.txt   - phase 4 NDK build
 #
 # Unlike src/host/, this target has NO 32-bit pointer-size gate. The
 # emulator IS the 32-bit-ness; the host build can be 64-bit.
@@ -18,7 +18,7 @@ cmake_minimum_required(VERSION 3.16)
 
 # Allow standalone configuration (build.bat in this dir) AND being
 # add_subdirectory()'d from spfy/CMakeLists.txt later. `project()` only
-# fires for the standalone case — when invoked as a subdir the parent
+# fires for the standalone case - when invoked as a subdir the parent
 # already provided one.
 if(NOT PROJECT_NAME)
     project(spfy_host_emu C)
@@ -40,7 +40,7 @@ target_include_directories(spfy_host_emu
 
 # Position-independent code: lets this static lib be folded into shared
 # libs later (libspfy.so on Android, spfy_fe.dll on Windows, the WASM
-# side-module on emscripten — all need PIC).
+# side-module on emscripten - all need PIC).
 set_target_properties(spfy_host_emu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(MSVC)
@@ -67,8 +67,8 @@ elseif(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     # noise is inherent to the job: an x86 decoder mixes uint8/16/32 and
     # signed/unsigned displacements on nearly every line, and narrows
     # between guest 32-bit words and host size_t/pointers constantly.
-    # Suppressed deliberately and target-scoped — same precedent as
-    # spfy_fe's -Wno-cast-function-type — rather than loosening the
+    # Suppressed deliberately and target-scoped - same precedent as
+    # spfy_fe's -Wno-cast-function-type - rather than loosening the
     # warning set for the whole build. Correctness here is held by the
     # byte-exact audit, not by -Wconversion.
     target_compile_options(spfy_host_emu PRIVATE
@@ -88,7 +88,7 @@ if(NOT WIN32 AND NOT EMSCRIPTEN)
     target_link_libraries(spfy_host_emu PUBLIC m)
 endif()
 
-# Phase 1 smoke-test harness — only built when requested so the
+# Phase 1 smoke-test harness - only built when requested so the
 # audit/CI build stays focused on the library.
 option(SPFY_HOST_EMU_BUILD_TESTS "Build the host_emu smoke test executable" OFF)
 if(SPFY_HOST_EMU_BUILD_TESTS)

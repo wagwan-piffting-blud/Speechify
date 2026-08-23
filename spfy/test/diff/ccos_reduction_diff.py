@@ -37,7 +37,7 @@ Method (no per-cand alignment required):
   5. Corpus-wide rollup: # phrases bit_exact_subset / partial / no_overlap.
 
 Exit 0 iff every phrase is bit_exact_subset (or has no engine ccos_apply
-records, e.g. silence-only phrases) — the D-07 gate.
+records, e.g. silence-only phrases) - the D-07 gate.
 
 Usage (PowerShell):
   python spfy/test/diff/ccos_reduction_diff.py \\
@@ -134,7 +134,7 @@ def load_spfy_components(dump_path: Path) -> dict[str, Counter]:
 
 
 def bit_key(x: float) -> int:
-    """Bit-exact key for a float — IEEE 754 binary32 view via struct."""
+    """Bit-exact key for a float - IEEE 754 binary32 view via struct."""
     import struct
     if x != x:  # NaN
         return 0x7FC00000

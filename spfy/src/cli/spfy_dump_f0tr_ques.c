@@ -1,4 +1,4 @@
-/* spfy_dump_f0tr_ques — quick diagnostic dumping the f0tr CART's question
+/* spfy_dump_f0tr_ques - quick diagnostic dumping the f0tr CART's question
  * types and value-sets. */
 #include "../../include/spfy/spfy.h"
 #include "../cart/cart.h"

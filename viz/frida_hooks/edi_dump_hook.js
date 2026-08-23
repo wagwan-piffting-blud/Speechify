@@ -1,6 +1,6 @@
 'use strict';
 
-// EDI/AX prosody-table dump — hooks the USel scorer (FUN_08e88de0) and
+// EDI/AX prosody-table dump - hooks the USel scorer (FUN_08e88de0) and
 // dumps the per-halfphone prosody table (EDI) and the voice LUT (AX)
 // that supply CART question values.
 //
@@ -74,7 +74,7 @@ Interceptor.attach(ADDR_SCORER, {
                 if (ax && !axBase) {
                     axBase = ax.toString(16);
                 }
-                // Feature indices into AX — should be constant per scorer
+                // Feature indices into AX - should be constant per scorer
                 var i8  = safeU32(esi, 0x8);
                 var ic  = safeU32(esi, 0xc);
                 var i10 = safeU32(esi, 0x10);
@@ -83,7 +83,7 @@ Interceptor.attach(ADDR_SCORER, {
                 }
                 // Actually the AX lookups are per-CANDIDATE not per-target.
                 // Let's still capture target-level: EAX base pointer
-                // derivations. These are less critical — what we care about
+                // derivations. These are less critical - what we care about
                 // is the phone_left/phone_right TARGET value which should
                 // also come from EDI or a related target-side array.
                 edi_vals['ax_base'] = ax ? ax.toString(16) : null;

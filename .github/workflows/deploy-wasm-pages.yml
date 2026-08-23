@@ -9,9 +9,9 @@
 #
 # Triggers:
 #   * push to main, filtered to paths that actually affect the wasm
-#     build — the build is expensive (~5-10 min cold) so we skip it
+#     build - the build is expensive (~5-10 min cold) so we skip it
 #     when only unrelated files changed.
-#   * workflow_dispatch — manual rebuild / first-time setup.
+#   * workflow_dispatch - manual rebuild / first-time setup.
 #
 # Repository setup (one-time, in the GitHub UI):
 #   Settings → Pages → Build and deployment → Source: "GitHub Actions"
@@ -22,7 +22,7 @@
 #
 # Notes on size: the module is ~14 MB (code + the three small SWIttsFe
 # DLLs). Voice corpora ship as separate objects under voices/ and are
-# fetched on demand — a visitor only downloads the voice(s) they pick, and
+# fetched on demand - a visitor only downloads the voice(s) they pick, and
 # the browser HTTP cache makes repeat loads free. Pages does not
 # content-encode .wasm / .vdb, so those ship uncompressed; that is
 # inherent to the (already-compact) audio data.
@@ -52,7 +52,7 @@ permissions:
   id-token: write
 
 # One in-flight deploy per ref. We do NOT cancel-in-progress because
-# Pages deployments are atomic — letting a build finish + publish is
+# Pages deployments are atomic - letting a build finish + publish is
 # safer than cancelling mid-deploy and risking a partial state.
 concurrency:
   group: "pages-${{ github.ref }}"
@@ -60,7 +60,7 @@ concurrency:
 
 jobs:
   # --------------------------------------------------------------------
-  # build — emscripten + webpack. Produces build/web/ ready to ship.
+  # build - emscripten + webpack. Produces build/web/ ready to ship.
   # --------------------------------------------------------------------
 
   build:
@@ -93,11 +93,11 @@ jobs:
 
       # Compile C → wasm. Emits spfy/wasm/dist/spfy_wasm.{js,wasm} and
       # stages the lazy voice assets + manifest under dist/voices/ (only
-      # the voices whose files are present in the checkout — the gitignored
+      # the voices whose files are present in the checkout - the gitignored
       # large voices like Paulina are simply omitted from the manifest).
       - name: Build WASM module
         working-directory: spfy/wasm
-        # Invoke via `bash` rather than `./build.sh` — the script may
+        # Invoke via `bash` rather than `./build.sh` - the script may
         # not carry an executable bit through a Windows git checkout.
         run: bash build.sh
 
@@ -116,7 +116,7 @@ jobs:
       - name: List bundle contents
         run: ls -lh spfy/wasm/build/web/
 
-      # Real-browser smoke test — the deploy gate. Drives headless Chrome
+      # Real-browser smoke test - the deploy gate. Drives headless Chrome
       # (pre-installed on ubuntu-latest; Selenium Manager auto-provisions
       # the matching chromedriver) through the built bundle: loads Tom,
       # switches to Felix (fresh module + a real network fetch), and
@@ -143,7 +143,7 @@ jobs:
           path: spfy/wasm/build/web
 
   # --------------------------------------------------------------------
-  # deploy — publish the artifact to the github-pages environment.
+  # deploy - publish the artifact to the github-pages environment.
   # --------------------------------------------------------------------
 
   deploy:

@@ -64,7 +64,7 @@ def main():
         elif section in ("uninstalldelete", "installdelete"):
             checked += 1
             problems.append(
-                f"  line {n}: [{section}] names a user-area path — this is "
+                f"  line {n}: [{section}] names a user-area path - this is "
                 f"how a working tree gets deleted\n      {line.strip()[:96]}")
         elif section == "dirs":
             flags = re.search(r"Flags:\s*([^;]+)", line, re.I)
@@ -79,9 +79,9 @@ def main():
     if problems:
         print("\nUNSAFE:")
         print("\n".join(problems))
-        print("\nFAIL — the installer can damage a user's working tree.")
+        print("\nFAIL - the installer can damage a user's working tree.")
         return 1
-    print("PASS — every user-area entry is install-only and never removed.")
+    print("PASS - every user-area entry is install-only and never removed.")
     return 0
 
 

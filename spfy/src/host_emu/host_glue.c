@@ -1,4 +1,4 @@
-/* spfy/src/host_emu/host_glue.c — universal host-side helpers needed by
+/* spfy/src/host_emu/host_glue.c - universal host-side helpers needed by
  * cpu.c / loader.c / win32_donor.c. */
 
 #include "emu.h"

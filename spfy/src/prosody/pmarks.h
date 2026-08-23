@@ -1,4 +1,4 @@
-/* Pitch-mark store — reads the engine's own pmindex/pmdata pair. */
+/* Pitch-mark store - reads the engine's own pmindex/pmdata pair. */
 
 #ifndef SPFY_PROSODY_PMARKS_H
 #define SPFY_PROSODY_PMARKS_H

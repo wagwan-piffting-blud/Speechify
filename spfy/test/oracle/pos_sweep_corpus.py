@@ -43,7 +43,7 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=0,
                    help="Only emit first N words (0 = all)")
     p.add_argument("--shard", default="",
-                   help="k/N — emit only shard k of N (0-indexed)")
+                   help="k/N - emit only shard k of N (0-indexed)")
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH,
                    help=f"words per synth call (default {DEFAULT_BATCH})")
     args = p.parse_args()

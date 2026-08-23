@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-batch_synth.py — Generate a training corpus by synthesizing diverse sentences
+batch_synth.py - Generate a training corpus by synthesizing diverse sentences
 through the Speechify engine. Used for Experiment F (train on engine output).
 
 Usage:
@@ -14,7 +14,7 @@ import subprocess
 import sys
 import glob
 
-# Diverse sentence corpus — weather, news, dates, numbers, conversational,
+# Diverse sentence corpus - weather, news, dates, numbers, conversational,
 # names, addresses, phonetically varied content
 DEFAULT_SENTENCES = [
     # Weather forecasts (Mara's primary domain)

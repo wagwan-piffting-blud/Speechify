@@ -1,4 +1,4 @@
-/* spfy_fe_text2tagged — dump the in-house FE's tagged-text output for
+/* spfy_fe_text2tagged - dump the in-house FE's tagged-text output for
  * arbitrary input text. */
 
 #include "fe_internal.h"

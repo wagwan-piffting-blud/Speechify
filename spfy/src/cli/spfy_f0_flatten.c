@@ -1,4 +1,4 @@
-/* spfy_f0_flatten — standalone A/B tester for the TD-PSOLA F0 retarget. */
+/* spfy_f0_flatten - standalone A/B tester for the TD-PSOLA F0 retarget. */
 
 #include "pitch_shift.h"
 

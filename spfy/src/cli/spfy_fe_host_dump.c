@@ -1,4 +1,4 @@
-/* spfy_fe_host_dump.c — exercise the hosted FE via the public spfy_fe.h
+/* spfy_fe_host_dump.c - exercise the hosted FE via the public spfy_fe.h
  * API, fill ctx[5]/sp[5]/is_voiced via the loaded voice's phoneset, and
  * dump the slot table. */
 

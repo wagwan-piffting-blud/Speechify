@@ -79,6 +79,14 @@ int spfy_hash_lookup(const spfy_hash_t *h,
     /* NB: rows[r] == 0 is NOT necessarily a miss. */
     uint32_t row_offset = spfy_hash_row(h, uid_right);
     uint64_t idx = (uint64_t)row_offset + uid_left;
+    /* ⚠ THE VENDOR HAS NO SUCH LINE. SWIttsUSel.dll+0xb7e6 loads
+     * cells[idx] and only then compares the key, so on a container whose
+     * table is too narrow it reads off the end and the process dies. Keeping
+     * the guard here is right -- a miss is a miss -- but it means THIS ENGINE
+     * CANNOT DETECT A NARROW TABLE. The invariant lives in the container:
+     * n_cells >= max(rows[]) + n_rows, built by hash_build.c and gated by
+     * spfy_vb_verify. See reveng/README_TECHNICAL.md, "the `hash` cell array
+     * has no bounds check". */
     if (idx >= h->n_cells) return SPFY_E_OOB;
 
     /* Verification key: cells_A[index] must equal uid_right (CORRECTED

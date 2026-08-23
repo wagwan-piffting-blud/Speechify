@@ -27,7 +27,7 @@ float spfy_cost_s(const float   *ccos,
         uint32_t ti = L[t_phone];
         if (ti >= n_labels) continue;
 
-        /* CAND byte: engine uses MOVSX (signed sign-extend) — confirmed
+        /* CAND byte: engine uses MOVSX (signed sign-extend) - confirmed
          * via disasm at 0x08e891a8/0x08e891ad/0x08e891c1/0x08e891ca for
          * voice+0xc0 path, and 0x08e891e4/0x08e891ec/0x08e8920a/0x08e89215
          * for voice+0xc4 path. So 0xff is read as -1, NOT 255. With

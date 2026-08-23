@@ -11,6 +11,12 @@
  *   key[idx] must equal uid_right, else miss
  *   empty cells are (key = 0xFFFFFFFF, cost = -1.0f)
  *
+ * ⛔ n_cells IS NOT "the last populated cell". The vendor engine probes that
+ * index with no bounds check (SWIttsUSel.dll+0xb7e6), so the table must be at
+ * least max(rows[]) + n_rows cells wide or a MISS reads off the end of the
+ * allocation and Speechify access-violates. spfy_hash_build pads to that;
+ * spfy_vb_verify checks it.
+ *
  * Placement is first-fit row displacement over an occupancy BITMAP, probing 64
  * candidate displacements at a time: the 64 occupancy bits starting anywhere in
  * the table are one unaligned 64-bit read, so a zero bit in the OR taken over a
@@ -45,8 +51,8 @@
  * an open question, and it is the only thing standing between a semantically
  * correct rebuild and a byte-identical one. */
 typedef enum {
-    SPFY_HASH_ORDER_FFD = 0,   /* largest row first — best density */
-    SPFY_HASH_ORDER_ROW = 1    /* ascending uid_right — simplest possible */
+    SPFY_HASH_ORDER_FFD = 0,   /* largest row first - best density */
+    SPFY_HASH_ORDER_ROW = 1    /* ascending uid_right - simplest possible */
 } spfy_hash_order;
 
 typedef struct {

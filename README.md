@@ -96,16 +96,22 @@ spfy_dumpwav.exe --g2p "Pottawattamie"
 
 Outputs both ARPAbet and SPR representations.
 
-### Phoneme Format Conversion
+### Offline operations (no server, no socket, no `SWItts.dll`)
 
-Convert between Balabolka/Balcon phoneme format and SPR format (no server needed):
+Four flags are pure text transforms and run before the client touches anything. They work with Speechify stopped:
 
 ```sh
 spfy_dumpwav.exe --bal2spr "p aa 1 t ax w aa t uw m iy"
 spfy_dumpwav.exe --spr2bal ".1pa.0tx.0wa.0tu.0mi"
+spfy_dumpwav.exe --expand 'Take cover <break time="0.5s"/> now.'
+spfy_dumpwav.exe --help
 ```
 
 Balabolka format uses space-separated ARPAbet codes with stress markers after vowels. SPR format uses single-character symbols with syllable/stress markers.
+
+`--expand` prints the `\!` codes a text lowers to, through the same expander synthesis uses - the way to see why a `<pron>`, `<prosody>` or `<say-as>` did not come out as expected, without a server and without waiting for audio. It accepts `-f FILE`.
+
+⚠ `--g2p` is **not** offline. The grapheme-to-phoneme tables live in the server's front end, so it needs Speechify running.
 
 ### SPR Symbol Reference
 
@@ -124,10 +130,12 @@ Balabolka format uses space-separated ARPAbet codes with stress markers after vo
 | `--phonemes` | Write `.phn` phoneme timing file alongside WAV |
 | `--pron "..."` | Synthesize from SPR phoneme string (no text needed) |
 | `--g2p` | Print phoneme sequence for text (no audio output) |
-| `--bal2spr "..."` | Convert Balabolka phonemes to SPR format |
-| `--spr2bal "..."` | Convert SPR phonemes to Balabolka format |
 | `--16k` | Use 16kHz output (default: 8kHz) |
 | `--rawdump` | Dump raw callback bytes to stderr (diagnostic) |
+| `--bal2spr "..."` | Convert Balabolka phonemes to SPR format - **offline** |
+| `--spr2bal "..."` | Convert SPR phonemes to Balabolka format - **offline** |
+| `--expand "..."` | Print the `\!` codes a text expands to - **offline**, accepts `-f FILE` |
+| `--help`, `-h` | Usage and the SPR symbol table - **offline** |
 
 ### Speed Fix (patch_speed.py)
 

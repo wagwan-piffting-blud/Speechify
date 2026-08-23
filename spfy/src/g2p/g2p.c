@@ -1,4 +1,4 @@
-/* g2p.c — multi-stage word→phoneme lookup. */
+/* g2p.c - multi-stage word→phoneme lookup. */
 
 #include "g2p.h"
 #include "cmudict_data.h"
@@ -162,7 +162,7 @@ static void append_ed_suffix(const char *last_ph, char *out, size_t out_n)
     else                                     append_phonemes(out, out_n, "D");
 }
 
-/* Suffix table — order matters: try LONGER suffixes first so "-ness" beats
+/* Suffix table - order matters: try LONGER suffixes first so "-ness" beats
  * "-s". */
 typedef struct {
     const char *suffix;
@@ -222,7 +222,7 @@ static int try_suffix_strip(const char *word, char *out, size_t out_n)
 }
 
 
-/* The LTS step is intentionally simple — better than silence on truly
+/* The LTS step is intentionally simple - better than silence on truly
  * unknown words like "zyzzyva", but it's not going to win any quality
  * awards. */
 typedef struct {
@@ -267,7 +267,7 @@ static const lts_rule_t g_lts_rules[] = {
     { "i",    "IH1" },
     { "o",    "AA1" },
     { "u",    "AH1" },
-    { "y",    "IY1" },          /* "y" as vowel — final position; we don't distinguish "y" as consonant
+    { "y",    "IY1" },          /* "y" as vowel - final position; we don't distinguish "y" as consonant
  * here, dropping to AY1 would also be defensible */
     { "b",    "B"  }, { "c",    "K"  }, { "d",    "D"  },
     { "f",    "F"  }, { "g",    "G"  }, { "h",    "HH" },
@@ -362,7 +362,7 @@ int spfy_g2p_word_lookup(const char *word, char *out, size_t out_n)
     if (!word || !out || out_n == 0) return -2;
     out[0] = '\0';
 
-    /* Legacy path — dict-only; preserves the original "-1 on miss" contract
+    /* Legacy path - dict-only; preserves the original "-1 on miss" contract
      * callers that pre-date stage 2/3 relied on. */
     const char *hit = dict_lookup(word);
     if (!hit) return -1;

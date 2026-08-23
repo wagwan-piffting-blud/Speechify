@@ -4,7 +4,7 @@ inserts ## Summary / ## Corpus-wide acceptance / ## Open-record triage
 / ## Engine-faithful constants run / ## D-19 closing audit sections
 immediately before the existing ## last-slot anchor. Existing
 per-class sections (## last-slot, ## diff_neg_big, etc.) are
-preserved verbatim — they hold prior-plan analysis that the JSONL
+preserved verbatim - they hold prior-plan analysis that the JSONL
 records cross-link to via fix_ref / phase3_route.
 
 Idempotent: if the Summary section already exists, replace it.
@@ -95,7 +95,7 @@ def build_corpus_table() -> str:
         "30-phrase sanity, plan 02-05 D-17 closure) |\n"
         "| pool_gen_diff missing UIDs | 28 (seed-30) | "
         f"{0 if pct == 100.0 else 'see triage'} (plan 02-03 closed 22; "
-        "remaining 6 reclassified at 02-06 — most are no longer "
+        "remaining 6 reclassified at 02-06 - most are no longer "
         "pool_gen, see Open-record triage) |\n"
         "| audit_focused.py per-slot full-match | 85.0% | not re-run for "
         "02-06 (instrument unchanged; baseline preserved) |\n"
@@ -115,7 +115,7 @@ def build_open_triage(records: list[dict]) -> str:
         "Plan 02-06 Task 1 reconciled the 84 status=open records inherited "
         "from plans 02-02 / 02-03 / 02-04 / 02-05 against a fresh "
         "corpus-wide spfy_viterbi_replay run over 227 phrases (the 7 "
-        "single-phoneme spr/edge entries produce no slots — they are "
+        "single-phoneme spr/edge entries produce no slots - they are "
         "outside Phase 2's UID-match scope and are covered by Phase 6's "
         "WAV byte-exact gate).")
     lines.append("")
@@ -203,7 +203,7 @@ def build_engine_faithful() -> str:
         "reduction landed and restored the engine-faithful constants "
         "without regression. The remaining 18.75 pp gap is documented "
         "per the Open-record triage above and is FE-side / engine-"
-        "internal — NOT closable in Phase 2 by knob tuning."
+        "internal - NOT closable in Phase 2 by knob tuning."
     )
 
 
@@ -222,7 +222,7 @@ def build_d19() -> str:
         "| `compare_dag.py` UID match (full pipeline) | 59.3% | preserved "
         "(Phase 3 instrument; no full-pipeline change in 02-06) |\n\n"
         "Per ROADMAP §Phase 2 SC5: no change to `spfy/src/usel/cost_*.c` "
-        "or `viterbi.c` landed in 02-06 — this plan ships only "
+        "or `viterbi.c` landed in 02-06 - this plan ships only "
         "post-mortem finalisation, the per-phrase JSONL emit in "
         "`spfy_viterbi_replay.c` (informational, no scoring change), and "
         "the `cart_walks_safe` Frida hook (data-capture only, no engine "

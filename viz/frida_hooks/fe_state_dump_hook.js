@@ -1,6 +1,6 @@
 'use strict';
 /*
- * fe_state_dump_hook.js — capture FE state + setPair args at multiple
+ * fe_state_dump_hook.js - capture FE state + setPair args at multiple
  * points in the call sequence to identify what data the engine
  * consumes during init that flips verbose output.
  *
@@ -65,7 +65,7 @@ var setpair_seen = {};
                 if (setpair_seen[s.name]) return;
                 setpair_seen[s.name] = 1;
                 var esp = this.context.esp;
-                /* __stdcall(this, arg0, arg1) — args at esp+4, +8, +c */
+                /* __stdcall(this, arg0, arg1) - args at esp+4, +8, +c */
                 try {
                     var arg0 = ptr(esp.add(0x4).readU32());
                     var arg1 = ptr(esp.add(0x8).readU32());

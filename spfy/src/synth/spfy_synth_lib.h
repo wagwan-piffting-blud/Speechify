@@ -116,7 +116,7 @@ void spfy_synth_split_pitch(float target_st,
                             float *out_selection_st,
                             float *out_psola_st);
 
-/* Per-call synth stats — filled by do_synth/spfy_synth_to_sink. */
+/* Per-call synth stats - filled by do_synth/spfy_synth_to_sink. */
 typedef struct {
     size_t   total_played;
     size_t   total_skipped;

@@ -4,14 +4,14 @@ Word-level binary search over the input phrase: synthesise prefixes of length
 ``words[:k]`` and apply a pluggable failure predicate (``--mode``) to find
 the smallest ``k`` for which synthesis diverges from the oracle.  Once the
 minimal failing prefix is found, ``first_diff_byte`` (from ``wav_diff.py``)
-provides a sample-index fallback inside that prefix's WAV — i.e. the hybrid
+provides a sample-index fallback inside that prefix's WAV - i.e. the hybrid
 "word-then-sample" bisection of D-09.
 
 Pluggable predicates (D-10):
 
-* ``--mode=wav``    — byte-exact comparison vs ``oracle-wav-dir`` prefix WAV.
-* ``--mode=stage``  — delegates to ``stage_compare_first.first_divergence``.
-* ``--mode=uid``    — **D-16 Phase-1 stub**.  Wires the predicate plumbing
+* ``--mode=wav``    - byte-exact comparison vs ``oracle-wav-dir`` prefix WAV.
+* ``--mode=stage``  - delegates to ``stage_compare_first.first_divergence``.
+* ``--mode=uid``    - **D-16 Phase-1 stub**.  Wires the predicate plumbing
   and surfaces a stderr warning (WARNING-03), but full UID-path comparison
   via ``spfy_viterbi_replay.exe`` is deferred to Phase 6.  In Phase 1 the
   predicate treats a missing oracle ``prsl_slot`` trace OR synth failure as
@@ -31,7 +31,7 @@ for all phrases.  The Speechify FE injects intonation breaks based on the
 clause changes the intonation contour over the kept prefix, so a prefix
 that "works" alone may still mask an upstream causal divergence).  The
 bisection therefore finds *A* shortest failing prefix, not necessarily
-*THE* causal word — interpret results accordingly.
+*THE* causal word - interpret results accordingly.
 
 PRECONDITION: ``--binary <path>`` resolves to an executable accepting either
 ``<text> <out.wav>`` (text mode) or ``--pron <text> <out.wav>`` (SPR mode).
@@ -64,7 +64,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Re-use byte-diff helpers — never duplicate them here.
+# Re-use byte-diff helpers - never duplicate them here.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from wav_diff import file_sha256, first_diff_byte, rms_error_s16  # noqa: E402,F401
 
@@ -152,7 +152,7 @@ def predicate_uid(
 
     True iff ``prefix`` synth fails OR the oracle ``prsl_slot`` trace is
     missing.  Full UID-path comparison via ``spfy_viterbi_replay.exe`` is
-    deferred to Phase 6 — see CONTEXT.md D-16.
+    deferred to Phase 6 - see CONTEXT.md D-16.
 
     Invariant: a one-shot stderr warning ('# WARNING: phase-1 stub') is
     printed on first invocation per run to surface the deferral
@@ -180,7 +180,7 @@ def predicate_uid(
     oracle_path = oracle_dir / "prsl_slot" / f"{corpus_id}.jsonl"
     if not oracle_path.exists():
         print(
-            f"  [warn] no oracle prsl_slot trace at {oracle_path} — "
+            f"  [warn] no oracle prsl_slot trace at {oracle_path} - "
             f"treating as divergence",
             file=sys.stderr,
         )
@@ -205,7 +205,7 @@ def predicate_stage(
     divergence for ``corpus_id``.
 
     Note: ``predicate_stage`` does not currently re-run native traces per
-    prefix — it relies on whatever traces already exist under
+    prefix - it relies on whatever traces already exist under
     ``native_dir``.  Phase 6 will couple this with a per-prefix native
     capture; in Phase 1 it functions as a one-shot label, not a true
     per-prefix bisection signal.  Synth is still invoked once so the
@@ -238,7 +238,7 @@ def bisect_word_prefix(words: list[str], pred) -> int:
     Edge cases:
       * Empty ``words``: returns 1 (no prefix exists; convention "no prefix
         diverges" => ``len(words) + 1`` would equal 1 here, so the result is
-        also 1 — empty input is degenerate).
+        also 1 - empty input is degenerate).
       * First word already diverges: returns 1.
       * No prefix diverges: returns ``len(words) + 1``.
     """
@@ -302,7 +302,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("c:/tmp/spfy_build/src/cli/spfy_synth.exe"),
         help="synth executable (D-11). Default: standalone spfy_synth.exe "
              "(no engine server). Use bin/spfy_dumpwav.exe to drive the "
-             "engine instead — REQUIRES Speechify.exe running.",
+             "engine instead - REQUIRES Speechify.exe running.",
     )
     ap.add_argument(
         "--corpus",

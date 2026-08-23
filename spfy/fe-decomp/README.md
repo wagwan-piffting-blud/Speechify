@@ -7,12 +7,12 @@ instruction.
 
 ## Artifacts (CWD)
 
-- `analysis.db` — SQLite (~18 MB). 2,176 functions with decompilation, 438
+- `analysis.db` - SQLite (~18 MB). 2,176 functions with decompilation, 438
   strings, 110k caller edges, 22k callee edges, 3.6k string refs.
-- `reports/summary.md` — triage summary.
-- `reports/tier3/*.md` — 38 per-function briefs (only seed-term matches; see
+- `reports/summary.md` - triage summary.
+- `reports/tier3/*.md` - 38 per-function briefs (only seed-term matches; see
   caveat below).
-- `tts_triage.py` — query CLI. Useful: `show <db> <addr>`, `grep <db> <term>`,
+- `tts_triage.py` - query CLI. Useful: `show <db> <addr>`, `grep <db> <term>`,
   `stats <db>`.
 
 ## Schema
@@ -33,23 +33,23 @@ Addresses: lowercase hex, no `0x` prefix.
 
 - Embedded **IBM KlattID v4.0 (1996/97)** formant synth at 0838xxxx–0838axxx.
   Main loop FUN_0838a410 (7291 bytes). 317-byte default param struct at
-  `&DAT_084ad798` — likely the eciTSParam-style table for Klatt.
+  `&DAT_084ad798` - likely the eciTSParam-style table for Klatt.
 - **DictionarySet / UserDict C++ class hierarchy.** All 19 method names leak
-  via `"Entering ClassName::method\n"` debug strings — see tier3 briefs.
+  via `"Entering ClassName::method\n"` debug strings - see tier3 briefs.
 - **Voice constructor at FUN_0836dba0** builds an `audio_state` at
   `voice+0x64` containing the literal `"audio.cdv"` filename and the 317-byte
   Klatt param struct copied in. Single caller, near 08373378.
 - **Two-tier A/B declination prosody** (ADeclnScale/Level + BDeclnScale/Level)
-  + ToBI tones (bound_tone/phr_tone/nuc_tone) — strings present, but the
+  + ToBI tones (bound_tone/phr_tone/nuc_tone) - strings present, but the
   **consumers are NOT in tier3** (triage seed terms didn't include prosody
   vocab). See unblock path below.
 - **Internal "Delta" subsystem** at FUN_0837f380 / 0837f580 / 0837fcc0 /
-  08380160 — strings include `DELTIO`, `"\ndelta insert [..."`, `delta project`.
+  08380160 - strings include `DELTIO`, `"\ndelta insert [..."`, `delta project`.
   Whether this interprets `enu.ddl` is unverified.
 
 ## Unblocking 03-05 (intonation analyzer)
 
-The triage missed it — seed list didn't include intonation/declination
+The triage missed it - seed list didn't include intonation/declination
 vocabulary. Direct query:
 
 ```sql
@@ -84,7 +84,7 @@ candidates):
 Cross-check candidates against `state_writes_full.csv` for writes to the
 prosody offsets (`0x86b`/`0x86f`/`0x873`/`0x883`/`0x887`) to filter.
 
-If no single function emerges, expect the analyzer to be split — common in
+If no single function emerges, expect the analyzer to be split - common in
 this engine (the dictionary subsystem is fragmented across 19 functions).
 Build the local call-graph cluster around the strongest string-ref hit and
 look for a coherent set of co-callers.

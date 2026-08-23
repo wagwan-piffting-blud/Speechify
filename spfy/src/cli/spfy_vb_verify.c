@@ -5,8 +5,10 @@
  * the next session chasing a defect that never existed. `--expect-clean` makes
  * that explicit in scripts.
  *
- * `hash` is deliberately NOT checked here -- spfy_hash_roundtrip is its gate,
- * and its DOMAIN is an open question rather than a correctness one.
+ * `hash` CONTENTS are deliberately NOT checked here -- spfy_hash_roundtrip is
+ * their gate, and the DOMAIN is an open question rather than a correctness
+ * one. Its OCCUPANCY is checked: a hash table that does not cover this voice's
+ * units is a build failure, not a modelling choice. See the block by `cnts`.
  *
  *   spfy_vb_verify --vin V --vdb D [--src-dir DIR] [--expect-clean]
  */
@@ -363,6 +365,116 @@ int main(int argc, char **argv)
     if (cn && cn->n >= 12)
         ck(rd_u32(cn->data + 8) == ut.n_units, "cnts unit count",
            "%u vs %u", rd_u32(cn->data + 8), ut.n_units);
+
+    /* ---------------- hash: POPULATED, not correct ----------------
+     *
+     * The header above says `hash` is deliberately unchecked, and that still
+     * holds for its CONTENTS -- which joins it prices is spfy_hash_roundtrip's
+     * business and an open question besides. This asks only whether the table
+     * describes THIS voice at all.
+     *
+     * ⛔ THE DEFECT THIS CATCHES, MEASURED 2026-08-22. `--template-vin` seeds
+     * the VIN with the template's chunks, and S4 is what replaces `hash` with
+     * one built from our own units. When S4 died silently -- it does, past
+     * ~2.5M units, if it runs in the same process as S1-S3 -- the build kept
+     * VENDOR TOM'S hash chunk verbatim (22,100,640 bytes, byte-identical) and
+     * exited 0. All 45 checks here passed. A voice carrying another voice's
+     * join costs is not obviously broken: it is structurally perfect and
+     * prices joins between units that do not exist in it.
+     *
+     * `head` carries (rows, cells). Our builder emits one row per unit; the
+     * vendors emit several, indexing by right-context. So rows >= units holds
+     * for every good voice and is not a fitted threshold -- rows < units means
+     * some units have no join row at all, which is the defect exactly:
+     *
+     *     vendor tom  169,579 units   692,190 rows   4.08
+     *     vendor jill 185,475 units   560,534 rows   3.02
+     *     crsmara     230,514 units   230,514 rows   1.00
+     *     crstom_F  2,257,540 units 2,257,540 rows   1.00
+     *     BROKEN    2,577,400 units   692,190 rows   0.27   <- tom's table
+     */
+    const spfy_vb_chunk *ch_hash = spfy_vb_riff_get(&rvin, "hash");
+    if (ch_hash && ch_hash->n >= 16
+        && memcmp(ch_hash->data, "head", 4) == 0) {
+        uint32_t rows = rd_u32(ch_hash->data + 8);
+        uint32_t cells = rd_u32(ch_hash->data + 12);
+        double per = ut.n_units ? (double)ch_hash->n / ut.n_units : 0.0;
+        /* The detail string prints on PASS as well as FAIL, so it stays
+         * factual; the diagnosis goes below, only when it is one. */
+        ck(rows >= ut.n_units, "hash rows cover every unit",
+           "%u rows for %u units (%.2f per unit)", rows, ut.n_units,
+           ut.n_units ? (double)rows / ut.n_units : 0.0);
+        printf("        hash %zu B, %u rows, %u cells, %.1f B/unit\n",
+               ch_hash->n, rows, cells, per);
+        if (rows < ut.n_units)
+            printf("        ⛔ this hash table does not describe this voice. "
+                   "Either S4 never ran, or the --template-vin's hash chunk "
+                   "survived the build. Re-run with --s4-only.\n");
+
+        /* ⛔ THE PROBE IS UNBOUNDED IN THE VENDOR ENGINE, SO THE TAIL IS
+         * LOAD-BEARING. SWIttsUSel.dll+0xb7e6 is
+         *
+         *     cmp [cells + (rows[uid_right] + uid_left)*8], uid_right
+         *
+         * with no test against n_cells in front of it -- the key comparison
+         * IS the miss test, and it happens AFTER the read. Our hash.c guards
+         * the index (`if (idx >= n_cells) return SPFY_E_OOB`), so a table
+         * sized to its last POPULATED cell renders perfectly in spfy_synth
+         * and access-violates in Speechify on the first phrase that pairs the
+         * widest row with a high uid_left.
+         *
+         * The rule is not a margin, it is an identity. Every vendor voice
+         * carries n_cells == max(rows[]) + n_rows to the cell:
+         *
+         *     tom      max(rows) 1,724,291 + n_rows 692,190 = 2,416,481  +0
+         *     jill               2,059,585 +        560,534 = 2,620,119  +0
+         *     javier             1,638,488 +        668,348 = 2,306,836  +0
+         *     paulina            1,367,589 +        663,410 = 2,030,999  +0
+         *     felix              2,906,700 +        737,394 = 3,644,094  +0
+         *
+         * Ours shipped SHORT of it -- crstom by 5,602 cells, crsmara by
+         * 6,506. crstom died on "attention signal." (rows[222144] 4,449,427 +
+         * uid_left 278,391 = 4,727,818 against 4,724,617 cells, reading
+         * 25,616 bytes past a 37,797,888-byte allocation); crsmara had the
+         * same defect and had simply not been asked yet.
+         *
+         * Test against n_rows, not the unit count: uid_left is a unit id so
+         * n_units would be sufficient, but n_rows is what the vendor used and
+         * n_rows >= n_units always. */
+        const uint8_t *rp = NULL;
+        size_t rn = 0;
+        for (size_t o = 0; o + 8 <= ch_hash->n; ) {
+            uint32_t sz = rd_u32(ch_hash->data + o + 4);
+            if (memcmp(ch_hash->data + o, "rows", 4) == 0) {
+                rp = ch_hash->data + o + 8;
+                rn = sz;
+                break;
+            }
+            o += 8u + sz + (sz & 1u);
+        }
+        if (rp && rn >= (size_t)rows * 4u) {
+            uint32_t max_row = 0;
+            for (uint32_t r = 0; r < rows; ++r) {
+                uint32_t v = rd_u32(rp + (size_t)r * 4u);
+                if (v > max_row) max_row = v;
+            }
+            double worst = (double)max_row + rows;
+            ck(worst <= (double)cells, "hash tail absorbs the widest probe",
+               "max(rows) %u + %u rows = %.0f vs %u cells (%+.0f)",
+               max_row, rows, worst, cells, (double)cells - worst);
+            if (worst > (double)cells)
+                printf("        ⛔ Speechify will access-violate inside "
+                       "SWIttsUSel on some phrase. Rebuild the hash (the "
+                       "packer pads to max(rows)+n_rows now) or pad an "
+                       "existing VIN with vb_hashpad.py --write.\n");
+        } else {
+            ck(0, "hash rows sub-chunk present", "%s",
+               rp ? "rows sub-chunk short" : "no rows sub-chunk");
+        }
+    } else {
+        ck(0, "hash head sub-chunk present", "%s",
+           ch_hash ? "no `head` tag" : "no hash chunk");
+    }
 
     /* indx: names unique, offsets monotonic, last within data. */
     const spfy_vb_chunk *ci = spfy_vb_riff_get(&rvdb, "indx");

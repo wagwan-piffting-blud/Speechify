@@ -1,5 +1,5 @@
 /*
- * spfy/src/host_emu/test_emu_boot.c — Phase 1 native smoke test.
+ * spfy/src/host_emu/test_emu_boot.c - Phase 1 native smoke test.
  *
  * Reads SWIttsFe-en-US.dll from disk, runs it through the emulator's
  * DllMain. Reports whether the load succeeds, where it faults if it
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[test] read %ld bytes\n", len);
 
     if (spfy_dll_emu_boot(bytes, (uint32_t)len) != 0) {
-        fprintf(stderr, "[test] BOOT FAILED — see emulator output above\n");
+        fprintf(stderr, "[test] BOOT FAILED - see emulator output above\n");
         free(bytes);
         return 2;
     }
@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
 
     uint32_t getObject_va = spfy_dll_emu_get_export("getObject");
     if (!getObject_va) {
-        fprintf(stderr, "[test] WARN: getObject export not found — the FE host won't work\n");
+        fprintf(stderr, "[test] WARN: getObject export not found - the FE host won't work\n");
         return 3;
     }
     fprintf(stderr, "[test] getObject -> guest VA %#x\n", getObject_va);
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
     uint32_t out_va = spfy_dll_emu_alloc(4, 1);
     if (!out_va) { fprintf(stderr, "[test] guest_alloc failed\n"); return 4; }
 
-    /* Call getObject(kind=2, &raw) — cdecl, 2 args. */
+    /* Call getObject(kind=2, &raw) - cdecl, 2 args. */
     uint32_t args[2] = { 2, out_va };
     uint32_t rc = spfy_dll_emu_call(getObject_va, args, 2);
     uint32_t iobj_va;
@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
         return 6;
     }
 
-    /* feedConfigA(text) — slot 5. */
+    /* feedConfigA(text) - slot 5. */
     const char *input = "Hello world.";
     uint32_t input_len = (uint32_t)strlen(input) + 1;
     uint32_t input_va = spfy_dll_emu_alloc(input_len, 0);
@@ -120,7 +120,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "[test] feedConfigA(self, \"%s\") -> %#x  err_flag=%u\n",
             input, r5, err_flag);
 
-    /* feedConfigB(self, &empty_cfg) — slot 6. */
+    /* feedConfigB(self, &empty_cfg) - slot 6. */
     uint32_t feedConfigB_va;
     spfy_dll_emu_read(vtable_va + 6 * 4, &feedConfigB_va, 4);
     uint32_t empty_va = spfy_dll_emu_alloc(1, 1);

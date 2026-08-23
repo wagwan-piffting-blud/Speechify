@@ -1,10 +1,10 @@
 'use strict';
 /*
- * viterbi_c7c_hook.js — capture per-cand run-length state c7c/c80.
+ * viterbi_c7c_hook.js - capture per-cand run-length state c7c/c80.
  *
  * Function-entry hook on FUN_08e8b620 (USelGraph::ViterbiWithJoinCache)
  * at 0x08E8B620 in SWIttsUSel.dll. Same safety profile as
- * viterbi_dp_hook.js — fires ONCE per utterance, no mid-instruction
+ * viterbi_dp_hook.js - fires ONCE per utterance, no mid-instruction
  * trampolines.
  *
  * --- Purpose (2026-05-14 evening) ---
@@ -21,7 +21,7 @@
  * `prev.c7c` between engine and us.
  *
  * The existing viterbi_dp_hook captures cand+0x68 (c68), +0x78 (c78),
- * +0x6c (c6c) on leave — but NOT +0x7c (c7c) or +0x80 (c80), which
+ * +0x6c (c6c) on leave - but NOT +0x7c (c7c) or +0x80 (c80), which
  * are the actual run-length state values consumed by the next slot's
  * join cost. This hook captures those.
  *

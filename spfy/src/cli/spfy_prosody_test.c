@@ -202,7 +202,7 @@ int main(int argc, char **argv)
               "identity: VARYING periods, target == natural, bit-identical");
     }
 
-    /* NOTE — the identity snap tolerance in psola_unit.c is NOT guarded
+    /* NOTE - the identity snap tolerance in psola_unit.c is NOT guarded
      * from here, deliberately. */
 
     double f_in = dom_f0(orig, N, 30, 160);

@@ -10,7 +10,7 @@
  *
  * Nested chunks are re-emitted as opaque payloads, which is sufficient for
  * byte-exactness: LIST bodies already contain their form type and children.
- * Pad bytes are NOT part of a chunk payload, so the writer regenerates them —
+ * Pad bytes are NOT part of a chunk payload, so the writer regenerates them -
  * if the vendor padded with anything other than a ciphered zero, the diff
  * reports it.
  *

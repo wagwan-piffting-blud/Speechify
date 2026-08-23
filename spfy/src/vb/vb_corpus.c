@@ -1366,8 +1366,11 @@ int spfy_vb_corpus_build(const spfy_vb_template *t,
          * real recordings from them -- and it fails QUIETLY, because the build
          * log would simply report zero converted units. The prefix stays in the
          * indx name so provenance survives into the shipped voice. */
-        const int is_rvc = !strncmp(stem, "rvc_", 4u) ||
-                           !strncmp(stem, "st2_", 4u);
+        /* ⚠ ONE PREDICATE, SHARED. This was a second copy of the prefix test
+         * and drifted from the anchor-level one; both now ask
+         * spfy_vb_stem_is_synth, which allow-lists the REAL <office>_<ts>_
+         * shape instead of deny-listing prefixes it happens to know. */
+        const int is_rvc = spfy_vb_stem_is_synth(stem);
 
         /* ⚠ A STEM WITH NO SPANS IS DROPPED ENTIRELY, not kept whole. The list
          * says what to KEEP; silence about a recording is not an exemption. */

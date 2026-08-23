@@ -1,5 +1,5 @@
 'use strict';
-/* fe_addr_lookup_hook.js — identify what's at the addresses found in
+/* fe_addr_lookup_hook.js - identify what's at the addresses found in
  * the ctrl-block diff (real Speechify vs our hosted FE).
  * One-shot: dumps module info for a hard-coded list of addresses,
  * sends a single message, exits. */

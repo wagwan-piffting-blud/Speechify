@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-patch_f0tr.py — Patch f0tr tree leaf means to Mara's pitch range.
+patch_f0tr.py - Patch f0tr tree leaf means to Mara's pitch range.
 
 The f0tr tree predicts target F0 for each phonetic context. Tom's leaves
 are clustered at 107-127 Hz (3 semitones). Mara needs ~165-390 Hz (14+ semitones).

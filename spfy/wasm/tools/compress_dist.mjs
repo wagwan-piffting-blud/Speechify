@@ -23,7 +23,7 @@ const distDir   = path.resolve(__dirname, "..", "dist");
 
 const files = ["spfy_wasm.wasm", "spfy_wasm.js"];
 
-// Gzip @ level 9 (max) — slow at build time, smaller payload at runtime.
+// Gzip @ level 9 (max) - slow at build time, smaller payload at runtime.
 // Brotli quality is tunable via $BROTLI_QUALITY (default 6). Quality 11
 // is the absolute max but single-threaded brotli at q=11 on ~90 MB of
 // binary takes 5–15 minutes for ~5% extra savings vs q=6. For audio /

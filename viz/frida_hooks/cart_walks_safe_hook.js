@@ -1,6 +1,6 @@
 'use strict';
 /*
- * cart_walks_safe_hook.js — function-entry-only replacement for the
+ * cart_walks_safe_hook.js - function-entry-only replacement for the
  * retired cart_walks_hook.js (see SAFETY POLICY in run_frida_capture.py
  * and the retirement banner in cart_walks_hook.js).
  *
@@ -8,7 +8,7 @@
  * JSONL: per-slot durt and f0tr leaf (mean, var). The original hook also
  * captured the visited (q_type, value) sequence by hooking the per-
  * question dispatcher (0x08e87c90) and ESI compare helper (0x08e87c70)
- * inside the CART scoring loop — those are the hot-path mid-instruction
+ * inside the CART scoring loop - those are the hot-path mid-instruction
  * hooks that AV'd the engine after enough trampoline trips. We omit them.
  *
  * Schema-compatible with cart_walks_hook.js for the fields downstream
@@ -18,11 +18,11 @@
  * uses the fields it parses (slot/tree/leaf_mean/leaf_var per
  * parse_cart_walk_line in spfy_viterbi_replay.c:825).
  *
- * Hooks (function entries only — confirmed safe per cart_walker_args_hook.js
+ * Hooks (function entries only - confirmed safe per cart_walker_args_hook.js
  * which hooks the same three sites without instability):
  *   0x08E87D90  durt walker entry  (FUN_08e87d90)
  *   0x08E87E10  f0tr walker entry  (FUN_08e87e10)
- *   0x08E88DE0  inner scorer entry (FUN_08e88de0) — current_slot tracker
+ *   0x08E88DE0  inner scorer entry (FUN_08e88de0) - current_slot tracker
  *
  * Leaf node layout (from the retired hook, validated 3366/3366):
  *   leaf_mean = float at retval + 0x10
@@ -44,7 +44,7 @@ var batch = [];
 
 /* Track which slot we're scoring. Set on inner-scorer entry, cleared on
  * exit. Walker calls outside the inner scorer (PostScoringAdj, etc.)
- * have stale slot context and are dropped — same discipline as
+ * have stale slot context and are dropped - same discipline as
  * cart_walker_args_hook.js. */
 var current_slot    = -1;
 var in_inner_scorer = false;

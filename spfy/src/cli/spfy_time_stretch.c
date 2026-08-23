@@ -1,4 +1,4 @@
-/* spfy_time_stretch — A/B tester for the WSOLA time-stretch DSP. */
+/* spfy_time_stretch - A/B tester for the WSOLA time-stretch DSP. */
 
 #include "time_stretch.h"
 

@@ -127,7 +127,7 @@ See [ulaw_lut_dump.js](../../../viz/frida_hooks/ulaw_lut_dump.js) for the
 known-issue note: the export is exported but not called during typical
 synthesis paths. Likely needs an alternate hook inside SWIttsWsola.dll.
 
-## prsl_slot [ACTIVE — covers all 200 phrases]
+## prsl_slot [ACTIVE - covers all 200 phrases]
 
 One record per PRSL preselection (`FUN_08e91dc0` = `USelNetwork::AddUnit` entry).
 
@@ -148,7 +148,7 @@ Required fields (typed): `utt: int`, `slot: int`, `ctx: list[int] (len 3)`,
 
 Producer hook: `viz/frida_hooks/prsl_slot_hook.js`.
 
-## cart_walks [RETIRED — seed-32 only]
+## cart_walks [RETIRED - seed-32 only]
 
 Historical per-question CART walk dispatch records, retained for the
 seed-32 traces only.
@@ -170,12 +170,12 @@ Required fields (typed): `utt: int`, `slot: int`, `tree: str`,
 Hook RETIRED 2026-05-05 (mid-instruction hot-path; 4 historical
 Speechify.exe kills). Schema retained for the seed-32 traces; new corpus
 phrases are NOT captured with this hook. New phrases use
-`cart_walker_args` instead — see next section. Per CONTEXT.md D-15.
+`cart_walker_args` instead - see next section. Per CONTEXT.md D-15.
 
 Producer hook: `viz/frida_hooks/cart_walks_hook.js` (retired; seed-32
 captures only).
 
-## cart_walker_args [ACTIVE — covers all 200 phrases; substitute for cart_walks per D-15]
+## cart_walker_args [ACTIVE - covers all 200 phrases; substitute for cart_walks per D-15]
 
 Per-slot CART feature inputs. Active substitute for the retired
 `cart_walks` hook on the 168 new corpus phrases.
@@ -195,7 +195,7 @@ Required fields (typed): `utt: int`, `slot: int`, `tree: str`,
 
 Producer hook: `viz/frida_hooks/cart_walker_args_hook.js`.
 
-## inner_scorer [ACTIVE — covers all 200 phrases]
+## inner_scorer [ACTIVE - covers all 200 phrases]
 
 Per-slot SP target hook from M3.4e. One record per
 `USelNetworkSlice::all_half_phone_costs` entry.
@@ -216,11 +216,11 @@ Required fields (typed): `utt: int`, `slot: int`, `uid: int`,
 
 Producer hook: `viz/frida_hooks/inner_scorer_hook.js`.
 
-## inner_scorer_durt [ACTIVE — added by plan 02-05 D-17 Path R]
+## inner_scorer_durt [ACTIVE - added by plan 02-05 D-17 Path R]
 
 One record per call to `FUN_08e87d90` (the binary CART walker the engine
 uses INSIDE the inner-scorer for duration target prediction). Captures
-the leaf-node `(mean, inv_std)` floats — the engine's preselect-time
+the leaf-node `(mean, inv_std)` floats - the engine's preselect-time
 durt CART output, which is conceptually the same prediction
 `cart_walks_hook.js` instruments for synth-time, but evaluated at the
 preselect call site (`FUN_08e88de0`).
@@ -244,13 +244,13 @@ Required fields (typed): `utt: int`, `slot: int`, `mean: float`,
 memory). `n` is the running call count.
 
 Slot tracking is via a parallel `Interceptor.attach` on `FUN_08e88de0`
-(the InnerScorer caller) inside the same hook script — its `esp+8` arg
+(the InnerScorer caller) inside the same hook script - its `esp+8` arg
 is the slot, set on entry and read by the immediately-following
 durt-CART call.
 
 Producer hook: `viz/frida_hooks/inner_scorer_durt_hook.js`.
 
-## fe_tree [ACTIVE — covers all 200 phrases]
+## fe_tree [ACTIVE - covers all 200 phrases]
 
 Utterance tree dump (Word/Syl/Phone IRs + POS) from M3.4r Phase B1.
 One record per utterance.
@@ -272,7 +272,7 @@ Required fields (typed): `utt: int`, `words: list[dict]`.
 
 Producer hook: `viz/frida_hooks/fe_tree_hook.js`.
 
-## viterbi_dp [ACTIVE — covers all 200 phrases]
+## viterbi_dp [ACTIVE - covers all 200 phrases]
 
 Per-utterance DP entry/leave + per-slot best_idx records from M3.4r.
 Two record subtypes are interleaved in the same file, distinguished by
@@ -293,7 +293,7 @@ Per-phase additional required fields:
 
 Producer hook: `viz/frida_hooks/viterbi_dp_hook.js`.
 
-## ccos_apply [ACTIVE — added by plan 02-02 D-05]
+## ccos_apply [ACTIVE - added by plan 02-02 D-05]
 
 One record per call to `FUN_08e8adc0` (USelNetwork CCOS context-cost
 reduction). Function-entry hook captures inputs; function-leave hook
@@ -349,7 +349,7 @@ Required fields (typed): `n_call: int`, `type_arg: int`, `first_hp: int`,
 
 Producer hook: `viz/frida_hooks/ccos_apply_hook.js`.
 
-*Last updated: 2026-05-09 — added ccos_apply for plan 02-02 D-05/D-07.*
+*Last updated: 2026-05-09 - added ccos_apply for plan 02-02 D-05/D-07.*
 
 ## How the native side emits this
 

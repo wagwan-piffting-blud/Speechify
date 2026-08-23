@@ -14,7 +14,7 @@ All bytes in target binaries are XOR-obfuscated with `0xCE`.
 - Decode: `plain_byte = enc_byte ^ 0xCE`
 - Encode: same operation (symmetric)
 
-XOR key and mechanism are **confirmed by DLL disassembly** — see `SWIttsEngineUtil.dll` section below.
+XOR key and mechanism are **confirmed by DLL disassembly** - see `SWIttsEngineUtil.dll` section below.
 
 ---
 
@@ -109,7 +109,7 @@ Records are mixed and can be distinguished by record text:
   - filename records: `7918`
   - file IDs: `1..7917`, final filename has no trailing `u32`
 
-### Span fields (`span_start`, `span_end`) — confirmed
+### Span fields (`span_start`, `span_end`) - confirmed
 
 Both fields are **global unit indices** into the `unit` table (0..169578). Confirmed by cross-validating
 against `unit.file_idx` for all 5108 word and 7918 syllable records (100% match).
@@ -170,25 +170,25 @@ for correct lookup, not a positional array.
    - Range `0..6038`.
    - Monotonic non-decreasing within each contiguous `file_idx` run.
    - **Unit: 8 μ-law bytes at 8 kHz (= 1 ms per unit).** Confirmed by engine error analysis.
-   - Engine byte offset formula: `byte_offset = local_pos * 8` (= `local_pos * 4 * (BitsPerSample/8)` where `BitsPerSample=16` is read from the `fmt` chunk, and actual audio is 1 byte/sample μ-law — the factor of 2 comes from the fmt header, not the actual sample width).
+   - Engine byte offset formula: `byte_offset = local_pos * 8` (= `local_pos * 4 * (BitsPerSample/8)` where `BitsPerSample=16` is read from the `fmt` chunk, and actual audio is 1 byte/sample μ-law - the factor of 2 comes from the fmt header, not the actual sample width).
    - Verified: for all 169,570 normal units, `(local_pos + dur_like) * 8 ≤ recording_bytes` (only 9 anomalous sentinel entries with `local_pos ≈ 65535` violate this bound, and these are never selected during synthesis).
 4. `+0x08 u16` always `0`.
 5. `+0x0A u16 dur_like`
    - Mostly `0..255`, with a few anomalous entries (`65532..65535` in sentinel units).
-   - **Unit: 8 μ-law bytes at 8 kHz (= 1 ms per unit)** — same unit as `local_pos`.
-   - `segment_bytes = dur_like * 8` — number of audio bytes (= samples, since μ-law is 1 byte/sample) in this unit's segment.
+   - **Unit: 8 μ-law bytes at 8 kHz (= 1 ms per unit)** - same unit as `local_pos`.
+   - `segment_bytes = dur_like * 8` - number of audio bytes (= samples, since μ-law is 1 byte/sample) in this unit's segment.
    - Strong relation to within-file position step:
      - for ~92.7% of within-file pairs: `next.local_pos - local_pos == dur_like`
      - common alternate: `next.local_pos - local_pos == dur_like + 40` (40-frame gap between consecutive units, see +40 gap analysis below)
-6. `+0x0C u8 syl_type` — Syllable prosodic type (7 values: {1,3,4,5,6,7,8}).
+6. `+0x0C u8 syl_type` - Syllable prosodic type (7 values: {1,3,4,5,6,7,8}).
    - Matches `sylTypeCosts` dimension in VCF (1-based): UNDEF=1, Stressed=3, PA=4, FirstPA=5, FirstPAInPhrase=6, LastPAInPhrase=7, LastPAInSent=8. Unstressed (2) absent from this corpus.
-7. `+0x0D u8 syl_in_phrase` — Syllable-in-phrase position (7 values: {1..7}).
+7. `+0x0D u8 syl_in_phrase` - Syllable-in-phrase position (7 values: {1..7}).
    - Matches first 7 of `sylInPhraseCosts` entries in VCF (1-based): UNDEF=1, PhrInitial=2, PhrMedial=3, PhrFinal=4, PhrSingle=5, SentFinal=6, WordInit=7.
-8. `+0x0E u8 word_in_phrase` — Word/phone positional category (5 values: {1..5}).
+8. `+0x0E u8 word_in_phrase` - Word/phone positional category (5 values: {1..5}).
    - Likely `wordInPhrase` or a combined phone-in-syllable + syllable-in-word encoding.
-9. `+0x0F u8 phone_position` — Phone positional category (5 values: {1,2,3,5,6}). Never 0.
+9. `+0x0F u8 phone_position` - Phone positional category (5 values: {1,2,3,5,6}). Never 0.
    - Used by unit selector to gate F0 processing: loaded into synthesis state; non-zero = use F0 for this unit.
-10. `+0x10 u8 f0_start` — F0 at unit **start** boundary in raw Hz. `0` = unvoiced/silence.
+10. `+0x10 u8 f0_start` - F0 at unit **start** boundary in raw Hz. `0` = unvoiced/silence.
     - **Encoding: direct Hz value (integer, u8).** Nonzero range: 99-150 Hz for Tom. Median nonzero = 118 Hz.
     - Voiced phones: p5=106, p25=114, p50=118, p75=121, p95=127, max=150. Zero rate: ~2% (even voiced).
     - Unvoiced phones (s, sh, f, t, etc.) also carry nonzero values in most cases (similar distribution).
@@ -198,31 +198,31 @@ for correct lookup, not a positional array.
       Mara's avg 184 Hz to 118 Hz (matching Tom median). However this produces values 51-255 Hz
       whereas Tom's range is 99-150. Values below 99 or above 150 cause higher F0 cost vs Tom's
       tight cluster. Clamp to [99, 150] or narrow Mara's pitch scale to improve match quality.
-11. `+0x11 u8 f0_end` — F0 at unit **end** boundary in raw Hz. Same encoding as `f0_start`.
+11. `+0x11 u8 f0_end` - F0 at unit **end** boundary in raw Hz. Same encoding as `f0_start`.
     - Nonzero range: 99-156 Hz for Tom (slightly wider than f0_start). Median nonzero = 118 Hz.
     - Loaded into synthesis state field `+0x68`.
-12. `+0x12 u8 f0_mid` — F0 at a midpoint in raw Hz. Same encoding as `f0_start`.
+12. `+0x12 u8 f0_mid` - F0 at a midpoint in raw Hz. Same encoding as `f0_start`.
     - Nonzero values are **strictly >= 99** (Tom range: 99-155). Values 1-98 do not appear.
     - Distribution nearly identical to `f0_end` (median 118 Hz). Used in F0 cost computation.
-13. `+0x13 u8 f0_context` — Per-phoneme-instance target/interpolated F0 (0–226, **never 0**).
+13. `+0x13 u8 f0_context` - Per-phoneme-instance target/interpolated F0 (0–226, **never 0**).
     - Same value for both halves of a phone pair (first and second unit of same phoneme instance).
     - Represents predicted or interpolated pitch even for unvoiced phones (context F0 from surrounding voiced frames).
-    - **Overwritten at runtime** by `SWIttsUSel.dll` loader (function at file 0x3160) with the ccos boundary label index — the stored VIN value is only used during file loading before this overwrite.
+    - **Overwritten at runtime** by `SWIttsUSel.dll` loader (function at file 0x3160) with the ccos boundary label index - the stored VIN value is only used during file loading before this overwrite.
 14. `+0x14 u8 phone_center`
     - Values `0..45`.
-15. `+0x15 u8 is_first_half` — **1** = first half (left boundary) of the phone pair; **0** = second half (right boundary).
+15. `+0x15 u8 is_first_half` - **1** = first half (left boundary) of the phone pair; **0** = second half (right boundary).
     - Each phoneme instance is split into exactly 2 consecutive unit records (same `file_idx`, adjacent `local_pos`). `is_first_half` distinguishes them.
     - Controls which ccos boundary entry is used (even loop iteration vs. odd).
-16. `+0x16 u8` constant `3` — Always `3`. Purpose unknown (version tag or alignment byte).
+16. `+0x16 u8` constant `3` - Always `3`. Purpose unknown (version tag or alignment byte).
 17. `+0x17..+0x1A u8 phone_ctx[4]`
     - Values in `{0..45, 255}` (`255` = sentinel/none).
-18. `+0x1B u8 flag_b` — Values `{0,1}`. Default 1 (89% of units).
+18. `+0x1B u8 flag_b` - Values `{0,1}`. Default 1 (89% of units).
     - Likely marks valid utterance-internal context (1) vs. utterance-boundary / context-unavailable unit (0).
     - Approx. 10.7% of units (18,186) have `flag_b=0`; these include recording boundaries and some initial/final pauses.
-19. `+0x1C u8 context_cost` — Values `{0, 100}`. 36% of units have value `100`.
+19. `+0x1C u8 context_cost` - Values `{0, 100}`. 36% of units have value `100`.
     - Used directly as an index into a prosody cost lookup table: `cost = table[context_cost * 4]`.
     - Value `100` maps to the "forbidden/unknown" cost tier (matching `UNDEF=100` / `ContextUnknown=100` in VCF `proscost` matrices).
-    - Units with `context_cost=100` are effectively prohibited in contexts where prosodic position is meaningful — likely marks units at recording boundaries or with unknown prosodic context.
+    - Units with `context_cost=100` are effectively prohibited in contexts where prosodic position is meaningful - likely marks units at recording boundaries or with unknown prosodic context.
 
 ### In-memory unit record layout (24 bytes, stride 0x18)
 
@@ -268,7 +268,7 @@ In-mem  On-disk  Type  Field
 
 **Mapping for version 100007+** ([esp+0x24]=1, extra byte at +0x0E):
 
-> **CORRECTED 2026-07-20 — the paragraph that used to sit here was wrong.**
+> **CORRECTED 2026-07-20 - the paragraph that used to sit here was wrong.**
 > It claimed that on v100007+ the in-memory field *meanings* shift, so that
 > in-mem `+0x0F` becomes `f0_end` rather than `f0_start`. That is not what
 > the loader does. `load_chunky_index` (FUN_08e857a0) writes the one extra
@@ -290,7 +290,7 @@ In-mem  On-disk  Type  Field
 > her 30-byte record aligns with Tom's 29-byte record under a uniform
 > `+1` shift from `+0x10` onward.
 
-The new `+0x0E` byte is the **phoneInSylCosts column index** — the 5th
+The new `+0x0E` byte is the **phoneInSylCosts column index** - the 5th
 proscost matrix, which v100006 voices have no column source for (the
 loader hardcodes 6 = `SyllUnknown` for them). See "unit record versions"
 below.
@@ -298,7 +298,7 @@ below.
 Dropped/relocated fields:
 - `unit_id` (+0x00, 4 bytes): implicit (array index)
 - pad byte before `phone_ctx[]` (+0x16 on v100006): skipped by `add eax, 2`
-  in the loader. **Not universally 3** — measured Tom 3, Jill 3, Javier 4,
+  in the loader. **Not universally 3** - measured Tom 3, Jill 3, Javier 4,
   Felix 5, and non-constant on Paulina. Never stored, so harmless, but do
   not assert on it.
 - `phone_ctx[0..3]` (+0x17..+0x1A): stored in separate array at `voice_obj+0xC0` (4 bytes per unit, indexed by unit_id)
@@ -325,9 +325,9 @@ variable block whose size the loader computes as:
 
 Measured record counts: Tom 169579, Jill 185475, Felix 259660,
 Javier 219501, Paulina 663410. (A pre-2026-07-20 note claiming Jill has
-191871 units was wrong — that was `unit/data ÷ 29` on a 30-byte table.)
+191871 units was wrong - that was `unit/data ÷ 29` on a 30-byte table.)
 
-**v100008 (Jill, 30 bytes)** — one byte inserted at `+0x10`, everything
+**v100008 (Jill, 30 bytes)** - one byte inserted at `+0x10`, everything
 after shifted by one:
 
 ```
@@ -343,7 +343,7 @@ after shifted by one:
 +0x10 u8   sp_phone_in_syl <- NEW       +0x1D u8  context_cost
 ```
 
-**v100005 (Paulina, 24 bytes)** — `+0x00..+0x15` as v100006, then
+**v100005 (Paulina, 24 bytes)** - `+0x00..+0x15` as v100006, then
 `+0x16` a skipped byte (1..12, not constant) and `+0x17` context_cost.
 Two consequences that are easy to miss:
 
@@ -358,7 +358,7 @@ Implemented in `spfy/src/voice/unit_table.c` (`UNIT_LAYOUTS[]`).
 
 The `+0x13` slot is initialized to 0 by the zeroing loop at 0x8E86160, then overwritten by the ccos label index loader at 0x8E831D0 (which reads `phone_center` from +0x12 = on-disk +0x14, maps it through a phone-to-ccos-index table, and writes the result to +0x13).
 
-### hp_class is derivable from the VIN — SOLVED 2026-07-20
+### hp_class is derivable from the VIN - SOLVED 2026-07-20
 
 The per-unit `hp_class` (in-memory `+0x13`) had been treated as
 Frida-only: `spfy/data/tom_hpclass.bin` was a 169579-byte capture, and
@@ -386,7 +386,7 @@ Two things worth stressing:
   `is_first_half` correlates with hp_class's low bit at chance (~50%);
   `uid & 1` matches it at exactly 100%.
 - Strip the suffix digit only when it really is `1`/`2`. Felix has phones
-  named `E~`, `oe~`, `EE`, `ng`, `nj`, `ox` — a blind "drop last char"
+  named `E~`, `oe~`, `EE`, `ng`, `nj`, `ox` - a blind "drop last char"
   corrupts them.
 
 Verified byte-exact against the Frida dump: **169579/169579 units, zero
@@ -405,7 +405,7 @@ data is sized for N=47 while Jill/Felix use N=46 and the es-MX voices
 N=31. Confirmed by chunk size: `2*N*4*(8 + N(N-1)/2*4)` reproduces
 1,628,832 / 1,526,464 / 463,264 exactly.
 
-This also supersedes the "5 hp_base anomalies" open question — `hp_base[pc]`
+This also supersedes the "5 hp_base anomalies" open question - `hp_base[pc]`
 is simply `labl_to_feat[pc] * 2`.
 
 Direction matters when consuming the tables: `maps.hp_class[]` takes a
@@ -437,14 +437,14 @@ Implemented in `spfy/src/voice/phone_order.c`.
 Exact statistics from full unit scan:
 - `extra=0`:   150,918 pairs (92.74%)
 - `extra=40`:   11,803 pairs  (7.25%)
-- `extra=1..39`:       9 pairs  (0.01%, edge cases — likely alignment rounding)
+- `extra=1..39`:       9 pairs  (0.01%, edge cases - likely alignment rounding)
 - `extra > 40`:        0 pairs
 
 Key confirmed facts:
-- The gap is **always exactly 40** — no 80/20/variable amounts
+- The gap is **always exactly 40** - no 80/20/variable amounts
 - All +40 pairs are **within the same recording** (`is_last_in_fidx=False` for every sampled pair); cross-recording `local_pos` comparisons are meaningless since `local_pos` resets per recording
 - `+40` = 40 ms = 320 μ-law bytes at 8 kHz
-- The 40 ms of audio is present in the VDB but not assigned to any unit — it is skipped during synthesis playback
+- The 40 ms of audio is present in the VDB but not assigned to any unit - it is skipped during synthesis playback
 
 **Interpretation**: these 40 ms gaps are short silence/transition windows at phoneme or word boundaries within a recording session. The original corpus recording workflow inserted a fixed silence pad of 40 ms between certain adjacent utterances. The engine concatenates the two flanking units without playing the gap.
 
@@ -616,7 +616,7 @@ kSylTypeMap UNDEF..LastPAInPhrase range).
 `if (ppiStack_1e8 == 0)` branch in `load_chunky_index`). Stock's 5th table thus
 becomes a degenerate per-target-feat scalar for Tom.
 
-**Correction 2026-07-20**: the branch is on `>= 100007`, not "not Tom" —
+**Correction 2026-07-20**: the branch is on `>= 100007`, not "not Tom" -
 so v100005 (Paulina) also gets the hardcoded 6. Only **v100007/100008**
 read the real byte from disk, and of the shipped voices only **Jill**
 (v100008, disk `+0x10`) does.
@@ -631,13 +631,13 @@ Only Jill's VCF ships this matrix. Row/column vocabulary, in order:
 ```
 
 The weight is `tts.voiceCfg.PHONE_IN_SYL_MISMATCH_COST`: Tom 0, Felix 0,
-Javier 0, **Jill 0.3**, Paulina 0.05 (inert — no matrix shipped). So the
+Javier 0, **Jill 0.3**, Paulina 0.05 (inert - no matrix shipped). So the
 term that is a no-op on Tom is live on Jill.
 
 The **target-side** row index is a function of the phone's position in
 its word and syllable. Recovered from Jill's own data by cross-referencing
 the per-unit column byte (disk `+0x10`) against the independent `_WORD_` /
-`_SYL_` unit spans in the `ckls` chunk — **3504/3504 units agree, with an
+`_SYL_` unit spans in the `ckls` chunk - **3504/3504 units agree, with an
 all-diagonal confusion matrix**:
 
 ```
@@ -649,7 +649,7 @@ SyllMedial  (3)  otherwise
 ```
 
 Precedence matters twice: word edges outrank syllable edges, and
-`SyllFinal` outranks `SyllInitial` — which is what a one-phone syllable
+`SyllFinal` outranks `SyllInitial` - which is what a one-phone syllable
 resolves to. Testing `SyllInitial` first gives 99.20% instead of 100%.
 
 Implemented as `classify_phone_in_syl` in `spfy/src/fe_host/fe_parse.c`.
@@ -742,7 +742,7 @@ regresses >= 0.3). Frida hook is at [viz/frida_hooks/sp_target_dump.js](../viz/f
    PRSL keys. Attempted adding opposite-half PRSL lookups + capped
    same-hp/opposite-half index injections; regressed 139 -> 138 because
    the extra candidates crowd out better-ranked ones. Stock's pool source
-   for these UIDs is still unknown — candidate RE target: how stock's
+   for these UIDs is still unknown - candidate RE target: how stock's
    PRSL is keyed per unit (possibly a second hp-agnostic index, or wider
    triphone-bucket matching).
 
@@ -754,14 +754,14 @@ regresses >= 0.3). Frida hook is at [viz/frida_hooks/sp_target_dump.js](../viz/f
    corpus (cem_s1 + short_decl + question + two_clause + numbers, 330 slots
    combined) revealed stock's sylType value distribution {1: 182, 2: 40,
    3: 50, 4: 26, 6: 6, 7: 26}. Previously only cem_s1 was traced and showed
-   {1: 104, 2: 30, 3: 36, 4: 4, 7: 4} — not enough to justify the risk.
+   {1: 104, 2: 30, 3: 36, 4: 4, 7: 4} - not enough to justify the risk.
    New rule (see `halfphone_target.cpp` Session 19 block):
    - `7` = last-PA OR sent-final accent
    - `4` = first PA of utterance
    - `3` = mid-utterance PA (non-first, non-last)
    - `2` = stressed-no-PA (`word.level > 0` AND monosyl OR first-syl)
    - `1` = default
-   Value `6` (seen only in two_clause, 6 slots) not modeled — likely
+   Value `6` (seen only in two_clause, 6 slots) not modeled - likely
    "post-comma first PA"; falls through to `4` for now.
    Previous attempt at this rule (Session 17) regressed UID 132 -> 129
    because the `max_candidates_per_slot` cap was too tight. With Session
@@ -771,10 +771,10 @@ regresses >= 0.3). Frida hook is at [viz/frida_hooks/sp_target_dump.js](../viz/f
 2. **PRSL partial-match indexing** (infrastructure landed, can't enable).
    Scanning PRSL for each of the 39 OOP UIDs from cem_s1 revealed stock
    includes candidates matching only (center_hp, next_hp) or (prev_hp,
-   center_hp) — not the full triphone. Added a `PrslPartialIndex`
+   center_hp) - not the full triphone. Added a `PrslPartialIndex`
    structure that pre-computes these buckets at voice-load in a single
    linear scan. Queried it in gather_candidates with various caps and
-   gates — ALL variants regressed 139 -> 121-128 UIDs. The partial-index
+   gates - ALL variants regressed 139 -> 121-128 UIDs. The partial-index
    candidates ARE correct (they recover ~22/39 OOP UIDs), but Viterbi /
    scoring picks noise from the enlarged pool faster than it wins back
    OOP slots. The pool source is real but our scoring isn't sharp enough
@@ -782,7 +782,7 @@ regresses >= 0.3). Frida hook is at [viz/frida_hooks/sp_target_dump.js](../viz/f
 
 **Session 19 result**: UID match **145 / 432 (33.6%)**, +6 over Session 18.
 
-**Session 20 (2026-04-19) — re-sweep + IPM diagnosis**:
+**Session 20 (2026-04-19) - re-sweep + IPM diagnosis**:
 
 After all target-feature + pool refinement landed, re-swept every weight at the
 Session 19 peak. Only `dur_weight` moved: +3 UIDs at 0.2 (previously defaulted
@@ -798,13 +798,13 @@ match rate between stock's vs NG's pick):
 |---|---|---|
 | `phone_code` | 66/66 | NG always picks correct phone |
 | `is_first` (half) | 65/66 | one half swap |
-| `sp_syl_type` | 38/66 | 42% — target rule imperfect |
+| `sp_syl_type` | 38/66 | 42% - target rule imperfect |
 | `sp_syl_in_phrase` | 37/66 | 44% |
 | `sp_word_in_phrase` | 40/66 | 39% |
 | `sp_syl_in_word` | 45/66 | 32% |
 | `f0_start` | 20/66 | 30% (avg diff 9.5 Hz) |
-| `f0_context` | 1/66 | **1%** — stock + NG pick units with very different duration |
-| `dur_like` | 4/66 | **6%** — ditto on unit physical duration |
+| `f0_context` | 1/66 | **1%** - stock + NG pick units with very different duration |
+| `dur_like` | 4/66 | **6%** - ditto on unit physical duration |
 | `context_cost` (0/100) | 48/66 | 73% |
 | `ctx0..ctx3` | 28/58/50/16 | ctx3 worst at 24% |
 
@@ -826,18 +826,18 @@ closing it; all hurt or were neutral:
 **Session 20 result**: UID match **148 / 432 (34.3%)**, +3 over Session 19.
 
 **Remaining gaps, ranked by structural RE needed:**
-1. `score_duration` / `score_f0` exact formula — current form gives small
+1. `score_duration` / `score_f0` exact formula - current form gives small
    magnitudes and imprecise ranking on the duration-critical slots. Needs
    disassembly of `FUN_08e88de0`'s D/F0/DU component math block (README
    §2185) and/or Frida capture of per-candidate score breakdown.
-2. Target-side CART feature values for durt/f0tr leaf evaluation — our
+2. Target-side CART feature values for durt/f0tr leaf evaluation - our
    syl_type/syl_in_phrase/word_in_phrase as passed to `evaluate_tree`
    may diverge from stock's runtime values, causing leaf mean/variance
    drift. Add a CART-feature Frida hook + diff.
-3. `FUN_08e8d550` DU (duration2) component — currently stubbed with a
+3. `FUN_08e8d550` DU (duration2) component - currently stubbed with a
    log-domain mirror; stock's actual formula not yet decoded.
 
-**Session 21 (2026-04-19) — Ghidra RE of `FUN_08e88de0` scorer kernel**:
+**Session 21 (2026-04-19) - Ghidra RE of `FUN_08e88de0` scorer kernel**:
 
 Full disassembly confirmed the scoring pipeline. Formulas in stock:
 
@@ -855,7 +855,7 @@ VCF struct offsets (from config-loader disassembly at `FUN_08e90dc0`):
 - `+0x34` : DUR_WEIGHT
 - `+0x38` : **UNIT_BIAS_WEIGHT** (Tom = 0.25, used × 0.01 × context_cost)
 - `+0x44` : CONTEXT_COST_WEIGHT
-- `+0x48` : HALFPHONE_CAND_MAX_UNITS (int, default 50 — Tom uses default)
+- `+0x48` : HALFPHONE_CAND_MAX_UNITS (int, default 50 - Tom uses default)
 - `+0x4c` : HALFPHONE_CAND_PRUNE_THRESH (Tom = 0.8, README's old 3.0 was wrong)
 - `+0x50` : HALFPHONE_CAND_PRUNE_SLOPE (Tom = 0.005)
 - `+0x98` : EMPH_ENABLED flag
@@ -878,14 +878,14 @@ VCF struct offsets (from config-loader disassembly at `FUN_08e90dc0`):
 3. **Score-then-sort-cap** (mirror of `FUN_08e88830`): regresses 148 → 123.
    Emission-only sort drops candidates with good join potential in favor
    of low-emission but bad-continuity ones. Stock's sort is benign because
-   Viterbi runs over ALL candidates — the sort only trims to MAX_UNITS
+   Viterbi runs over ALL candidates - the sort only trims to MAX_UNITS
    which is 50 by default (higher than typical pool size anyway).
 
 **Session 21 result**: no UID change (148/432 held); solid RE groundwork
 for future pruning-driven improvements. All formula offsets documented
 for Session 22+ DU/WSOLA work.
 
-**Session 22 (2026-04-19) — pruning + combined-change test**:
+**Session 22 (2026-04-19) - pruning + combined-change test**:
 
 User-raised hypothesis: previously individually-regressing stock-faithful
 changes (stress additive, literal F0 formula, partial-index pool,
@@ -901,8 +901,8 @@ Implemented **HALFPHONE_CAND_PRUNE_THRESH pruning** (`prune_thresh` in
 | Empirical (stddev F0, emp weights) | **148** | 114 | 139 | 148 | 148 |
 | Stock-literal F0 + stock weights | 132 | 139 | 132 | 132 | 132 |
 | +stress additive (stock-literal) | 125 | **135** | 117 | 119 | 125 |
-| +partial-index pool (stock-literal) | — | 135 | 117 | 119 | — |
-| Empirical + partial-index pool | — | — | — | 134 | 134 |
+| +partial-index pool (stock-literal) | - | 135 | 117 | 119 | - |
+| Empirical + partial-index pool | - | - | - | 134 | 134 |
 
 **Key finding**: the combined stock-faithful configuration peaks at
 **135-139 UIDs**, still **9-13 below our empirical 148**.
@@ -910,7 +910,7 @@ Implemented **HALFPHONE_CAND_PRUNE_THRESH pruning** (`prune_thresh` in
 **Interpretation**: our empirical local optimum (stddev F0, dur=0.2,
 f0=0.15, sctx=1.0, no stress, no prune, partial-index off) has found a
 scoring landscape that compensates for components we haven't decoded
-yet — most likely **`FUN_08e8d550` DU (duration2)**, which stock's
+yet - most likely **`FUN_08e8d550` DU (duration2)**, which stock's
 kernel adds but we currently stub as a log-domain mirror that
 contributes nothing material.
 
@@ -927,7 +927,7 @@ still below empirical.
 **Session 22 post-decomp follow-up**: decompiled `FUN_08e8d550` expecting
 to find the "missing DU (duration2) component" hinted at by README §2144's
 mention of a 6-component scorer (S, D, DU, SP, J, F0). **It turned out
-to be a diagnostic logging function**, not a scoring path — it contains
+to be a diagnostic logging function**, not a scoring path - it contains
 `fprintf` calls for "DUR2 %d %f", "Context: ...", "Phrase_pos ...",
 "Syl_type ...", etc. The formula it prints (`|exp(a*stored-b) - exp(a*pred-b)|`
 via f2xm1/fscale) is purely for log output, with no use in emission cost.
@@ -935,7 +935,7 @@ via f2xm1/fscale) is purely for log output, with no use in emission cost.
 The real scorer `FUN_08e88de0` has exactly 4 emission components:
 **S (ccos) + D (duration) + SP (5 tables + stress) + F0**. We already have
 all 4. The 13-UID gap between our empirical 148 and stock-faithful 135-139
-therefore has a more subtle cause — most likely:
+therefore has a more subtle cause - most likely:
 
 - **F0 variance field semantic**: our VIN parser's f0_variance may
   encode inverse-stddev whereas stock's runtime reads it as raw
@@ -946,7 +946,7 @@ therefore has a more subtle cause — most likely:
   {1,4,6,7}); a matching rule would likely bring us closer.
 - **Target CART features**: we haven't Frida-verified that our target
   `syl_type`, `syl_in_phrase`, `word_in_phrase`, `phone_in_syl` match
-  stock's runtime values — which feed into durt/f0tr leaf evaluation.
+  stock's runtime values - which feed into durt/f0tr leaf evaluation.
 
 No active UID optimisation path from scoring refinement at this point.
 
@@ -1257,7 +1257,7 @@ XOR_CE = 1   // every byte XOR'd with 0xCE on read/write
 Evidence:
 - `readBytes` at `0x06b41c36–41`: `mov eax, [esi+8]` / `cmp eax, 1` / `jne skip_xor`
 - `writeBytes` at `0x06b42165`: `cmp dword ptr [edi+8], 1` / `jne skip_xor`
-- `create` at `0x06b41ece`: `mov dword ptr [esi+8], ecx` — stores encryption param into object field `+0x08`
+- `create` at `0x06b41ece`: `mov dword ptr [esi+8], ecx` - stores encryption param into object field `+0x08`
 
 Both `tom.vin` and `tom8.vdb` use `XOR_CE = 1`.
 
@@ -1331,7 +1331,7 @@ Reconstructed from ctor (`0x06b41980`) and method field accesses:
 
 ### MD5 exports → `hash` chunk
 
-The DLL exports `MD5Init`, `MD5Update`, `MD5Final` directly. The `hash` chunk in `tom.vin` is an MD5 digest computed over file content (exact input not yet determined — likely over the decoded payload of one or more chunks).
+The DLL exports `MD5Init`, `MD5Update`, `MD5Final` directly. The `hash` chunk in `tom.vin` is an MD5 digest computed over file content (exact input not yet determined - likely over the decoded payload of one or more chunks).
 
 ### Audio codec exports → `tom8.vdb`
 
@@ -1339,13 +1339,13 @@ The DLL exports:
 - `SWIttsAudioCvtUlawToL16`, `SWIttsAudioCvtAlawToL16`, etc.
 - `SWIttsAudioCvtInit` / `SWIttsAudioCvtShutDown`
 
-This confirms `tom8.vdb` audio data is **G.711 mu-law (ulaw) at 8000 Hz mono** — consistent with `file(1)` output on the decoded file. The `fmt ` chunk in `tom8.vdb/WAVE` should be a standard WAVE `fmt ` block encoding these parameters.
+This confirms `tom8.vdb` audio data is **G.711 mu-law (ulaw) at 8000 Hz mono** - consistent with `file(1)` output on the decoded file. The `fmt ` chunk in `tom8.vdb/WAVE` should be a standard WAVE `fmt ` block encoding these parameters.
 
 ### `writeInfoChunk` → `LIST/INFO` block
 
 The writer method `writeInfoChunk` writes a `LIST INFO` sub-chunk containing:
-- `ICRD` — creation date string (`%d-%02d-%02d` format)
-- `ICOP` — copyright string (`"Copyright %d SpeechWorks International, Inc. All Rights Reserved."`)
+- `ICRD` - creation date string (`%d-%02d-%02d` format)
+- `ICOP` - copyright string (`"Copyright %d SpeechWorks International, Inc. All Rights Reserved."`)
 
 The `LIST` chunk in `tom.vin` likely corresponds to this block.
 
@@ -1424,7 +1424,7 @@ Zero-size entries are found within normal series (e.g. `driving2_061`, `driving2
 
 ### `data`
 
-Raw PCM audio, `59374776` bytes. Accessed via `indx` offsets. No internal structure — contiguous concatenation of all utterance segments.
+Raw PCM audio, `59374776` bytes. Accessed via `indx` offsets. No internal structure - contiguous concatenation of all utterance segments.
 
 ---
 
@@ -1638,22 +1638,22 @@ Bin width = 1.0; range covers Z-scores in `[-50, 50]`.
 
 One `f32` per bin: the **negative log-probability** `−log P(Z ∈ bin)`.
 
-- Values at extremes (Z < -40 or Z > 40): `~10.963` (clipped "infinity" — rare Z-scores treated as maximum cost)
+- Values at extremes (Z < -40 or Z > 40): `~10.963` (clipped "infinity" - rare Z-scores treated as maximum cost)
 - Values near Z=0: near `0.0` (peak of natural distribution = lowest target cost)
 - Shape: inverted bell curve (−log Gaussian): cost minimum at bin 50 (Z=0), rising toward extremes
   - Bin index formula: `bin = clamp(int(z_score - range_start), 0, 99)` = `clamp(int(z + 50), 0, 99)`
   - Bin 50 = Z-score 0.0 (mean), bin 0 = Z-score -50, bin 99 = Z-score +49
 - All values are non-negative (−log P ≥ 0 for P ≤ 1)
-- Single shared histogram for all 8 continuous features (duration, pitch, voicing, power Z-scores use the same table — it encodes the empirical prior distribution of Z-score magnitudes across the corpus)
+- Single shared histogram for all 8 continuous features (duration, pitch, voicing, power Z-scores use the same table - it encodes the empirical prior distribution of Z-score magnitudes across the corpus)
 
 The histogram is used to compute target cost for continuous features: given a Z-score, look up the corresponding bin's `−log P` value as the cost contribution.
 
-**Confirmed shape** (2026-03-12 — full 100-value array dumped):
+**Confirmed shape** (2026-03-12 - full 100-value array dumped):
 
 - All values non-negative (`-log P >= 0`)
-- Minimum = **0.0 at bin 49** (Z = -1 by the `floor(z+50)` formula — empirically most common Z-score in Tom's corpus)
+- Minimum = **0.0 at bin 49** (Z = -1 by the `floor(z+50)` formula - empirically most common Z-score in Tom's corpus)
 - Maximum = **10.963** at extremes (clip value for zero-count bins)
-- Shape is NOT a smooth bell curve — the empirical data is sparse and noisy at the tails (many bins at the 10.963 clip value)
+- Shape is NOT a smooth bell curve - the empirical data is sparse and noisy at the tails (many bins at the 10.963 clip value)
 - Asymmetric left/right decay: the distribution is slightly left-skewed for Tom's recordings
 
 Selected bin values (confirmed):
@@ -1675,7 +1675,7 @@ bin   0:  10.963  (extremes clipped at max)
 bin  99:  10.963
 ```
 
-For a new voice, keep Tom's histogram unchanged unless the new speaker has a very different acoustic distribution. The histogram is a global prior — per-phone means/stds in `mean` already handle per-phone variation.
+For a new voice, keep Tom's histogram unchanged unless the new speaker has a very different acoustic distribution. The histogram is a global prior - per-phone means/stds in `mean` already handle per-phone variation.
 
 ---
 
@@ -1683,7 +1683,7 @@ For a new voice, keep Tom's histogram unchanged unless the new speaker has a ver
 
 Precomputed spectral join-cost table. Loaded by `load_join_cost_hash()` in `SWIttsUSel.dll`.
 Maps any `(uid_left, uid_right)` unit pair to a precomputed f32 join cost (0..~12).
-Not an MD5 digest — the name refers to the hash-table organization of the data.
+Not an MD5 digest - the name refers to the hash-table organization of the data.
 
 ### Container layout
 
@@ -1692,10 +1692,10 @@ Three nested sub-chunks (RIFF-style `tag + u32_size`):
 | Sub-chunk | Size (bytes) | Content |
 |-----------|-------------|---------|
 | `head` | 8 | `u32 n_rows=692190`, `u32 n_cells=2416481` |
-| `rows` | `n_rows × 4` = 2,768,760 | `u32[n_rows]` — chain start indices |
+| `rows` | `n_rows × 4` = 2,768,760 | `u32[n_rows]` - chain start indices |
 | `cell` | `n_cells × 8` = 19,331,848 | Two flat arrays (SoA): `u32[n_cells]` then `f32[n_cells]` |
 
-### `cell` sub-chunk — Structure of Arrays (file format)
+### `cell` sub-chunk - Structure of Arrays (file format)
 
 The `cell` sub-chunk stores two flat arrays back-to-back (Structure of Arrays):
 
@@ -1704,7 +1704,7 @@ u32[n_cells]   cells_A   // uid_right_owner values; 0xFFFFFFFF = sentinel
 f32[n_cells]   cells_B   // join_cost values; -1.0f at sentinel positions
 ```
 
-**CORRECTED 2026-05-05** (via [`viz/frida_hooks/hash_lookup_hook.js`](../viz/frida_hooks/hash_lookup_hook.js) live capture): each `cells_A[i]` stores the `uid_right` that "owns" the cell after suffix-sharing collapse — NOT `uid_left` as previously documented. This is what allows multiple uid_rights to share the same row offset: the verification key disambiguates which uid_right a given cell belongs to. See live-capture evidence below.
+**CORRECTED 2026-05-05** (via [`viz/frida_hooks/hash_lookup_hook.js`](../viz/frida_hooks/hash_lookup_hook.js) live capture): each `cells_A[i]` stores the `uid_right` that "owns" the cell after suffix-sharing collapse - NOT `uid_left` as previously documented. This is what allows multiple uid_rights to share the same row offset: the verification key disambiguates which uid_right a given cell belongs to. See live-capture evidence below.
 
 The DLL loader (`load_join_cost_hash`) converts this to Array of Structures in memory:
 
@@ -2049,7 +2049,7 @@ Total size: `4 + Σ(4 + n×4) over all groups = 4,969,856` (confirmed exact).
 | Most common candidate count (`n-1`) | `1` (12,409 groups) |
 | Max candidates in one group | `4831` |
 
-### `context_key` field — CONFIRMED
+### `context_key` field - CONFIRMED
 
 - Always position 0 in each group's entry list.
 - Strictly monotonically increasing across all 76,676 groups.
@@ -2121,11 +2121,11 @@ All candidates in a group share the same `unit.phone_center` value (100% confirm
 
 ---
 
-## `.vcf` — Voice Configuration File (confirmed)
+## `.vcf` - Voice Configuration File (confirmed)
 
 The `.vcf` file is the runtime configuration for the voice. It contains all unit-selection cost weights, prosody cost matrices, and file path templates loaded by the engine at startup.
 
-### Encryption — nibble-expansion cipher
+### Encryption - nibble-expansion cipher
 
 **Distinct from VIN/VDB** (which use XOR 0xCE). Each plaintext byte is split into two nibbles; each nibble is encoded as one byte, doubling the file size.
 
@@ -2203,8 +2203,8 @@ Standard XML (ISO-8859-1) with associated DTD (`SWIttsConfig.dtd`) and XSL style
 
 | Parameter | Value | Meaning |
 |-----------|-------|---------|
-| `use_joincache` | 1 | **Enabled** — use precomputed `hash` chunk |
-| `use_edgeframes` | 0 | **Disabled** — do not compute at runtime |
+| `use_joincache` | 1 | **Enabled** - use precomputed `hash` chunk |
+| `use_edgeframes` | 0 | **Disabled** - do not compute at runtime |
 | `use_dynamic_cost` | 1 | Dynamic cost enabled |
 
 #### Candidate pruning thresholds
@@ -2230,20 +2230,20 @@ The VCF defines voicing classes for each phone (used in prosody cost decisions):
 
 Four cost matrices are defined as `target_context → candidate_context → cost` lookup tables:
 
-**`sylInPhraseCosts`** (syllable-in-phrase position mismatch) — 10×10 matrix.
+**`sylInPhraseCosts`** (syllable-in-phrase position mismatch) - 10×10 matrix.
 Rows/cols: `UNDEF, PhrInitial, PhrMedial, PhrFinal, PhrSingle, SentFinal, WordInit, WordMedial, WordFinal, ContextUnknown`.
 - Diagonal (same position) = 0. Mismatches up to 10 (SentFinal↔PhrInitial).
 - `PhrSingle` and `ContextUnknown` = 100 (forbidden).
 
-**`sylInWordCosts`** (syllable accent position) — 7×7 matrix.
+**`sylInWordCosts`** (syllable accent position) - 7×7 matrix.
 Cols: `UNDEF, NoAccent, BeforeAccent, OnAccent, PostAccent, PostPostAccent, AccUnknown`.
 - All non-UNDEF mismatches = 0 (accent position is not penalized for Tom).
 
-**`sylTypeCosts`** (syllable prosodic type) — 9×9 matrix.
+**`sylTypeCosts`** (syllable prosodic type) - 9×9 matrix.
 Cols: `UNDEF, Unstressed, Stressed, PA, FirstPA, FirstPAInPhrase, LastPAInPhrase, LastPAInSent, SylUnknown`.
 - Diagonal = 0. Cross-type penalties reflect prosodic hierarchy (sentence-final vs. medial heavily penalized).
 
-**`wordInPhraseCosts`** (word-in-phrase position) — 7×7 matrix.
+**`wordInPhraseCosts`** (word-in-phrase position) - 7×7 matrix.
 Cols: `UNDEF, WordPhrInitial, WordPhrMedial, WordPhrFinal, WordPhrUnknown, WordSentInitial, WordSentFinal`.
 - Phrase-final ↔ phrase-medial asymmetries up to 5.
 
@@ -2262,7 +2262,7 @@ To create a new voice `NewVoice`:
 
 ### `feat.filename` stored-id vs positional index
 
-Each `feat.filename` entry ends with a `u32 stored_id` field. The entries in the chunk are **not** stored in stored_id order — 2,345 of 8,118 entries have `stored_id ≠ positional_index` in `tom.vin`. `unit.file_idx` is the stored_id, not the positional index. Any tool that builds a positional array (`filenames.append(name)`) and then looks up `filenames[file_idx]` will silently retrieve the **wrong name** for the ~29% of units whose file_idx falls in the mismatched range.
+Each `feat.filename` entry ends with a `u32 stored_id` field. The entries in the chunk are **not** stored in stored_id order - 2,345 of 8,118 entries have `stored_id ≠ positional_index` in `tom.vin`. `unit.file_idx` is the stored_id, not the positional index. Any tool that builds a positional array (`filenames.append(name)`) and then looks up `filenames[file_idx]` will silently retrieve the **wrong name** for the ~29% of units whose file_idx falls in the mismatched range.
 
 **Correct pattern:**
 ```python
@@ -2510,6 +2510,97 @@ was removed entirely.
 To verify no monotonicity violations exist in a built VIN, read all unit records sorted by
 `(file_idx, local_pos)` and check `local_pos[i] <= local_pos[i+1]` for all consecutive records
 sharing the same `file_idx`.
+
+---
+
+## USel Engine -- the `hash` cell array has no bounds check
+
+**The second crash of this shape, and the same trap: our engine defends itself where theirs
+does not, so a broken container renders perfectly in `spfy_synth`.** Found 2026-08-22, on the
+shipped CRS Tom, with Frida.
+
+### The constraint
+
+The join-cost table is row displacement: `idx = rows[uid_right] + uid_left`, and a cell belongs
+to whichever row its stored validator names. The lookup at `SWIttsUSel.dll+0xb7e6`
+(`0x08E8B7E6`, inside the Viterbi inner loop) is:
+
+```
+8b 74 24 40    mov  esi, [esp+0x40]        ; esi = cells + rows[uid_right]*8
+39 1c c6       cmp  [esi + eax*8], ebx     ; eax = uid_left, ebx = uid_right   <-- AV
+75 0a          jne  miss
+d9 44 c6 04    fld  dword [esi + eax*8 + 4]
+```
+
+There is **no comparison against `n_cells`** in front of that read. The key comparison IS the
+miss test and it happens after the load. `spfy/src/usel/hash.c` guards with
+`if (idx >= n_cells) return SPFY_E_OOB;` -- the vendor has no such line.
+
+So the container must guarantee that every probe the engine can make lands inside the array,
+misses included. `uid_left` ranges over the unit ids, so:
+
+```
+n_cells >= max(rows[]) + n_rows
+```
+
+**This is the vendor's own construction rule, not a chosen margin.** Every vendor voice hits it
+exactly:
+
+| voice | max(rows) | n_rows | n_cells | delta |
+|---|---|---|---|---|
+| tom | 1,724,291 | 692,190 | 2,416,481 | +0 |
+| jill | 2,059,585 | 560,534 | 2,620,119 | +0 |
+| javier | 1,638,488 | 668,348 | 2,306,836 | +0 |
+| paulina | 1,367,589 | 663,410 | 2,030,999 | +0 |
+| felix | 2,906,700 | 737,394 | 3,644,094 | +0 |
+
+### Crash signature
+
+```
+EXCEPTION_ACCESS_VIOLATION reading past the cell allocation, at 0x8E8B7E6
+Deterministic for a given phrase + voice, but which phrase depends on the packing
+No error message; the Speechify server process dies and the client sees a dropped connection
+The server log ends on "Entering SWIttsUSelUnitSelection" with no matching "Exiting"
+```
+
+`spfy_hash_build` packed to the last POPULATED cell, which left crstom 5,602 cells short and
+crsmara 6,506 short. crstom died on `attention signal.`: `rows[222144] = 4,449,427` plus
+`uid_left 278,391` = 4,727,818 against `n_cells 4,724,617`, reading 25,616 bytes past a
+37,797,888-byte block. Whether a given short table faults at all depends on what follows the
+allocation, which is decided per process -- crsmara carried the identical defect for a week
+and had not been asked yet.
+
+### Locating it
+
+`viz/frida_hooks/crash_report_hook.js` installs `Process.setExceptionHandler` and nothing else
+-- no Interceptors, so it cannot perturb the x87 hot loops the entry-only policy exists to
+protect. It reports the faulting module+offset, the registers, and
+`Process.findRangeByAddress` for each pointer register, which is what turns `esi` into "the
+37,797,888-byte cell allocation, and the read was 0x6070 past its end". Drive it with
+`C:\tmp\crashfrida.py` (one phrase) or `crashsoak.py` (walk a file until something faults).
+
+⚠ Frida's own allocations move the heap, so a marginal overrun can stop faulting under the
+hook. Confirm from the FILE arithmetic, not from whether it reproduced.
+
+### The fix
+
+`spfy_hash_build` pads to `max(rows[]) + n_rows` after placement; `spfy_vb_verify` gates it
+(`hash tail absorbs the widest probe`); `reveng/spfy4/tools/voicebuild/vb_hashpad.py --write`
+repairs a VIN already built by appending empty cells and bumping `head.n_cells`. The padding
+is inert by construction and was proved so: 88 renders across both voices came back
+byte-identical to the pre-pad files through `spfy_synth`.
+
+### Validation
+
+`spfy_vb_verify` covers it, but the general lesson does not have a checker: **a container
+change wants a bare-Speechify soak, not just a verify pass.** `C:\tmp\soak.sh` fires a text
+file at the server and reports any phrase after which the process is gone. Its control -- the
+pre-pad VIN through the same soak -- crashed 27 of 261 phrases where the padded one crashed 0.
+
+⚠ `server_ctl.py use <voice>` returns early when the config already names that voice and the
+port is open. It does **not** restart, so a server still holding the previous bytes of the same
+`.vin` keeps serving them. Stop first, or you will chase a phantom crash on an already-fixed
+voice.
 
 ---
 
@@ -2772,11 +2863,11 @@ Per-candidate cost computation (from the inner loop disassembly):
    - Each entry has 4 (ptr, stride) pairs at offsets `(+0x08, +0x04)`, `(+0x14, +0x10)`,
      `(+0x20, +0x1c)`, `(+0x2c, +0x28)`. The pointer is a float array; the stride is the
      row stride for a target-side feature.
-   - Target-side indices come from `voice[0x604][this[0x4/0x8/0x10/0x14]]` — a u32[]
+   - Target-side indices come from `voice[0x604][this[0x4/0x8/0x10/0x14]]` - a u32[]
      translation table at voice+0x604 indexed by features in the scorer's `this` struct.
    - Per-candidate 4 context bytes live at `voice[0xc0]` or `voice[0xc4]`
      (two layout variants); each candidate has 4 bytes at `voice[0xc0][cand_idx*4+0..3]`.
-     These are NOT the same as the on-disk unit bytes 23-26 directly — there's an
+     These are NOT the same as the on-disk unit bytes 23-26 directly - there's an
      intermediate translation via `voice[0x604]`.
    - Final formula:
      ```
@@ -2786,7 +2877,7 @@ Per-candidate cost computation (from the inner loop disassembly):
      ```
    - Session 9 extracted the 4 on-disk ctx bytes (0x17-0x1A) into `Unit::phone_ctx_{0,1,2,last}`
      as infrastructure. Full impl blocked on RE of `voice[0x610]`/`voice[0x604]`/`voice[0xc0]`
-     formation — these are not direct VIN chunk reads, they're computed at voice-load time
+     formation - these are not direct VIN chunk reads, they're computed at voice-load time
      from multiple chunks (likely `ckls` + `mean` + `hist`).
 
 4. **Duration / Unit Bias cost** (0x8E8925F-0x8E892AF): Quadratic penalty on f0_context deviation.
@@ -3173,7 +3264,7 @@ of whether the FE's per-word ToBI annotations do anything downstream:
 - **Accent PRESENCE (`,H*`) is live**: it feeds `syl_accent` → sp[1]
   sylType / sp[2] sylInWord → durt/f0tr CART targets + SP cost matrices →
   target cost. Removing the `H*` from one word re-selected that word's whole
-  unit span (audibly different). It is a *bias*, not a command — adding an
+  unit span (audibly different). It is a *bias*, not a command - adding an
   accent to an unaccented word changed the sp targets but the Viterbi picked
   the same units (pool had no cheaper contoured alternative; Tom's
   `sylInWordCosts` matrix is degenerate).
@@ -3184,7 +3275,7 @@ of whether the FE's per-word ToBI annotations do anything downstream:
   back end: flipping them is byte-identical. Their binary consumers were
   never found (fe-decomp tier3). Final-fall vs continuation prosody actually
   derives from the phrase terminator punctuation (`local_10` in the sp
-  populator), which correlates with — but does not read — the tone mark.
+  populator), which correlates with - but does not read - the tone mark.
   The reimpl's env-gated `SPFY_PROSODY_REALIZE` + `SPFY_PROSODY_BT_GAIN`
   layer turns them into a real f0tr-target bias (selection-driven, no DSP).
 

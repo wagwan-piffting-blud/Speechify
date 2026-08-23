@@ -1,5 +1,5 @@
 /*
- * spfy/src/fe_host/fe_host_emu.c — emulator-backed FE.
+ * spfy/src/fe_host/fe_host_emu.c - emulator-backed FE.
  *
  * Implements the same public API as fe_host.c (the native-PE host) but
  * drives the embedded SWIttsFe-en-US.dll through spfy/src/host_emu/
@@ -249,7 +249,7 @@ static int parse_fe_output_into_slots(hosted_fe_t *fe,
  * caller frees). */
 static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     if (iobj_err_flag(fe)) {
-        fprintf(stderr, "[fe_host_emu] err_flag latched before synth — bailing\n");
+        fprintf(stderr, "[fe_host_emu] err_flag latched before synth - bailing\n");
         return NULL;
     }
 
@@ -281,7 +281,7 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     return tagged;
 }
 
-/* ============================================================ Public API —
+/* ============================================================ Public API -
  * open ============================================================ */
 
 int spfy_fe_open(const char *vocab_json,
@@ -309,7 +309,7 @@ int spfy_fe_open_lang(const char *lang,
         }
         if (lang && *lang) {
             fprintf(stderr,
-                    "[fe_host_emu] no embedded FE for language '%s' — "
+                    "[fe_host_emu] no embedded FE for language '%s' - "
                     "falling back to '%s'\n", lang, spfy_fe_dlls[0].lang);
         }
         img = &spfy_fe_dlls[0];
@@ -364,7 +364,7 @@ int spfy_fe_open_lang(const char *lang,
     return 0;
 }
 
-/* ============================================================ Public API —
+/* ============================================================ Public API -
  * close ============================================================ */
 
 void spfy_fe_close(spfy_fe_t *opaque) {
@@ -381,7 +381,7 @@ void spfy_fe_close(spfy_fe_t *opaque) {
     free(fe);
 }
 
-/* ============================================================ Public API —
+/* ============================================================ Public API -
  * synth ============================================================ */
 
 int spfy_fe_text_to_tagged(spfy_fe_t  *opaque,
@@ -449,7 +449,7 @@ void spfy_fe_utterance_free(spfy_fe_utterance_t *u) {
     free(u);
 }
 
-/* ============================================================ Public API —
+/* ============================================================ Public API -
  * voice + stats
  * ============================================================ */
 

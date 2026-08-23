@@ -174,7 +174,7 @@ def engine_tuple_for_slot(slot_idx: int, traces: dict) -> FETuple:
     # per the audit_focused.py finding. So presence of f0tr leaf at
     # this slot means voicing=1; absence on a non-silence slot means 0.
     if ctx5 and ctx5[2] in SILENCE_HP_CLASSES:
-        voicing = None  # silence pad — voicing not meaningful
+        voicing = None  # silence pad - voicing not meaningful
     else:
         voicing = 1 if f0tr is not None else 0
     return FETuple(ctx5=ctx5, sp5=sp5, voicing=voicing,
@@ -335,12 +335,12 @@ def detect_same_rec(engine_uid: Optional[int],
     Two engine same_rec patterns surface in the audit (Phase 2 D-13 +
     Phase 3 03-02 unknown-bucket investigation):
 
-    - 'seq_continuation': engine picks UID == prev_slot_engine_UID + 1 —
+    - 'seq_continuation': engine picks UID == prev_slot_engine_UID + 1 -
       engine continues using sequential UIDs from the same recording chunk
       without re-querying PRSL. Documented in pool_gen_diff.py:117-122.
 
     - 'outside_pool': engine picks a UID that is NOT in our PRSL pool for
-      this slot — engine has hidden candidates beyond what prsl_slot trace
+      this slot - engine has hidden candidates beyond what prsl_slot trace
       emits. Captures the secondary_lookup class from pool_gen_diff.
 
     Both subtypes are DP/USel-side phenomena, NOT FE-input divergence.
@@ -558,7 +558,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Phase 2 handoff index (per-corpus_id slot list + record lookup).
     # Also build a FULL Phase 2 index keyed by (corpus_id, slot_idx) for
-    # same_rec detection — prev-slot's engine_uid may live at a slot that
+    # same_rec detection - prev-slot's engine_uid may live at a slot that
     # is NOT in the handoff set.
     handoff_records = (load_phase2_handoff()
                        if args.phase2_handoff_only else [])
@@ -712,19 +712,19 @@ def _self_test() -> int:
     if cls != "pool_n_diff" or fld != "pool_n":
         failures.append(f"Test 8: expected pool_n_diff/pool_n; got ({cls}, {fld})")
 
-    # Test 9: detect_same_rec — seq_continuation (engine_uid == prev+1)
+    # Test 9: detect_same_rec - seq_continuation (engine_uid == prev+1)
     sub = detect_same_rec(engine_uid=109699, prev_engine_uid=109698,
                           our_pool_uids=[1, 2, 3])
     if sub != "seq_continuation":
         failures.append(f"Test 9: expected seq_continuation; got {sub}")
 
-    # Test 10: detect_same_rec — outside_pool (engine_uid not in our pool)
+    # Test 10: detect_same_rec - outside_pool (engine_uid not in our pool)
     sub = detect_same_rec(engine_uid=42, prev_engine_uid=10,
                           our_pool_uids=[1, 2, 3])
     if sub != "outside_pool":
         failures.append(f"Test 10: expected outside_pool; got {sub}")
 
-    # Test 11: detect_same_rec — None when neither pattern fires
+    # Test 11: detect_same_rec - None when neither pattern fires
     sub = detect_same_rec(engine_uid=2, prev_engine_uid=10,
                           our_pool_uids=[1, 2, 3])
     if sub is not None:

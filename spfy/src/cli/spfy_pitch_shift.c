@@ -1,4 +1,4 @@
-/* spfy_pitch_shift — standalone A/B tester for the TD-PSOLA pitch shifter. */
+/* spfy_pitch_shift - standalone A/B tester for the TD-PSOLA pitch shifter. */
 
 #include "pitch_shift.h"
 

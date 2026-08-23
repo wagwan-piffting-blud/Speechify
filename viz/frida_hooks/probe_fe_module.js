@@ -1,5 +1,5 @@
 'use strict';
-/* One-shot diagnostic — find SWIttsFe / SWIttsEngine / SWIttsUSel module
+/* One-shot diagnostic - find SWIttsFe / SWIttsEngine / SWIttsUSel module
  * loads in the target process, report base addresses. */
 var mods_of_interest = [
     'SWIttsFe-en-US.dll',

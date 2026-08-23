@@ -19,6 +19,10 @@
 #   SPFY_MULTILIB      1 = also install gcc-multilib (the i386 leg)
 #   SPFY_VERIFY        1 = synthesize and check the reference hash
 #                      (default 1; set 0 to build only)
+#   SPFY_VERSION       calver stamped into the binary and reported by
+#                      `spfy_synth --version`. Left unset locally, where
+#                      CMake falls back to dev-<sha> and the update checker
+#                      then refuses to compare against a release.
 #
 # Deps are installed HERE rather than in a separate workflow step because
 # a container leg gets one `docker run`; a second run would start from a
@@ -64,6 +68,15 @@ fi
 
 echo "=== host: $(uname -m), $(nproc) cpu(s) ==="
 
+# Passed only when CI set it. An empty -DSPFY_VERSION= would ALSO fall back
+# to dev-<sha> (CMake treats "" as false), so this is belt and braces -- but
+# it keeps `cmake ..` invocations readable in the log.
+VERSION_ARG=""
+if [ -n "${SPFY_VERSION:-}" ]; then
+    VERSION_ARG="-DSPFY_VERSION=${SPFY_VERSION}"
+fi
+
+# shellcheck disable=SC2086
 cmake -S "$SRC_DIR" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_FLAGS="$EXTRA_CFLAGS" \
@@ -71,7 +84,8 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_SHARED_LINKER_FLAGS="$EXTRA_LDFLAGS" \
     -DSPFY_STRICT_FP=ON \
     -DSPFY_BUILD_TESTS=OFF \
-    -DSPFY_FE_HOSTED=ON
+    -DSPFY_FE_HOSTED=ON \
+    $VERSION_ARG
 
 cmake --build "$BUILD_DIR"
 

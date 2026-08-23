@@ -217,7 +217,7 @@ int spfy_fe_textnorm_run(const spfy_fe_t            *fe,
         spfy_fe_stream_push(delta, SPFY_STREAM_TOKEN, kt);
     }
 
-    /* Plan 03-05 / FE-04 — clause-boundary intonation breaks. */
+    /* Plan 03-05 / FE-04 - clause-boundary intonation breaks. */
     if (!getenv("SPFY_NO_INTONATION_BREAK")) {
         /* Trigger list trimmed to closed-class words EMPIRICALLY observed
          * in the engine_breaks_v2.jsonl corpus extraction, plus close
@@ -233,7 +233,7 @@ int spfy_fe_textnorm_run(const spfy_fe_t            *fe,
             NULL
         };
         const uint32_t MIN_WORDS_FOR_BREAK = 12u;
-        /* MIN_BREAK_POSITION is computed per-phrase as ceil(word_count/2) —
+        /* MIN_BREAK_POSITION is computed per-phrase as ceil(word_count/2) -
          * stricter than the originally-coded constant 6. */
 
         /* Walk %word stream grouped by phrase_id; for each phrase that has
@@ -318,7 +318,7 @@ int spfy_fe_textnorm_run(const spfy_fe_t            *fe,
             spfy_fe_stream_push(delta, SPFY_STREAM_PHRASE, pt);
 
             /* Re-fetch %word array (push may have invalidated pointers if
-             * %phrase shares a stream backing — but in this codebase each
+             * %phrase shares a stream backing - but in this codebase each
              * stream has its own backing, so words_arr stays valid). */
             uint32_t break_byte_off = words_arr[break_word_idx].fields[0];
 

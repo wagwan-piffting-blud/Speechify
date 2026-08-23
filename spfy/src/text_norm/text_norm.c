@@ -1,4 +1,4 @@
-/* text_norm.c — see text_norm.h. */
+/* text_norm.c - see text_norm.h. */
 
 #include "text_norm.h"
 
@@ -265,7 +265,7 @@ static void emit_number(sink_t *s, const char *digits, size_t n,
 
 static int is_word_char(int c)
 {
-    /* Apostrophes are kept inside words: "don't", "speechify's" — only the
+    /* Apostrophes are kept inside words: "don't", "speechify's" - only the
      * dict / suffix-strip stage decides what to do with them. */
     return isalpha((unsigned char)c) || c == '\'';
 }
@@ -459,7 +459,7 @@ static int8_t balabolka_absspeed_to_rate_pct(int absspeed)
            0,
          +27, +35, +44, +54, +64, +75, +88,+102,+117,+127
     };
-    /* LUT indexing: -10 → 0, 0 → 10 (NOT the middle index — it's positioned
+    /* LUT indexing: -10 → 0, 0 → 10 (NOT the middle index - it's positioned
      * at the end of the negative bank). */
     int idx;
     if (absspeed <= -1)      idx = absspeed + 10;
@@ -595,7 +595,7 @@ int spfy_text_normalize(const char *input,
     int8_t prosody_pitch_stack[SSML_PROSODY_STACK_MAX] = {0};
     int8_t prosody_rate_stack [SSML_PROSODY_STACK_MAX] = {0};
     int    prosody_depth = 0;
-    /* current_* are the running totals (sum down the stack) — applied
+    /* current_* are the running totals (sum down the stack) - applied
      * additively so nested tags compose: outer "fast" + inner "+5st" yields
      * both. */
     int8_t cur_pitch_st = 0;
@@ -630,7 +630,7 @@ int spfy_text_normalize(const char *input,
 
             if (name_len == 5 && starts_with_ci(name, "speak")) {
             } else if ((name_len == 1 && (name[0] == 'p' || name[0] == 's'))) {
-                /* <p>/<s> wrappers — engine treats as paragraph/sentence;
+                /* <p>/<s> wrappers - engine treats as paragraph/sentence;
                  * we map close tags to sentence breaks for prosody. */
                 if (is_close) push_break(&s, SPFY_TOKEN_SENTENCE_BREAK, '.');
             } else if (name_len == 5 && starts_with_ci(name, "break")) {
@@ -699,7 +699,7 @@ int spfy_text_normalize(const char *input,
                     /* Speak the alias instead of the inner content. */
                     char alias[128];
                     if (ssml_get_attr(name_end, tag_end, "alias", alias, sizeof alias)) {
-                        /* Tokenize alias inline — recurse via a local
+                        /* Tokenize alias inline - recurse via a local
                          * mini-loop so we don't blow the call stack on
                          * nested subs. */
                         const char *ap = alias;
@@ -741,7 +741,7 @@ int spfy_text_normalize(const char *input,
                     }
                 }
             } else if (name_len == 7 && starts_with_ci(name, "prosody")) {
-                /* SSML <prosody rate="..." pitch="..."> — push the deltas
+                /* SSML <prosody rate="..." pitch="..."> - push the deltas
                  * onto the prosody stack on open, pop on close. */
                 if (is_close) {
                     if (prosody_depth > 0) {
@@ -775,7 +775,7 @@ int spfy_text_normalize(const char *input,
                     if (ssml_get_attr(name_end, tag_end, "absspeed", val, sizeof val))
                         dr = balabolka_absspeed_to_rate_pct(atoi(val));
                     else if (ssml_get_attr(name_end, tag_end, "speed", val, sizeof val))
-                        /* Relative SAPI form — treat the same as absspeed
+                        /* Relative SAPI form - treat the same as absspeed
                          * since we don't track an absolute current rate. */
                         dr = balabolka_absspeed_to_rate_pct(atoi(val));
                     prosody_pitch_stack[prosody_depth] = 0;
@@ -818,7 +818,7 @@ int spfy_text_normalize(const char *input,
             }
             buf[k] = '\0';
             to_lower_buf(buf);
-            /* SSML <say-as interpret-as="characters"> — emit one WORD per
+            /* SSML <say-as interpret-as="characters"> - emit one WORD per
              * letter so the existing letter-spell-out path in fe_internal
              * handles each as a noun letter-name. */
             if (ssml_spell_chars) {

@@ -1,7 +1,7 @@
 """Codegen the baked POS dictionary as a C source file.
 
 Reads spfy/data/baked_pos.csv (from pos_sweep_aggregate.py) and emits
-spfy/src/fe/baked_pos.c — a sorted (word, pos_class) lookup table for
+spfy/src/fe/baked_pos.c - a sorted (word, pos_class) lookup table for
 binary search at LTS time.
 
 Output schema:
@@ -61,7 +61,7 @@ POS_ENUM = {
     "pro2":           "POS_PRO2",
     "wh":             "POS_WH",
     "conj":           "POS_CONJ",
-    "dem":            "POS_DEM",        # this/that — demonstrative
+    "dem":            "POS_DEM",        # this/that - demonstrative
     "undef":          "POS_UNDEF",
     # Special / marginal classes
     "there":          "POS_THERE",      # existential there
@@ -87,11 +87,11 @@ OPEN_ENUMS = {
     "POS_NOUN_ADJ", "POS_NOUN_VERB", "POS_VERB_ADJ", "POS_NOUN_VERB_ADJ",
     "POS_ADJ_ADV",
     # Context-dependent / defer to FUNC_WORDS:
-    #   POS_PRO, POS_PRO2 — pronouns accent ~50% (boundary tone fix
+    #   POS_PRO, POS_PRO2 - pronouns accent ~50% (boundary tone fix
     #     handles last-syl pronoun via different mechanism)
-    #   POS_WH         — wh-words 50% accent ("why" yes, "how" no)
-    #   POS_UNDEF      — "one" accents in single-word, varies otherwise
-    #   POS_PREP       — most preps never accent (FUNC_WORDS catches),
+    #   POS_WH         - wh-words 50% accent ("why" yes, "how" no)
+    #   POS_UNDEF      - "one" accents in single-word, varies otherwise
+    #   POS_PREP       - most preps never accent (FUNC_WORDS catches),
     #     but verb-particles like "over" in "jumps over" accent. Single-
     #     word sweep can't distinguish; defer to FUNC_WORDS for the
     #     stable ones, accent the rest by default.

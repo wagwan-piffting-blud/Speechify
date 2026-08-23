@@ -1,5 +1,24 @@
 {
-  "_comment": "Work-in-progress build, deliberately staged here for testing once it's ready. Its VCF is still vendor Tom's, so without the display override below the picker would show two voices both called 'Tom'. Skip is set to true for now since there is no data here yet.",
+  "schema": 1,
+  "id": "crstom",
   "display": "CRS Tom",
-  "skip": true
+  "lang": "en-US",
+  "version": "2026.08.22",
+  "files": [
+    {
+      "name": "crstom.vin",
+      "bytes": 59211464,
+      "sha256": "dfad2920b9051b1a8b57b701478e78af35921e867f28c00b80d8f69e43c1a112"
+    },
+    {
+      "name": "crstom8.vdb",
+      "bytes": 100978880,
+      "sha256": "c9721e97efe2b9244786755c2fcd23b8d25f9f734c54f6d459323dd62fd095c1"
+    },
+    {
+      "name": "crstom.vcf",
+      "bytes": 46658,
+      "sha256": "bfb0b28ee6153938c159328913fa259e00128b1c3498c218ca07978ab1defdce"
+    }
+  ]
 }

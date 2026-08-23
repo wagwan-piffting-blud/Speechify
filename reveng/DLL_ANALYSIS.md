@@ -701,11 +701,11 @@ Logic: `amp_enabled = (apply_target_prosody != 0) && (amp_mods != 0)`
 ### pmindex / pmdata ON-DISK FORMAT (SOLVED 2026-08-04, Ghidra + Frida)
 
 This closes old open question #8. The two files are the ONLY source of pitch
-marks in the engine — see "Pitch marks have no runtime source" below.
+marks in the engine - see "Pitch marks have no runtime source" below.
 
-**Load path.** `SWIttsWsolaCreateVoice` @0x08EE53A0 reads three VCF params —
+**Load path.** `SWIttsWsolaCreateVoice` @0x08EE53A0 reads three VCF params -
 `tts.voiceCfg.speechdb`, `tts.voiceCfg.pmindex`, `tts.voiceCfg.pmdata` (the
-latter two at requirement level 3 = optional) — and passes all three to the
+latter two at requirement level 3 = optional) - and passes all three to the
 `WsolaVoiceDatabase` ctor `FUN_08EE4F20`. The ctor calls the pitch loader
 `FUN_08EE4C90` (`WsolaVoiceDatabase::pitchdbfileopen`) **only if BOTH paths
 are non-NULL**; an absent or empty VCF param yields NULL and the whole pitch
@@ -768,10 +768,10 @@ The packed int16 file buffer lands in `state+0x3c`; each value is
 sign-extended into field 0 of a fresh 28-byte record; `FUN_08EE23D0` then
 cumulative-sums them into absolute positions and chains each sub-unit's mark
 pointer (`prev_n * 0x1c + prev_ptr`). This also resolves the apparent
-stride contradiction — the int16 buffer and the 28-byte array are two stages
+stride contradiction - the int16 buffer and the 28-byte array are two stages
 of the same pipeline, not two different data sources.
 
-**MODE 0 IS GATED ONLY ON pmdata BEING LOADED — `apply_target_prosody` is
+**MODE 0 IS GATED ONLY ON pmdata BEING LOADED - `apply_target_prosody` is
 orthogonal.** From `SWIttsWsolaConcat` @0x08EE65E0:
 
 ```c
@@ -787,13 +787,13 @@ overlap-add **by itself**, with no VCF flag. `apply_target_prosody` separately
 gates the duration/amplitude modification path (`state+0x2c` / `state+0x2d`)
 inside `FUN_08EE2960`. This corrects the earlier reading of the 2026-08-04
 VCF experiment: setting `apply_target_prosody=1` on a voice with no pm files
-hung in the **dur/amp modification** path, not in the mode-0 path — mode was
+hung in the **dur/amp modification** path, not in the mode-0 path - mode was
 still 1. The safe first experiment is therefore **pm files only, VCF prosody
 flags untouched**.
 
 Two further consequences worth stating plainly:
 
-- **The index is keyed per SUB-UNIT, not per WsolaUnit — and a "sub-unit" is
+- **The index is keyed per SUB-UNIT, not per WsolaUnit - and a "sub-unit" is
   exactly a VIN unit-table record.** `unit[0x08]` is the **uid** of the
   WsolaUnit's first sub-unit; a WsolaUnit is one contiguous RUN of selected
   half-phones, so its 1..8 sub-units are **consecutive uids**, and the index
@@ -802,7 +802,7 @@ Two further consequences worth stating plainly:
   **Proven, not assumed** (`<scratchpad>/verify_subunit_is_uid.py`,
   2026-08-04): for all 44 WsolaUnits in the two live Frida traces, decoding
   `tom.vin` `unit/data` at `uid = key + j` reproduced **every** sub-unit
-  duration and the unit's `+0x0c` — **44 ok, 0 bad**. Mapping:
+  duration and the unit's `+0x0c` - **44 ok, 0 bad**. Mapping:
 
   | WsolaUnit field | VIN unit-table field |
   | --------------- | -------------------- |
@@ -812,7 +812,7 @@ Two further consequences worth stating plainly:
   | `sub_unit+0x08` | `dur_like` |
 
   Tom's `unit/data` is 4,917,791 B / 29 B = **169,579 records**, uid 0..169578
-  — exactly the observed key range. So pmindex has **169,579 entries** and is
+  - exactly the observed key range. So pmindex has **169,579 entries** and is
   **1,356,644 bytes** (`12 + 8*169579`).
 
   Note these are **1 ms ticks, not samples**: `FUN_08EE2960` does
@@ -823,7 +823,7 @@ Two further consequences worth stating plainly:
 
   A sub-unit's audio is therefore
   `vdb_entry(name(file_idx)).data_offset + local_pos*8`, length `dur_like*8`
-  — the same arithmetic spfy already does at
+  - the same arithmetic spfy already does at
   `spfy/src/cli/spfy_concat.c:203-204`.
 
   **Supersedes the older WsolaUnit table earlier in this file**, which has
@@ -833,7 +833,7 @@ Two further consequences worth stating plainly:
   and then logs `"subunit length %d, last pmark %d"`, i.e. marks are stored as
   **deltas (pitch periods) in samples** and summed into positions. NOTE: that
   function strides 0x1c bytes over int-sized records (`IMUL EAX,EAX,0x1c`
-  @0x08EE2410), which is NOT the packed int16 buffer `getPitchMarks` fills —
+  @0x08EE2410), which is NOT the packed int16 buffer `getPitchMarks` fills -
   so the two are separate representations and the period-vs-position reading
   of the FILE is inferred, not directly proven. Verify empirically.
 
@@ -845,7 +845,7 @@ disassembly exactly):
 
 | offset | meaning |
 | ------ | ------- |
-| `+0x08` | global sub-unit index — the pmindex key |
+| `+0x08` | global sub-unit index - the pmindex key |
 | `+0x0c` | start offset |
 | `+0x10` | total duration (samples), = sum of sub-unit lengths |
 | `+0x1c` | running total mark count (filled by getPitchMarks) |
@@ -855,13 +855,13 @@ disassembly exactly):
 Sub-unit: `+0x08` length in samples (observed 9..203), `+0x10` n_pmarks,
 `+0x14` pointer into the mark buffer.
 
-### THE DTD GATE — why adding any new VCF param kills the server
+### THE DTD GATE - why adding any new VCF param kills the server
 
 **`bin/SWIttsConfig.dll` carries an EMBEDDED DTD** that enumerates every legal
 `param/@name`. It is resolved from the VCF's `PUBLIC` id, NOT from
 `config/SWIttsConfig.dtd` (that on-disk copy has **zero** `voiceCfg` names and
 is not what validates a VCF). The embedded enumeration lists **122**
-`tts.voiceCfg.*` names — and does **not** include `pmindex`, `pmdata`,
+`tts.voiceCfg.*` names - and does **not** include `pmindex`, `pmdata`,
 `apply_target_prosody`, `use_prosody`, `dur_mods` or `amp_mods`.
 
 Adding an unlisted param makes the server **exit at startup**, rc=5:
@@ -873,11 +873,11 @@ CRITICAL|2064|Speechify server: XML configuration file parse error
 ```
 
 **This retroactively explains the 2026-08-04 `apply_target_prosody=1`
-"hang at synthesis".** It was not a pitch-mark-dependent code path dying — the
+"hang at synthesis".** It was not a pitch-mark-dependent code path dying - the
 server never started, so `spfy_dumpwav` was talking to nothing. Any conclusion
 drawn from that experiment is void.
 
-**Fix — no binary patching required.** An internal DTD subset is read *before*
+**Fix - no binary patching required.** An internal DTD subset is read *before*
 the external one and the FIRST declaration of an attribute wins, so
 redeclaring `param/@name` as `NMTOKEN` neutralises the enumeration:
 
@@ -902,12 +902,12 @@ Frida `wsola_unit_probe`, same two phrases, 44 units, before vs after:
 
 | | mode_flag histogram |
 | --- | --- |
-| no pm files | `{1: 44}` — plain WSOLA |
-| pm files installed | `{0: 44}` — **selective F0 smoothing** |
+| no pm files | `{1: 44}` - plain WSOLA |
+| pm files installed | `{0: 44}` - **selective F0 smoothing** |
 
 The engine renders cleanly in mode 0. A/B on three weather phrases:
 duration +0.3..+1.3%, RMS -0.09..-0.25 dB (i.e. not glitching), F0 median
-within +-3 Hz, and **F0 IQR consistently DOWN** (-4.72, -5.37, -0.83 Hz) —
+within +-3 Hz, and **F0 IQR consistently DOWN** (-4.72, -5.37, -0.83 Hz) -
 the direction S4 sits in. Jitter barely moved (3.23% -> 3.19% mean), which is
 expected: these marks are synthesised from the unit table's own F0 bytes, not
 measured from the VDB audio. Measuring real marks is the obvious next lever.
@@ -923,14 +923,14 @@ recording** (pyworld dio+stonemask period track, each mark refined to the
 argmax of a ~900 Hz low-passed copy within ±30% of a period), then slices per
 uid. Two properties the synthetic generator cannot have:
 
-1. Phase stays coherent **across unit joins** — a per-unit mark train restarts
+1. Phase stays coherent **across unit joins** - a per-unit mark train restarts
    phase at every boundary, which is exactly what mode-0 OLA is trying to fix.
 2. A unit's **first period is the distance from unit start to its first mark**,
    i.e. its phase offset. The synthetic generator always emitted a full period
    there, discarding the one number mode 0 consumes.
 
 Tom: 6,849 recordings marked in ~5 s on 20 workers, 770,397 marks, median
-period 67 samples = **119 Hz** (Tom's known median F0 — a good independent
+period 67 samples = **119 Hz** (Tom's known median F0 - a good independent
 check that the detector locks to real cycles).
 
 Three-way A/B, mean over the same 3 phrases:
@@ -948,7 +948,7 @@ where synthesised was mixed (+0.12, -0.25, -0.02), and disturb amplitude less
 a third of the gap; the remaining lever is a true GCI estimator rather than a
 low-pass peak anchor.
 
-### THE MODIFICATION SURFACE IS RATE + VOLUME ONLY — NO PITCH (2026-08-04)
+### THE MODIFICATION SURFACE IS RATE + VOLUME ONLY - NO PITCH (2026-08-04)
 
 Closes the "can we put an F0 contour in the Target relation" question.
 
@@ -965,7 +965,7 @@ Only `rate` raises the flag that becomes `resource+0x28` -> `state+0x2c`, the
 duration-modification gate in `FUN_08EE2960`, where
 `rate = CONST / sub_unit[0x2c]` scales `sub_unit[0x18]` (target duration)
 against `sub_unit[0x1c]` (original). So **`+0x18`/`+0x1c` is a DURATION
-source/target pair, not a pitch pair** — which is why `apply_target_prosody`
+source/target pair, not a pitch pair** - which is why `apply_target_prosody`
 is inert: `FUN_08EE6010` sets them equal and nothing else ever differs them.
 
 There is no pitch event type, and the DLL's entire pitch vocabulary is about
@@ -989,7 +989,7 @@ Consequences:
   accent peaks) or from POST-HOC PSOLA outside the engine
   (`reveng/spfy4/tools/f0_contour_shape.py`).
 - If Speechify 4 genuinely had wider expressive range, it cannot have come
-  from configuring this machinery — it would require a pitch-modification
+  from configuring this machinery - it would require a pitch-modification
   stage this lineage does not contain.
 
 ### Pitch marks have no runtime source (Frida, 2026-08-04)
@@ -997,7 +997,7 @@ Consequences:
 `wsola_unit_probe_hook.js` was run against the live stock Tom voice
 (2 phrases, 44 units). Result across **every** unit:
 
-- `mode_flag` (state+0x3614) = **1** — plain WSOLA, always.
+- `mode_flag` (state+0x3614) = **1** - plain WSOLA, always.
 - sub-unit `+0x10` (n_pmarks) = **0**, `+0x14` (mark ptr) = **NULL**.
 
 The hook's three standing hypotheses are therefore **all refuted**: marks are
@@ -1492,8 +1492,8 @@ scaffolding.
 `spfy/src/common/riff_write.{c,h}` implements the contract above;
 `spfy/src/cli/spfy_riff_roundtrip.c` reads a container, decrypts it, walks its
 top-level chunks, re-emits them through the writer and diffs against the
-original. Pad bytes are deliberately NOT carried across — the writer
-regenerates them — so a wrong pad rule would show up immediately.
+original. Pad bytes are deliberately NOT carried across - the writer
+regenerates them - so a wrong pad rule would show up immediately.
 
 ```
 en-US/tom/tom.vin     34,264,978 B  form svin  XOR 0xCE  14 chunks  BYTE-IDENTICAL
@@ -1526,7 +1526,7 @@ offline builder precomputed into `hash`.
 
 | function | role |
 |---|---|
-| `FUN_08e82670` | `load_edge_frames()` — reads frames, derives `joinweights` |
+| `FUN_08e82670` | `load_edge_frames()` - reads frames, derives `joinweights` |
 | `FUN_08e8c440` | the per-frame-pair distance **kernel** |
 | `FUN_08e8d3a0` | 3-point boundary distance, voicing-class weighting path |
 | `FUN_08e8d420` | same, per-node weight/offset override path |
@@ -1546,7 +1546,7 @@ offline builder precomputed into `hash`.
 +0x30  num_units
 ```
 
-### The kernel — `FUN_08e8c440(weights, dim)` over frames X, Y
+### The kernel - `FUN_08e8c440(weights, dim)` over frames X, Y
 
 ```c
 d = 0;
@@ -1557,7 +1557,7 @@ for (k = 1; k < dim; ++k)
 return d;
 ```
 
-Dimension 0 is special in three ways — absolute rather than squared, gated on
+Dimension 0 is special in three ways - absolute rather than squared, gated on
 both frames exceeding a threshold, and counted separately during weight
 derivation with an unvoiced sentinel. **Dimension 0 is F0.** That is what
 `project_f0_bytes_gate_the_join_cost` was seeing from the outside.
@@ -1580,7 +1580,7 @@ w[k>=2] = sqrt(2*num_units / SSk) / (2*dim - 4)
 inverse-SD normalised; dims >= 2 are additionally divided by `(2*dim - 4)` so the
 spectral block contributes a bounded share regardless of `dim`.
 
-### The 3-point boundary distance — `FUN_08e8d3a0(db, right_uid, left_uid)`
+### The 3-point boundary distance - `FUN_08e8d3a0(db, right_uid, left_uid)`
 
 From the disassembly (fastcall: ECX=db, EDX=right, stack=left):
 
@@ -1591,7 +1591,7 @@ raw = kernel( end(left),  end(right - 1) )        /* left's end vs what
     + kernel( ... )                               /* third, symmetric term */
 ```
 
-⚠ The third call's operands could not be pinned from this listing alone —
+⚠ The third call's operands could not be pinned from this listing alone -
 register liveness across the `cdecl` calls is ambiguous in the decompile. The
 first two are certain, and the `FADD ST0,ST0` doubling the seam term is explicit
 at `08e8d3ea`.
@@ -1609,7 +1609,7 @@ both voiced    -> (db+0x78, db+0x7c)   = V2_JCW, V2_JCO
 cost = raw * JCW + JCO
 ```
 
-### What the cache stores — CONFIRMED post-weighting
+### What the cache stores - CONFIRMED post-weighting
 
 `ViterbiWithJoinCache` at `08e8b7e2`:
 
@@ -1651,12 +1651,12 @@ Generating `hash` now requires only:
 2. the affine map with the voice's own `JOIN_COST_WEIGHT` / `JOIN_COST_OFFSET`;
 3. a hard `0` for natural continuations.
 
-The one remaining free choice is **what goes in dims >= 2** — the vendor's
+The one remaining free choice is **what goes in dims >= 2** - the vendor's
 spectral representation is not recoverable from the reader, since the reader only
 consumes floats. Per Exp 65 that choice is not where quality lives; matching the
 resulting distribution (floor ~0.28, median ~1.77, cap ~16) is what matters.
 
-### The 3-point combination — RESOLVED (2026-08-16)
+### The 3-point combination - RESOLVED (2026-08-16)
 
 The term flagged as unpinned is now derived, by tracking ESP through
 `FUN_08e8d3a0` rather than trusting the decompile's register guesses.
@@ -1671,7 +1671,7 @@ call 2    EAX=[ESI+L*8+4]=end(L)     EDI=[ESP+0x18] =start(R)
 call 3    EAX=[ESI+L*8+8]=start(L+1) EDI= not reloaded = start(R)
 ```
 
-At `08e8d3ec`, `[ESP+0x2c]` resolves to `ESP0+4` — the left uid — so
+At `08e8d3ec`, `[ESP+0x2c]` resolves to `ESP0+4` - the left uid - so
 `[ESI+EDX*8+8]` is `rec[L+1].ptr0`. EDI surviving call 2 is sound: Ghidra names
 it `unaff_EDI`, its term for a register read but provably unaffected.
 
@@ -1684,7 +1684,7 @@ raw = kernel( end(L),     end(R-1)   )        /* natural predecessor of R */
 **It is a SUM.** The FPU trace is `2*r2`, `+r1`, spill, `+r3`; there is no
 `FDIV` or `FMUL` anywhere in the function and the epilogue only unwinds
 (`ADD ESP,0x18 / ADD ESP,8 / RET`). The "average rather than sum" hypothesis
-raised by the 2.91x residual is **REFUTED** — the residual is entirely the
+raised by the 2.91x residual is **REFUTED** - the residual is entirely the
 spectral gauge.
 
 The `ptr0 = start-edge / ptr1 = end-edge` assignment is forced rather than
@@ -1709,7 +1709,7 @@ not reachable for `hash`, and the reason is informational rather than effort:
   edge-frames file to compare against.
 
 So the vendor's spectral representation is absent from the evidence, and with it
-the absolute scale — the vendor's term scales linearly with the features' own
+the absolute scale - the vendor's term scales linearly with the features' own
 spread. Everything structural around it is recovered and verified: the domain
 rule, the packing, the container, the kernel, the weight derivation, the 3-point
 combination, the affine map and the hard-zero rule.

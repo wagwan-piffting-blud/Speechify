@@ -1,4 +1,4 @@
-# build_tools — everything the CRS Mara recipe needs
+# build_tools - everything the CRS Mara recipe needs
 
 The recipe in `../README.md` names these by filename only, because this is where
 they are. Nothing here reaches outside the repository except `$Work`, the
@@ -46,7 +46,7 @@ here needs editing:
                            touches none, so without this line the builder drops
                            all 13 and the word gets spliced out of half-phones.
                            214 units, 0.09 MB
-    gate_rare_both.txt     words withheld from preselection — mostly rare
+    gate_rare_both.txt     words withheld from preselection - mostly rare
                            non-English tokens the front end mispronounces, whose
                            units then leak into ordinary words
     drop_it2.txt           recordings withheld outright
@@ -61,5 +61,5 @@ was just added and calls the circularity a result.
 
 ## What is NOT here
 
-The corpus — 9,686 recordings and their TextGrids, several gigabytes. The
+The corpus - 9,686 recordings and their TextGrids, several gigabytes. The
 recipe's steps 1 and 5 need it; steps 2 through 4 only need a built voice.

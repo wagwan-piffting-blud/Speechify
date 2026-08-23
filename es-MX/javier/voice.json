@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "javier",
+  "display": "Javier",
+  "lang": "es-MX",
+  "version": "2026.08.22",
+  "files": [
+    {
+      "name": "javier.vin",
+      "bytes": 32884096,
+      "sha256": "20624fe4a790cfdeabc0b2857489740521a994412564288a0054981c9235803c"
+    },
+    {
+      "name": "javier8.vdb",
+      "bytes": 79248554,
+      "sha256": "56ba80460724d7c256fc261fc315ccd66a6ae14111f72d6339c623c42b3ba701"
+    },
+    {
+      "name": "javier.vcf",
+      "bytes": 45014,
+      "sha256": "eee346c2a1f2cc89e333d9fd81d3d4dc6499b5a960df033bf53b0673fdefcb13"
+    }
+  ]
+}

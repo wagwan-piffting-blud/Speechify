@@ -3,7 +3,7 @@
 #
 # Prereqs:
 #   - emsdk installed and activated (`source ~/emsdk/emsdk_env.sh`).
-#   - Run from spfy/wasm/ (or anywhere — the script cds to its own dir).
+#   - Run from spfy/wasm/ (or anywhere - the script cds to its own dir).
 #
 # Outputs (in dist/):
 #   spfy_wasm.js        ES-module factory (createSpfyModule).

@@ -1,16 +1,16 @@
 # Build the Speechify installers (Windows + Linux + macOS).
 #
 # Triggers:
-#   * Branch push to main  — builds every target and publishes a dated
+#   * Branch push to main  - builds every target and publishes a dated
 #     GitHub Release with the Windows .exe plus one tarball per unix
 #     target.
-#   * workflow_dispatch     — manual trigger; uploads as artifacts only,
+#   * workflow_dispatch     - manual trigger; uploads as artifacts only,
 #     no release.
 #
 # Jobs:
-#   * setup          — resolves the date-based version once so every
+#   * setup          - resolves the date-based version once so every
 #                      build and the release agree on the string.
-#   * build-windows  — msys2 mingw32/mingw64 + Inno Setup, as a matrix over
+#   * build-windows  - msys2 mingw32/mingw64 + Inno Setup, as a matrix over
 #                      arch. Produces TWO installers:
 #                        x64 -> spfy-setup-<version>.exe
 #                        x86 -> spfy-setup-<version>-x86.exe
@@ -21,14 +21,14 @@
 #                      System32\regsvr32 instead of SysWOW64\regsvr32.
 #                      The 32-bit payload itself needed no change: it was
 #                      always i686/min-OS-4.0/msvcrt with no post-NT-6.1
-#                      imports — the installer's ArchitecturesAllowed was
+#                      imports - the installer's ArchitecturesAllowed was
 #                      the only thing refusing 32-bit Windows.
-#   * build-unix     — matrix over linux-x86 (i386), linux-x86_64,
+#   * build-unix     - matrix over linux-x86 (i386), linux-x86_64,
 #                      linux-armv7, linux-arm64, macos-arm64 and
 #                      macos-x86_64. No SAPI (Windows COM only); each leg
 #                      produces spfy-<target>-<version>.tar.gz. fail-fast
 #                      is off so one target can't hide the others' results.
-#   * release        — publishes on push once setup + build-windows
+#   * release        - publishes on push once setup + build-windows
 #                      succeed. Unix tarballs are attached if they built;
 #                      any that didn't are annotated as warnings, so a
 #                      single failed/unavailable leg yields a partial
@@ -44,25 +44,25 @@
 #     i386 leg, and only for its 32-bit libc.
 #   * Linux armv7: no hosted 32-bit ARM runner exists, so this leg builds
 #     inside a qemu-emulated debian:bookworm container on an x86_64 runner.
-#     Emulated, therefore slow — see its timeout in the matrix.
+#     Emulated, therefore slow - see its timeout in the matrix.
 #   * macOS: AppleClang + brew ninja.
 #
-# Every unix leg — native or emulated — runs spfy/ci/build_unix.sh, so the
+# Every unix leg - native or emulated - runs spfy/ci/build_unix.sh, so the
 # legs cannot drift apart in flags, build type, or pass criteria. That
 # script also VERIFIES: it synthesizes the reference phrase through
 # en-US/tom (committed) and fails the leg unless the WAV's sha256 matches.
 # Byte-exactness is this project's ship gate, and a build-only check would
-# have gone green through the entire armv7 SIGBUS — that bug only ever
+# have gone green through the entire armv7 SIGBUS - that bug only ever
 # showed up at runtime.
 #
 # Every target drives the front-end through the src/host_emu x86
 # interpreter (the native PE loader was retired 2026-07-22), so nothing
-# here has to execute 32-bit x86 code natively — that is what lets the
+# here has to execute 32-bit x86 code natively - that is what lets the
 # same source build byte-identical output on arm64 and x86_64 alike.
 #
 # The FE DLL (SWIttsFe-en-US.dll) is committed at bin/ in the repo and
 # is embedded into spfy_sapi.dll + spfy_synth(.exe) at build time via
-# embed_dll.py — no proprietary asset wrangling needed in CI.
+# embed_dll.py - no proprietary asset wrangling needed in CI.
 
 name: Build installer
 
@@ -80,7 +80,7 @@ permissions:
 
 jobs:
   # --------------------------------------------------------------------
-  # setup — resolve the date-based version once, share with both builds
+  # setup - resolve the date-based version once, share with both builds
   # and the release job so they all agree on the string.
   # --------------------------------------------------------------------
 
@@ -98,10 +98,10 @@ jobs:
           # releases (most of which are v1/v2/v3).
           #
           # Two outputs:
-          #   version      — user-facing date string (YYYY.MM.DD), used in
+          #   version      - user-facing date string (YYYY.MM.DD), used in
           #                  filenames, artifact names, release tag, and
           #                  AppVersion.
-          #   versioninfo  — PE VersionInfo string (YYYY.MM.DD.RUN). Inno
+          #   versioninfo  - PE VersionInfo string (YYYY.MM.DD.RUN). Inno
           #                  Setup's VersionInfoVersion is strict X.X.X.X
           #                  numeric; the GitHub run number gives us a
           #                  monotonic 4th component for same-day rebuilds.
@@ -126,7 +126,7 @@ jobs:
           echo "versioninfo=$vinfo" >> "$GITHUB_OUTPUT"
 
   # --------------------------------------------------------------------
-  # build-windows — msys2 + Inno Setup. Produces the .exe installer.
+  # build-windows - msys2 + Inno Setup. Produces the .exe installer.
   # --------------------------------------------------------------------
 
   build-windows:
@@ -138,7 +138,7 @@ jobs:
 
     strategy:
       # Same reason as build-unix: one arch failing shouldn't hide the other's
-      # result. The release job still requires BOTH — they are both shipped
+      # result. The release job still requires BOTH - they are both shipped
       # deliverables now, not a primary and a nice-to-have.
       fail-fast: false
       matrix:
@@ -153,7 +153,7 @@ jobs:
           # It is a SEPARATE INSTALLER rather than one universal build: there
           # is no spfy_sapi64.dll to ship and regsvr32 lives in System32, so
           # a combined installer would carry a 64-bit DLL it could never
-          # install. The payload needed no change at all — spfy_sapi.dll and
+          # install. The payload needed no change at all - spfy_sapi.dll and
           # spfy_synth.exe are already i686, min OS 4.0, msvcrt (not UCRT)
           # and import nothing newer than NT 6.1. Only the installer's
           # ArchitecturesAllowed was refusing to run.
@@ -168,7 +168,7 @@ jobs:
           submodules: false
 
       # --------------------------------------------------------------
-      # msys2 — install BOTH 32-bit and 64-bit toolchains in one shot
+      # msys2 - install BOTH 32-bit and 64-bit toolchains in one shot
       # --------------------------------------------------------------
 
       - name: Set up msys2
@@ -192,7 +192,7 @@ jobs:
 
       # SPFY_STRICT_FP is no longer forced OFF here. It used to be, which meant
       # the SHIPPED Windows binary had less FP pinning than any local build
-      # (build32.bat leaves it ON) — a real divergence for a project whose
+      # (build32.bat leaves it ON) - a real divergence for a project whose
       # claim is byte-exactness. The costly part of that flag set was only
       # -ffloat-store, and SPFY_FLOAT_STORE now defaults OFF on its own, so
       # this leg keeps -fexcess-precision=standard / -mno-fma / -fno-fast-math
@@ -210,7 +210,8 @@ jobs:
             -DCMAKE_C_COMPILER=/mingw32/bin/gcc.exe \
             -DCMAKE_BUILD_TYPE=Release \
             -DSPFY_BUILD_TESTS=OFF \
-            -DSPFY_FE_HOSTED=ON
+            -DSPFY_FE_HOSTED=ON \
+            -DSPFY_VERSION="${{ needs.setup.outputs.version }}"
 
       - name: Build 32-bit
         shell: msys2 {0}
@@ -249,7 +250,7 @@ jobs:
       # spfy_sapi.dll would still install and still regsvr32 "successfully"
       # under the wrong loader.
       #
-      # ⛔ NOT `file | grep`. Its wording is not stable across versions —
+      # ⛔ NOT `file | grep`. Its wording is not stable across versions -
       # file 5.46 prints "Intel i386" where older builds printed
       # "Intel 80386", and a grep for the wrong one fails a perfectly good
       # binary. `objdump -f` emits a machine token instead of prose:
@@ -259,7 +260,7 @@ jobs:
       # extracted field exactly rather than grepping for a substring.
       #
       # ⛔ IT MUST BE THE x86_64 objdump. The i686 binutils cannot read a
-      # PE32+ at all — it prints "file format not recognized" and yields an
+      # PE32+ at all - it prints "file format not recognized" and yields an
       # EMPTY architecture, which a naive comparison then reports as a wrong
       # architecture. The empty case is therefore its own error: "could not
       # read" and "built wrong" must not look alike.
@@ -298,7 +299,7 @@ jobs:
           fi
 
       # --------------------------------------------------------------
-      # Inno Setup — package the installer
+      # Inno Setup - package the installer
       # --------------------------------------------------------------
 
       - name: Install Inno Setup
@@ -349,13 +350,13 @@ jobs:
           retention-days: 30
 
   # --------------------------------------------------------------------
-  # build-unix — Linux + macOS matrix. No SAPI (Windows COM only); ships
+  # build-unix - Linux + macOS matrix. No SAPI (Windows COM only); ships
   # the spfy_synth CLI + the runtime data files needed to synthesize
   # against a user-provided voice (VIN/VDB/VCF). Voices stay proprietary
   # and are not bundled.
   #
   # FE backend: every target drives the real SWIttsFe-<lang>.dll through
-  # the src/host_emu x86 interpreter — the only backend since the native
+  # the src/host_emu x86 interpreter - the only backend since the native
   # PE loader was retired 2026-07-22. Verified byte-identical (same WAV
   # sha256) on Windows x86/x64, Linux x86/x86_64, Linux arm64, Linux
   # armv7 and macOS arm64. linux-x86 (i386) is still built for
@@ -365,7 +366,7 @@ jobs:
   # SPFY_STRICT_FP pins x87 80-bit semantics. It is a no-op on ARM (no
   # x87 exists), and the CMake probe drops individual flags a compiler
   # rejects (AppleClang has no -mfpmath=387), warning rather than
-  # failing. Measured 2026-07-22: x87 pinning is NOT load-bearing here —
+  # failing. Measured 2026-07-22: x87 pinning is NOT load-bearing here -
   # ARM matches bit-for-bit without it, because the unit-selection path
   # is integer and the audio path is IEEE-stable.
   # --------------------------------------------------------------------
@@ -381,7 +382,7 @@ jobs:
           # `timeout` is per-leg (see timeout-minutes below). Queue time
           # counts against it, so these are wall-clock budgets, not just
           # build time. 15 is a placeholder for the legs whose real
-          # duration hasn't been measured — tighten to ~2x observed once
+          # duration hasn't been measured - tighten to ~2x observed once
           # you've read them off a green run.
           - id: linux-x86
             runner: ubuntu-latest
@@ -410,7 +411,7 @@ jobs:
           # 32-bit ARM. There is NO hosted armv7 runner (ubuntu-24.04-arm
           # is aarch64), so this one builds in a qemu-emulated container on
           # an x86_64 runner. Cross-compiling would be far faster but the
-          # runner couldn't execute the result — the same objection that
+          # runner couldn't execute the result - the same objection that
           # ruled out cross-compiling Intel macOS. debian:bookworm because
           # the Ubuntu armhf images are unreliable.
           #
@@ -432,13 +433,13 @@ jobs:
             qemu: ""
             image: ""
             timeout: 15
-          # Intel macOS. NOT macos-13 — that image was retired 2025-12-04
+          # Intel macOS. NOT macos-13 - that image was retired 2025-12-04
           # (deprecation began 2025-09-22), and requesting a dead label
           # doesn't error, it just queues until the job times out.
           # macos-15-intel is the last Intel-based image; GitHub drops
           # x86_64 macOS entirely when it retires in Fall 2027.
           #
-          # Measured 12m33s on 2026-07-22 — by far the slowest leg, and
+          # Measured 12m33s on 2026-07-22 - by far the slowest leg, and
           # Intel capacity is being wound down ahead of that retirement,
           # so give it real headroom rather than a tight cap.
           - id: macos-x86_64
@@ -468,7 +469,7 @@ jobs:
           submodules: false
 
       # Native legs only: the emulated leg installs its own toolchain
-      # inside the container (see build_unix.sh — one `docker run` means
+      # inside the container (see build_unix.sh - one `docker run` means
       # a separate install step would be thrown away).
       - name: Install toolchain (Linux, native)
         if: runner.os == 'Linux' && matrix.qemu == ''
@@ -489,7 +490,7 @@ jobs:
 
       # Registers the qemu-user binfmt handlers on the host so the runner
       # can exec foreign-arch binaries. Must happen on the HOST, before any
-      # cross-arch container starts — a job-level `container:` would be too
+      # cross-arch container starts - a job-level `container:` would be too
       # late, which is why this leg shells out to `docker run` instead.
       - name: Set up QEMU
         if: matrix.qemu != ''
@@ -502,6 +503,7 @@ jobs:
         env:
           SPFY_CFLAGS: ${{ matrix.cflags }}
           SPFY_LDFLAGS: ${{ matrix.ldflags }}
+          SPFY_VERSION: ${{ needs.setup.outputs.version }}
         run: bash spfy/ci/build_unix.sh
 
       # Same script, run under emulation. The workspace is bind-mounted, so
@@ -514,6 +516,7 @@ jobs:
             -v "${GITHUB_WORKSPACE}:/w" -w /w \
             -e SPFY_CFLAGS="${{ matrix.cflags }}" \
             -e SPFY_LDFLAGS="${{ matrix.ldflags }}" \
+            -e SPFY_VERSION="${{ needs.setup.outputs.version }}" \
             -e SPFY_INSTALL_DEPS=1 \
             -e SPFY_MULTILIB=0 \
             "${{ matrix.image }}" \
@@ -530,6 +533,10 @@ jobs:
           STAGE="${RUNNER_TEMP}/spfy-stage/${PKG}"
           mkdir -p "${STAGE}/bin" "${STAGE}/en-US/tom"
           cp build-out/src/cli/spfy_synth          "${STAGE}/bin/"
+          # The update checker. spfy_synth does its own check inline, so this
+          # is here for `spfy_update --status` / --disable and for anyone who
+          # wants to ask on demand - not because anything spawns it on unix.
+          cp build-out/src/update/spfy_update      "${STAGE}/bin/"
           # No spfy/data or spfy/build in the tarball any more. spfy_synth
           # carries fe_symbol_table.json + fe_tables_a + fe_tables embedded
           # (src/cli/CMakeLists.txt) and extracts them to a tempdir on first
@@ -545,7 +552,7 @@ jobs:
           # while the VIN/VDB/VCF do not. They go in the voice folder because
           # the stem is derived from the VDB path (tom8.vdb -> tom8): the user
           # drops tom's trio in beside them and --s4 works with no further
-          # setup. No `|| true` — `set -eu` is in force above and a tarball
+          # setup. No `|| true` - `set -eu` is in force above and a tarball
           # whose --s4 silently does nothing is worse than a failed leg.
           cp en-US/tom/tom8.pmindex                "${STAGE}/en-US/tom/"
           cp en-US/tom/tom8.pmdata                 "${STAGE}/en-US/tom/"
@@ -565,7 +572,7 @@ jobs:
           retention-days: 30
 
   # --------------------------------------------------------------------
-  # release — dated GitHub Release with both platforms attached. Only
+  # release - dated GitHub Release with both platforms attached. Only
   # fires on push events (main branch or tag); workflow_dispatch stops
   # at artifact upload.
   # --------------------------------------------------------------------
@@ -573,13 +580,13 @@ jobs:
   release:
     needs: [setup, build-windows, build-unix]
     # `needs:` defaults to requiring EVERY listed job to succeed, so a single
-    # build-unix matrix leg failing (or being cancelled — e.g. a retired
+    # build-unix matrix leg failing (or being cancelled - e.g. a retired
     # runner label that never gets picked up) used to skip the release
     # entirely, throwing away the targets that did build.
     #
     # !cancelled() still honours cancelling the whole workflow run: that
     # suppresses the release as you'd expect. What it no longer does is let
-    # one optional target veto publishing. The real gate is below — the
+    # one optional target veto publishing. The real gate is below - the
     # version resolved and the Windows installer built; unix tarballs are
     # published if they made it, and any that didn't are flagged as
     # warnings in the run summary.
@@ -616,13 +623,13 @@ jobs:
           for w in "spfy-setup-${{ needs.setup.outputs.version }}.exe" \
                    "spfy-setup-${{ needs.setup.outputs.version }}-x86.exe"; do
             if [ ! -f "dist/$w" ]; then
-              echo "::warning title=Missing installer::$w did not build — release is partial"
+              echo "::warning title=Missing installer::$w did not build - release is partial"
               missing=$((missing + 1))
             fi
           done
           for t in linux-x86 linux-x86_64 linux-armv7 linux-arm64 macos-arm64 macos-x86_64; do
             if ! ls dist/spfy-"$t"-*.tar.gz >/dev/null 2>&1; then
-              echo "::warning title=Missing target::no artifact for $t — release is partial"
+              echo "::warning title=Missing target::no artifact for $t - release is partial"
               missing=$((missing + 1))
             fi
           done
@@ -662,3 +669,60 @@ jobs:
             dist/spfy-setup-${{ needs.setup.outputs.version }}.exe
             dist/spfy-setup-${{ needs.setup.outputs.version }}-x86.exe
             dist/*.tar.gz
+
+      # ------------------------------------------------------------------
+      # update.json - the one file every installed copy polls.
+      #
+      # It lives on a ROLLING `updates` tag, so the URL baked into every
+      # binary ever shipped stays valid:
+      #   .../releases/download/updates/update.json
+      #
+      # TWO workflows write it. This one knows the engine version and nothing
+      # about voices; publish-voices.yml knows the voice catalog and nothing
+      # about this release. Whichever runs must carry the other's half
+      # forward, which is what --merge-from does. make_manifest.py refuses to
+      # write an empty voices array unless told to, because losing it would
+      # switch off every voice notification with nothing in the log to say so.
+      #
+      # NOT marked "Latest": that badge belongs to the dated engine release,
+      # which is what a human landing on the Releases page should see.
+      # ------------------------------------------------------------------
+      - name: Publish the update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p current
+          merge="--allow-empty-voices"
+          if gh release download updates --repo "$GITHUB_REPOSITORY" \
+               --pattern 'update.json' --dir current 2>/dev/null; then
+            merge="--merge-from current/update.json"
+          else
+            echo "::notice title=First manifest::no updates/update.json yet - \
+          publishing an engine-only manifest. Run publish-voices.yml to add \
+          the voice catalog."
+          fi
+
+          # A release nobody needs to hear about: put the version in the
+          # manifest but leave notify false, and the next release that does
+          # matter tells them instead.
+          notify=""
+          if git log -1 --pretty=%B | grep -qiE '\[(no-notify|skip notify)\]'; then
+            notify="--no-engine-notify"
+            echo "::notice title=Quiet release::[no-notify] in the commit message"
+          fi
+
+          # shellcheck disable=SC2086
+          python3 installer/updates/make_manifest.py \
+            --engine-version "${{ needs.setup.outputs.version }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --engine-url "https://github.com/$GITHUB_REPOSITORY/releases/tag/${{ steps.tag.outputs.tag }}" \
+            $merge $notify \
+            -o update.json
+          cat update.json | head -20
+
+          gh release view updates --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create updates --repo "$GITHUB_REPOSITORY" \
+              --title "update manifest" --latest=false --prerelease \
+              --notes "Machine-readable manifest polled by installed copies of spfy. Not a download."
+          gh release upload updates update.json --repo "$GITHUB_REPOSITORY" --clobber

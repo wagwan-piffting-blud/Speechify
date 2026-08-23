@@ -66,7 +66,7 @@ var probedLayout = false;     /* dump in-mem unit record layout once */
 var debugFlagSet = false;     /* weight+0xc flipped to 1 once per session
                                  (D-17 path A: enables per-component
                                   storage in cand_buf+0x08/0x0c/0x10/0x14
-                                  inside FUN_08e88de0 — pure debug write
+                                  inside FUN_08e88de0 - pure debug write
                                   on a per-utterance scratch field, no
                                   effect on engine correctness). */
 
@@ -599,7 +599,7 @@ Interceptor.attach(ADDR_INNER_SCORER, {
              * flag_const} (all already captured).
              *
              * Note: components for cands that get pruned mid-cascade (when
-             * fVar14 > local_50 ceiling) may be partially-populated — only
+             * fVar14 > local_50 ceiling) may be partially-populated - only
              * components computed before the prune are written. cand_totals
              * stays at the 0x461c4000 sentinel (10000.0) for those. */
             var components = [];

@@ -1,5 +1,5 @@
 /*
- * spfy/src/host_emu/spfy_extra_shims.c — Win32/MSVCR71 import shims that
+ * spfy/src/host_emu/spfy_extra_shims.c - Win32/MSVCR71 import shims that
  * SWIttsFe-en-US.dll needs but the donor's win32_donor.c doesn't carry
  * (because the donor targets VST plugins, not a 2003-era TTS engine
  * statically linked against MSVCR71).
@@ -141,7 +141,7 @@ void s_atoi(void) {
 void s_atol(void) { s_atoi(); }
 
 void s_ldiv(void) {
-    /* ldiv_t ldiv(long num, long denom) — returns the 8-byte struct in
+    /* ldiv_t ldiv(long num, long denom) - returns the 8-byte struct in
      * EDX:EAX (quotient in EAX, remainder in EDX). */
     long num = (long)(int32_t)arg32(0);
     long den = (long)(int32_t)arg32(1);
@@ -154,7 +154,7 @@ void s_toupper(void) { ret_set((uint32_t)toupper((int)(arg32(0) & 0xff))); }
 void s_isdigit(void) { ret_set(isdigit((int)(arg32(0) & 0xff)) ? 1 : 0); }
 void s_isspace(void) { ret_set(isspace((int)(arg32(0) & 0xff)) ? 1 : 0); }
 
-/* ---- MSVCR71 — stdio (best-effort: most calls happen during init, where
+/* ---- MSVCR71 - stdio (best-effort: most calls happen during init, where
  * reading missing resource files just degrades to defaults) ---- */
 
 void s_fopen(void)   { ret_set(0); }
@@ -221,7 +221,7 @@ void s_vsprintf(void) {
 }
 
 void s_sprintf(void) {
-    /* sprintf(buf, fmt, ...) — variadic. */
+    /* sprintf(buf, fmt, ...) - variadic. */
     uint32_t bufp = arg32(0), fmtp = arg32(1);
     char fmt[512]; guest_strn_in(fmtp, fmt, (int)sizeof fmt);
     char out[1024]; int oi = 0;
@@ -263,7 +263,7 @@ void s_sscanf(void)  { ret_set(0); }
 void s_vfprintf(void){ ret_set(0); }
 void s_fprintf(void) { ret_set(0); }
 
-/* ---- MSVCR71 — math (cdecl form, takes args on the stack as doubles and
+/* ---- MSVCR71 - math (cdecl form, takes args on the stack as doubles and
  * returns in ST(0)). */
 
 static double cdecl_pop_double(int slot) {

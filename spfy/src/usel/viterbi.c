@@ -271,7 +271,7 @@ int spfy_viterbi_run_dag(const spfy_viterbi_dag_slot_t *slots,
              * Frida viterbi_c7c hook on mp_009 utt 1: engine has
              * uid=147839 with c68=0 -> c80=100, NOT c80=1). The c80=100
              * makes the next-slot join gate (`prev.c80 < 15`) FAIL,
-             * suppressing the F0 curve cost — engine reports miss
+             * suppressing the F0 curve cost - engine reports miss
              * cost = MISSING_JOIN (1000) exactly, no curve. We had
              * been running the +0x94==0 branch which propagates
              * c80=1 -> gate passes -> curve adds spurious 0.13.

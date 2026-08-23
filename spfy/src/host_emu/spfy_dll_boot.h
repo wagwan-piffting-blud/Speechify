@@ -1,5 +1,5 @@
 /*
- * spfy/src/host_emu/spfy_dll_boot.h — public surface for the emulator-
+ * spfy/src/host_emu/spfy_dll_boot.h - public surface for the emulator-
  * backed SWIttsFe-en-US.dll host.
  *
  * Call order in a fresh process:

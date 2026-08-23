@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build_macos.sh — macOS build of the spfy core (Apple Silicon or Intel).
+# build_macos.sh - macOS build of the spfy core (Apple Silicon or Intel).
 #
 # No 32-bit anything: macOS dropped i386 entirely, and it isn't needed.
 # The 32-bit Windows FE DLL runs through the portable host_emu x86
@@ -35,7 +35,7 @@ REPO_DIR="$(cd "$SRC_DIR/.." && pwd)"
 
 # macOS sets TMPDIR to a per-user /var/folders/... path WITH a trailing
 # slash, so naive concatenation yields '...T//spfy_build_macos'. Strip it.
-# Note that dir is also periodically reaped by the OS — set BUILD_DIR to
+# Note that dir is also periodically reaped by the OS - set BUILD_DIR to
 # somewhere durable (e.g. BUILD_DIR=~/spfy_build) if you want it to persist.
 SPFY_TMP="${TMPDIR:-/tmp}"
 SPFY_TMP="${SPFY_TMP%/}"

@@ -1,6 +1,6 @@
 'use strict';
 /*
- * cart_walks_surgical_hook.js — surgical bracketing of inner_scorer +
+ * cart_walks_surgical_hook.js - surgical bracketing of inner_scorer +
  * anchor cost functions to disambiguate walker call sites.
  *
  * Why: cart_walks_safe / cart_walker_args attribute every durt/f0tr
@@ -10,17 +10,17 @@
  * walks bleed into the per-slot "first walk" master_compare picks,
  * causing audit diffs (e.g. nat_036 slot 7 first durt walk reports
  * phone_idx=0 mean=89.02 but mean=89.02 only exists in durt tree 36 =
- * "t", not tree 0 = "aa" — proving the walk wasn't slot-init).
+ * "t", not tree 0 = "aa" - proving the walk wasn't slot-init).
  *
  * This hook maintains a per-thread mode STACK so each walker call is
  * tagged with the exact code path it came from:
  *
- *   slot_init   — walker inside inner_scorer body, no anchor func active
- *   anchor_orch — walker inside FUN_08e8ce60 body  (anchor scoring orch)
- *   anchor_d    — walker inside FUN_08e89530 body  (anchor D-cost)
- *   anchor_f0   — walker inside FUN_08e893b0 body  (anchor F0-cost)
- *   anchor_sp   — walker inside FUN_08e897b0 body  (anchor SP-cost)
- *   outside     — walker NOT inside inner_scorer (PostScoringAdj etc;
+ *   slot_init   - walker inside inner_scorer body, no anchor func active
+ *   anchor_orch - walker inside FUN_08e8ce60 body  (anchor scoring orch)
+ *   anchor_d    - walker inside FUN_08e89530 body  (anchor D-cost)
+ *   anchor_f0   - walker inside FUN_08e893b0 body  (anchor F0-cost)
+ *   anchor_sp   - walker inside FUN_08e897b0 body  (anchor SP-cost)
+ *   outside     - walker NOT inside inner_scorer (PostScoringAdj etc;
  *                 these are still emitted but flagged so consumers can
  *                 drop them).
  *
@@ -175,7 +175,7 @@ Interceptor.attach(ADDR_DURT_WALKER, {
             q5        : safeReadU32(esp.add(0x14)),
             q9        : safeReadU32(esp.add(0x18)),
             q8        : safeReadU32(esp.add(0x1c)),
-            q7        : 0   /* EBX is XOR'd to 0 inside walker — leaf walk sees 0 */
+            q7        : 0   /* EBX is XOR'd to 0 inside walker - leaf walk sees 0 */
         };
     },
     onLeave: function (retval) {

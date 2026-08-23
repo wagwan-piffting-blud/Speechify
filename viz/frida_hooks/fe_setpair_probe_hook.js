@@ -1,11 +1,11 @@
 'use strict';
 /*
- * fe_setpair_probe_hook.js — find where utt_ptr lives in the engine's
+ * fe_setpair_probe_hook.js - find where utt_ptr lives in the engine's
  * `user_arg` struct. Strategy:
  *
  *   1. Hook FE's setPair_E/F/G/H + installHookA/B vtable wrappers
  *      (slots 41/43/45/46/47/48) at entry. Capture (cb_ptr, user_arg).
- *      These are the registrations — they tell us the engine's
+ *      These are the registrations - they tell us the engine's
  *      callback addresses + the engine's `self` pointer (user_arg).
  *
  *   2. For each unique (cb_ptr, user_arg) pair, attach a fresh
@@ -41,7 +41,7 @@ var SLOT_NAMES = {
     46:'setPair_H', 47:'installHookA', 48:'installHookB',
 };
 
-/* Resolve SWIttsUSelUnitSelection dynamically — engine is ASLR'd so
+/* Resolve SWIttsUSelUnitSelection dynamically - engine is ASLR'd so
  * the hardcoded VA from earlier captures will be stale next session. */
 var ADDR_USEL = null;
 try {
@@ -115,7 +115,7 @@ function attachCbProbe(slot, cb_va) {
                     var esp = this.context.esp;
                     var esp_dump = readU32Array(esp, ESP_DUMP_U32S);
                     /* the first stack arg is the engine's `self`
-                     * (user_arg) — i.e. esp[+4] for __cdecl. We
+                     * (user_arg) - i.e. esp[+4] for __cdecl. We
                      * also probe esp[+8] / [+c] / [+10] for other args. */
                     var arg0 = esp_dump[1] || 0;  /* esp+4 */
                     var arg1 = esp_dump[2] || 0;  /* esp+8 */
@@ -186,7 +186,7 @@ function attachCbProbe(slot, cb_va) {
     }
 }
 
-/* Hook the FE-side registration sites — these tell us cb addresses. */
+/* Hook the FE-side registration sites - these tell us cb addresses. */
 Object.keys(SLOT_VAS).forEach(function (slot) {
     var slot_n = parseInt(slot, 10);
     try {

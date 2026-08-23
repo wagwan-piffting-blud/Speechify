@@ -1,6 +1,6 @@
 'use strict';
 /*
- * inner_scorer_durt_hook.js — preselect-time durt CART output capture.
+ * inner_scorer_durt_hook.js - preselect-time durt CART output capture.
  *
  * Closes plan 02-05 D-17 Path R: the engine evaluates the durt CART
  * INSIDE the inner-scorer (via FUN_08e87d90) at preselect time, BEFORE
@@ -16,15 +16,15 @@
  * --- Reverse engineering basis (Ghidra MCP) ---
  *
  * Function:  FUN_08e87d90  @  0x08E87D90  in SWIttsUSel.dll
- *            "InnerScorerDurtCart" — binary CART walker over 0x18-byte
+ *            "InnerScorerDurtCart" - binary CART walker over 0x18-byte
  *            nodes. Leaf detection: *(int*)(node + 0x8) < 0. At leaf,
  *            mean = *(float*)(node + 0x10), inv_std = *(float*)(node + 0x14).
  *
  * Calling convention: __fastcall
- *   eax       = in_EAX (param_1) — voice-side context ptr
- *   edx       = param_2          — node-table base offset
+ *   eax       = in_EAX (param_1) - voice-side context ptr
+ *   edx       = param_2          - node-table base offset
  *   [esp+ 4]  = param_3
- *   [esp+ 8]  = param_4 — feature ptr (slot's durt feature struct)
+ *   [esp+ 8]  = param_4 - feature ptr (slot's durt feature struct)
  *
  * Decompile:
  *   iVar1 = *(int*)(*(int*)(in_EAX + 0x10) + param_2*4);   // root node ptr
@@ -45,7 +45,7 @@
  * slot in its esp+8 arg. Each FUN_08e88de0 onEnter sets the module-
  * level current_slot; the next FUN_08e87d90 leave fires within that
  * scope. (FUN_08e88de0 also calls FUN_08e87e10 for f0 CART, which we
- * do NOT instrument — separate hook for f0 if ever needed.)
+ * do NOT instrument - separate hook for f0 if ever needed.)
  *
  * --- Safety ---
  *
@@ -69,7 +69,7 @@ var current_slot = null;
 /* Sequential call counter; useful for utt segmentation if multiple utts
  * appear in one capture (slot drops back to 0 after a higher slot). */
 var current_n    = 0;
-/* Detect utt boundary the same way prsl_slot/inner_scorer hooks do —
+/* Detect utt boundary the same way prsl_slot/inner_scorer hooks do -
  * track max slot seen; if slot drops back to 0 while we've seen higher,
  * that's utt 1+. */
 var utt          = 0;
@@ -101,12 +101,12 @@ function flush() {
     batch = [];
 }
 
-/* InnerScorer attach — slot tracking only. Mirrors inner_scorer_hook.js
+/* InnerScorer attach - slot tracking only. Mirrors inner_scorer_hook.js
  * arg-extraction (esp+8 = slot). No memory writes.
  *
  * Clear current_slot on onLeave so post-inner-scorer FUN_08e87d90 calls
  * (synth-time, etc.) don't get mis-attributed to the last seen slot
- * (observed for slot 65 in text_002 — 54 trailing calls before the
+ * (observed for slot 65 in text_002 - 54 trailing calls before the
  * fix). */
 Interceptor.attach(ADDR_INNER_SCORER, {
     onEnter: function () {
@@ -129,7 +129,7 @@ Interceptor.attach(ADDR_INNER_SCORER, {
     }
 });
 
-/* DurT CART attach — capture leaf node mean / inv_std. */
+/* DurT CART attach - capture leaf node mean / inv_std. */
 Interceptor.attach(ADDR_DURT_CART, {
     onEnter: function () {
         stats.durt_calls++;

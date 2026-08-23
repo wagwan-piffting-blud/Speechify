@@ -1,4 +1,4 @@
-/* spfy_sapi_host.exe — 32-bit out-of-process COM server for the Speechify
+/* spfy_sapi_host.exe - 32-bit out-of-process COM server for the Speechify
  * SAPI engine. */
 
 #define INITGUID 1

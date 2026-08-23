@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-tts_triage.py — Triage driver for a Ghidra JSONL export of a TTS DLL.
+tts_triage.py - Triage driver for a Ghidra JSONL export of a TTS DLL.
 
 Reads the JSONL emitted by export_analysis_v2.java into SQLite, applies rule-
 based tagging, finds anchor (seed) functions, expands a call-graph
@@ -19,7 +19,7 @@ Typical first pass (run in order):
     python tts_triage.py batch     analysis.db --tier 2 --out tier2_batch.jsonl
 
 DEFAULT_SEED_TERMS in this file is calibrated to the Speechify Front-end DLL.
-Override with --terms if you want — but DO NOT pass terms shorter than 3 chars
+Override with --terms if you want - but DO NOT pass terms shorter than 3 chars
 (`f0`, `g2p`, `lts`) unless you know they're rare in your binary, or they will
 substring-match against tons of `FUN_xxxxxxxx` auto-generated names. The
 script filters those out by default, but very short terms can still match
@@ -31,7 +31,7 @@ Ad-hoc inspection:
     python tts_triage.py grep    analysis.db cart
     python tts_triage.py show    analysis.db 180123abc
 
-Re-running tag/seed/neighbors/tier is idempotent — they wipe their own tables.
+Re-running tag/seed/neighbors/tier is idempotent - they wipe their own tables.
 Edit TAG_RULES below or pass --terms to seed to refine the analysis.
 """
 
@@ -374,7 +374,7 @@ DEFAULT_SEED_TERMS = [
     # Klatt-specific (confirmed present in this DLL)
     "klatt", "KlattOpen", "KlattSetConstParms",
     "vocal_tract", "PSgain", "Midline", "Rangeval", "breathi", "diaph_ghost",
-    # Concatenative (suspected; vocabulary may differ — adjust as you find more)
+    # Concatenative (suspected; vocabulary may differ - adjust as you find more)
     "halfphone", "diphone", "triphone", "Concatenative",
     "viterbi", "beam_search", "lattice", "candidate",
     "target_cost", "concat_cost", "join_cost",
@@ -382,16 +382,16 @@ DEFAULT_SEED_TERMS = [
     # Prosody (confirmed: 2-tier declination + ToBI tones)
     "ADecln", "BDecln", "inton_phr",
     "bound_tone", "phr_tone", "nuc_tone", "brk_priority",
-    # Phonetic features (confirmed — these are the cost dimensions)
+    # Phonetic features (confirmed - these are the cost dimensions)
     "place_of_artic", "manner_of_artic", "sonority", "voicing", "backness",
-    # Dictionaries (confirmed — C++ classes UserDict, DictionarySet)
+    # Dictionaries (confirmed - C++ classes UserDict, DictionarySet)
     "disambigDict", "UserDict", "DictionarySet",
     "abbrdict", "maindict", "hugedict", "rootdict",
-    # POS (confirmed — rich inventory feeding disambigDict)
+    # POS (confirmed - rich inventory feeding disambigDict)
     "noun_verb", "subj_obj", "poss_nom", "be_poss", "hav_modal",
     # Speechify-specific
     "Speechify", "SpeechifyInput", "audio.cdv", "enu.syn", "enu.ddl",
-    # DeltaTools internal scripting (toolchain leak — possibly built the voice DBs)
+    # DeltaTools internal scripting (toolchain leak - possibly built the voice DBs)
     "delta insert", "delta project", "DeltaTools", "DELTIO",
     # Generic anchors
     "f0", "pitch", "duration", "prosody",
@@ -620,7 +620,7 @@ def cmd_seed(args):
              else list(DEFAULT_SEED_TERMS))
     terms = [t.strip().lower() for t in terms if t.strip()]
 
-    # Warn on dangerously short / hex-like terms — these tend to false-match
+    # Warn on dangerously short / hex-like terms - these tend to false-match
     # against auto-generated FUN_<hex> names if those aren't filtered out.
     short = [t for t in terms if len(t) < 3]
     if short:
@@ -636,7 +636,7 @@ def cmd_seed(args):
         for addr, val in rows:
             seeds.setdefault(addr, (term, f"string:{val[:64]}"))
 
-    # Match by function name — but skip Ghidra auto-names (FUN_xxxxxxxx etc.)
+    # Match by function name - but skip Ghidra auto-names (FUN_xxxxxxxx etc.)
     for term in terms:
         rows = db.execute(
             "SELECT address, name FROM functions WHERE LOWER(name) LIKE ?",
@@ -646,7 +646,7 @@ def cmd_seed(args):
                 continue
             seeds.setdefault(addr, (term, f"name:{name}"))
 
-    # Match by callee name — same auto-name filter
+    # Match by callee name - same auto-name filter
     for term in terms:
         rows = db.execute(
             "SELECT DISTINCT caller_addr, callee_name FROM callees "
@@ -695,7 +695,7 @@ def cmd_neighbors(args):
 
     seed_addrs = [r[0] for r in db.execute("SELECT func_addr FROM seeds")]
     if not seed_addrs:
-        print("No seeds — run `seed` first.", file=sys.stderr)
+        print("No seeds - run `seed` first.", file=sys.stderr)
         return
 
     # Build forward call graph (caller -> set of callees by ADDRESS only)
@@ -877,7 +877,7 @@ def cmd_report(args):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# brief — per-function markdown for tier 3
+# brief - per-function markdown for tier 3
 # ─────────────────────────────────────────────────────────────────────────────
 
 def cmd_brief(args):
@@ -944,7 +944,7 @@ def cmd_brief(args):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# batch — emit JSONL ready to feed to an LLM
+# batch - emit JSONL ready to feed to an LLM
 # ─────────────────────────────────────────────────────────────────────────────
 
 PROMPT_TEMPLATE = """\

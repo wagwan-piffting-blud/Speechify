@@ -1,6 +1,6 @@
 /* Synthesis Tracer - batch Viterbi/unit-selection view.
  * Powered by spfy_synth_trace.exe (our byte-exact reimplementation) via
- * POST /api/synth — no Frida, no Speechify.exe, concurrency-safe. */
+ * POST /api/synth - no Frida, no Speechify.exe, concurrency-safe. */
 
 function recColor(name) {
     let hash = 0;
@@ -16,7 +16,7 @@ function recColorBright(name) {
 }
 
 // Synthesis is powered by spfy_synth_trace.exe (our byte-exact reimplementation)
-// via POST /api/synth — no Frida, no Speechify.exe, and safe to run concurrently.
+// via POST /api/synth - no Frida, no Speechify.exe, and safe to run concurrently.
 
 // -- Synthesis --
 document.getElementById('synth-btn').addEventListener('click', async () => {

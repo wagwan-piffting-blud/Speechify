@@ -272,7 +272,7 @@ int spfy_pitch_shift_block(const int16_t *in, size_t n_in,
         if (wgt[i] > 1e-3) {
             v = acc[i] / wgt[i];
         } else {
-            /* Outside any grain — fall back to input, preserves any
+            /* Outside any grain - fall back to input, preserves any
              * residual leading/trailing silence. */
             v = (double)in[i];
         }
@@ -347,7 +347,7 @@ static int build_period_voiced(const int16_t *in, size_t n_in,
     }
 
     /* Nearest-frame assignment per sample (voicing is categorical, so no
-     * interpolation — a sample takes the period/flag of its closest frame
+     * interpolation - a sample takes the period/flag of its closest frame
      * center). */
     int last_fi = 0;
     for (size_t i = 0; i < n_in; ++i) {

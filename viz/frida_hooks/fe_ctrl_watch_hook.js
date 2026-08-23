@@ -1,6 +1,6 @@
 'use strict';
 /*
- * fe_ctrl_watch_hook.js — for every FE vtable call, snapshot a small
+ * fe_ctrl_watch_hook.js - for every FE vtable call, snapshot a small
  * window of ctrl bytes BEFORE and AFTER. Diff them. Log only the
  * deltas. This pinpoints which init step writes the verbose-mode
  * flag (ctrl+0x004) and starts populating the output buffer
@@ -41,7 +41,7 @@ var WATCH_WINDOWS = [
     [0x400, 0x800],
 ];
 
-/* Cap diff list per call — the per-byte changes inside a buffer can
+/* Cap diff list per call - the per-byte changes inside a buffer can
  * easily be thousands; we just want to know IT changed and where. */
 var MAX_DIFFS_PER_CALL = 24;
 
@@ -98,7 +98,7 @@ var stats = { calls: 0, diffs_emitted: 0 };
 /* One-shot raw dump of ctrl[0..0x800] at slot-3 (initStage1) ENTRY,
  * for differential-bisection work (see RESUME_K2.md). Fires once
  * per Frida session; subsequent slot-3 calls (e.g. across the
- * corpus) are not re-dumped — first phrase wins. */
+ * corpus) are not re-dumped - first phrase wins. */
 var g_pre_init_dumped = false;
 var g_pre_init_state_dumped = false;
 var PRE_INIT_BYTES = 0x800;
@@ -171,7 +171,7 @@ SLOTS.forEach(function (slot_def) {
                 var after = snapshot_all(this.ctrl);
                 var diffs = diff_snapshots(this.before, after);
                 stats.diffs_emitted++;
-                /* Always log, including 0-diff calls — that's important
+                /* Always log, including 0-diff calls - that's important
                  * negative information ("we know this call is hooked
                  * and doesn't touch ctrl in our window"). */
                 send({

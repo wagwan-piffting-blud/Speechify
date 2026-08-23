@@ -1,15 +1,15 @@
 'use strict';
 /*
- * fe_utt_hunt_hook.js — locate where the FE stashes its produced
+ * fe_utt_hunt_hook.js - locate where the FE stashes its produced
  * Festival utterance pointer in iobj->state, so we can read it
  * directly from our hosted PE-loaded copy of the DLL (instead of
  * draining the lossy tagged-text serialization).
  *
  * Strategy:
- *   1. Hook SWIttsUSelUnitSelection (FUN_08e819e0) at entry — its
+ *   1. Hook SWIttsUSelUnitSelection (FUN_08e819e0) at entry - its
  *      param_3 is the FE-produced utterance pointer (verified by
  *      fe_tree_hook.js). Capture into a JS-side variable.
- *   2. Hook runOrAbort (slot 11 wrapper at 0x0836cd30) at onLeave —
+ *   2. Hook runOrAbort (slot 11 wrapper at 0x0836cd30) at onLeave -
  *      this is the last FE call before unit selection. At leave-time
  *      the utterance is fully built and the FE has stashed its pointer
  *      somewhere. Dump iobj, iobj->state, and the ctrl block at
@@ -40,7 +40,7 @@ var DUMP_BYTES_CTRL  = 0x2000;
 var DUMP_BYTES_L1    = 0x200;           /* widened 2026-05-12 from 0x80 */
 var DUMP_BYTES_L2    = 0x100;           /* level-2 deref window */
 
-/* Heuristic for "looks like a heap pointer in this process" — captured
+/* Heuristic for "looks like a heap pointer in this process" - captured
  * traces show iobj/state/ctrl/utt_ptr all in 0x02xxxxxx-0x07xxxxxx. */
 function isHeapPtr(v) {
     return v >>> 0 >= 0x01000000 && v >>> 0 < 0x10000000;
@@ -153,7 +153,7 @@ Interceptor.attach(ADDR_RUNOR, {
                 }
             }
             /* Level-2 pointer chase: every plausible-heap-pointer u32 in
-             * the L1 regions gets dereferenced too — utt may live 2 hops
+             * the L1 regions gets dereferenced too - utt may live 2 hops
              * from iobj/state/ctrl. */
             for (var ri2 = 0; ri2 < l1_regions.length; ri2++) {
                 var r2 = l1_regions[ri2];

@@ -10,7 +10,7 @@
 #   spfy_fe              The drop-in public-FE-API target that spfy_synth /
 #                        spfy_sapi / spfy_synth_lib link (same target name the
 #                        hosted build's src/fe_host/ produces). Backed by the
-#                        in-house FE via the fe_stub.c adapter — it implements
+#                        in-house FE via the fe_stub.c adapter - it implements
 #                        the FULL public API (spfy_fe_synth_text / _synth_tagged
 #                        / _get_parsed / _text_to_tagged / _open / _close /
 #                        _set_voice_vcf / _phoneset). The hand-written fe.c
@@ -43,7 +43,7 @@ add_custom_command(
     COMMENT "Codegen engine phone-id table from ${PHONEID_CSV}")
 
 # ---------------------------------------------------------------------------
-# spfy_fe — in-house FE adapter (public API). Mirrors the wasm build's
+# spfy_fe - in-house FE adapter (public API). Mirrors the wasm build's
 # composition (wasm/CMakeLists.txt) and the hosted src/fe_host/ target name.
 # ---------------------------------------------------------------------------
 add_library(spfy_fe STATIC
@@ -68,7 +68,7 @@ target_link_libraries(spfy_fe
     PRIVATE spfy_fe_internal)
 
 # ---------------------------------------------------------------------------
-# spfy_fe_handwritten — legacy hand-written FE (kept for the diagnostics CLIs).
+# spfy_fe_handwritten - legacy hand-written FE (kept for the diagnostics CLIs).
 # ---------------------------------------------------------------------------
 add_library(spfy_fe_handwritten STATIC
     vocab.c

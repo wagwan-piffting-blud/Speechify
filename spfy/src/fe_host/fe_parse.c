@@ -1,4 +1,4 @@
-/* spfy/src/fe_host/fe_parse.c — recursive-descent parser for the
+/* spfy/src/fe_host/fe_parse.c - recursive-descent parser for the
  * tagged-text FE output captured at host/PROTOCOL.md. */
 
 #include "fe_parse.h"
@@ -103,7 +103,7 @@ static int p_parse_phone_ident(parser_t *p, char *buf, size_t buf_sz) {
     return (int)n;
 }
 
-/* Accent tokens are not bare identifiers — they contain `*`, `+`, `;`, `-`,
+/* Accent tokens are not bare identifiers - they contain `*`, `+`, `;`, `-`,
  * `%`. */
 static int p_parse_accent(parser_t *p, char *buf, size_t buf_sz) {
     p_skip_ws(p);
@@ -125,7 +125,7 @@ static int p_parse_accent(parser_t *p, char *buf, size_t buf_sz) {
 
 static int parse_pau(parser_t *p, fe_parsed_t *out, int post_word,
                      int phrase_id, int post_in_utt) {
-    /* "pau(p" int ")" — already saw "pau"; consume "(p", digits, ")". */
+    /* "pau(p" int ")" - already saw "pau"; consume "(p", digits, ")". */
     if (!p_expect_lit(p, "(")) return 0;
     if (!p_expect_lit(p, "p")) return 0;
     int dur = 0, is_default = 0;
@@ -144,7 +144,7 @@ static int parse_pau(parser_t *p, fe_parsed_t *out, int post_word,
         } else if (post_word) {
             out->pause_after_ms = dur;
         } else {
-            /* Inter-word pause — attach to the previous word's trailing pause field. */
+            /* Inter-word pause - attach to the previous word's trailing pause field. */
             out->words[out->n_words - 1].pause_after_ms = dur;
         }
         /* Per-phrase copy, kept SEPARATE from the three fields above.
@@ -293,7 +293,7 @@ static int parse_word(parser_t *p, fe_parsed_t *out) {
         w->char_len = 0;
     } else {
         /* The FE emits `?d` (its "default/unspecified" marker) instead of a
-         * numeric char_start when the DLL didn't compute one — happens with
+         * numeric char_start when the DLL didn't compute one - happens with
          * the plain-text feedConfigA path used by both fe_host.c and
          * fe_host_emu.c. */
         if (p_peek(p) == '?') {
@@ -432,7 +432,7 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
 
             if (p->end - p->p >= 3 && p->p[0] == 'p' && p->p[1] == 'a' && p->p[2] == 'u') {
                 p->p += 3;
-                /* `pau(uN)` — USER pause from a `\!pN` embedded tag
+                /* `pau(uN)` - USER pause from a `\!pN` embedded tag
                  * (emitted by build_inline_mixed_tagged). */
                 if (p->end - p->p >= 2 && p->p[0] == '(' && p->p[1] == 'u') {
                     p->p += 2;
@@ -484,7 +484,7 @@ fail:
  * `d`). The real engine's Festival utterance (captured via fe_tree)
  * has these refined to `ix`, `dx` per standard English post-lexical
  * rules. The refinement lives inside SWIttsUSel.dll (not accessible
- * here) but the rules can be derived empirically — see
+ * here) but the rules can be derived empirically - see
  * memory/project_phoneme_refinement_rules_2026_05_12.md.
  *
  * Two rules:
@@ -554,7 +554,7 @@ static void apply_phoneme_refinement(fe_parsed_t *out) {
             fe_parsed_phoneme_t *ph = &w->phonemes[pi];
             /* Stress gate: always fire on stress=0; for stress=2 (secondary
              * stress), fire ONLY when the phoneme is a singleton syllable
-             * (no onset, no coda) — i.e. */
+             * (no onset, no coda) - i.e. */
             int singleton_syl = 0;
             if (ph->syl_stress == 2) {
                 int prev_same = (pi > 0
@@ -616,14 +616,14 @@ static void apply_phoneme_refinement(fe_parsed_t *out) {
      *   flap iff:
      *     phone in {t, d}
      *     AND curr_syl_stress == 0          (engine NEVER flaps cs>=1)
-     *     AND prev in {VOWEL, 'r'}         (NOT n/m/ng/l — engine
+     *     AND prev in {VOWEL, 'r'}         (NOT n/m/ng/l - engine
      *                                         doesn't flap after nasals
      *                                         or 'l'; the 'twenty' nt
      *                                         keep cluster, "London" nd,
      *                                         etc.)
-     *     AND next in {VOWEL, 'l', 'el'}   (NOT 'r' — onset cluster
+     *     AND next in {VOWEL, 'l', 'el'}   (NOT 'r' - onset cluster
      *                                         tr/dr blocks flap; NOT
-     *                                         nasal — "wanted" nt-axn)
+     *                                         nasal - "wanted" nt-axn)
      *     AND NOT word-initial             (handled by prev_ph=NULL at
      *                                         word boundary, so the
      *                                         prev-class check fails)
