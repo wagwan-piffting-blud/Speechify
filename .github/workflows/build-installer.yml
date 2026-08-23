@@ -384,30 +384,57 @@ jobs:
           # build time. 15 is a placeholder for the legs whose real
           # duration hasn't been measured - tighten to ~2x observed once
           # you've read them off a green run.
+          # ⭐ EVERY LINUX LEG BUILDS IN A debian:bookworm CONTAINER, and the
+          # reason is glibc, not tidiness.
+          #
+          # A binary is only as portable as the glibc it linked against. Built
+          # natively on ubuntu-latest (24.04, glibc 2.39) these tarballs
+          # referenced __isoc23_strtol@GLIBC_2.38 - a redirect the 2.39
+          # HEADERS introduce, from no source change and with no warning - and
+          # so refused to run on Debian 12, RHEL 9, Ubuntu 22.04 and every
+          # Raspberry Pi OS bookworm install. That is most of the machines
+          # anyone would actually put this on, and nothing in the build said
+          # a word about it.
+          #
+          # bookworm's glibc 2.36 is the ceiling now, enforced after linking
+          # by build_unix.sh (SPFY_MAX_GLIBC), so a runner-image bump cannot
+          # quietly take it away again. armv7 already built this way and was
+          # the only leg that stayed portable.
+          #
+          # `platform` is what docker runs as; `qemu` is set ONLY when that
+          # needs emulating. amd64 on ubuntu-latest and arm64 on the arm
+          # runner are both native, so they pay nothing for the container
+          # beyond one apt-get.
           - id: linux-x86
             runner: ubuntu-latest
             cflags: "-m32 -D_GNU_SOURCE=1"
             ldflags: "-m32"
             multilib: true
             qemu: ""
-            image: ""
-            timeout: 15
+            image: "debian:bookworm"
+            platform: "linux/amd64"
+            osx_target: ""
+            timeout: 20
           - id: linux-x86_64
             runner: ubuntu-latest
             cflags: "-D_GNU_SOURCE=1"
             ldflags: ""
             multilib: false
             qemu: ""
-            image: ""
-            timeout: 15
+            image: "debian:bookworm"
+            platform: "linux/amd64"
+            osx_target: ""
+            timeout: 20
           - id: linux-arm64
             runner: ubuntu-24.04-arm
             cflags: "-D_GNU_SOURCE=1"
             ldflags: ""
             multilib: false
             qemu: ""
-            image: ""
-            timeout: 15
+            image: "debian:bookworm"
+            platform: "linux/arm64"
+            osx_target: ""
+            timeout: 20
           # 32-bit ARM. There is NO hosted armv7 runner (ubuntu-24.04-arm
           # is aarch64), so this one builds in a qemu-emulated container on
           # an x86_64 runner. Cross-compiling would be far faster but the
@@ -424,7 +451,48 @@ jobs:
             multilib: false
             qemu: "linux/arm/v7"
             image: "debian:bookworm"
+            platform: "linux/arm/v7"
+            osx_target: ""
             timeout: 30
+          # ⭐ musl, STATICALLY linked -- the "runs anywhere" build.
+          #
+          # The glibc tarballs above cannot run on Alpine at all: their
+          # interpreter is /lib64/ld-linux-x86-64.so.2 and musl systems have
+          # /lib/ld-musl-x86_64.so.1, which is why the failure there is the
+          # famously unhelpful "not found" on a file that plainly exists.
+          #
+          # `-static` rather than a dynamic musl build, because it costs
+          # nothing extra and removes the libc question entirely: no
+          # interpreter, no libc.so, no version floor. One binary for Alpine,
+          # for a distro older than anything CI can build on, and for a
+          # container FROM scratch. Verified byte-exact against the reference
+          # WAV -- musl's libm does not move a single output sample.
+          - id: linux-x86_64-musl
+            runner: ubuntu-latest
+            cflags: "-D_GNU_SOURCE=1"
+            ldflags: "-static"
+            multilib: false
+            qemu: ""
+            image: "alpine:3.20"
+            platform: "linux/amd64"
+            osx_target: ""
+            timeout: 20
+          - id: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            cflags: "-D_GNU_SOURCE=1"
+            ldflags: "-static"
+            multilib: false
+            qemu: ""
+            image: "alpine:3.20"
+            platform: "linux/arm64"
+            osx_target: ""
+            timeout: 20
+          # ⭐ osx_target, because an unset deployment target means "whatever
+          # this runner is". That is how the Intel tarball came to declare
+          # macOS 15.0 - a floor that excludes every Intel Mac older than
+          # 2018, i.e. most of the machines an Intel build is FOR. 11.0 is
+          # Apple Silicon's own floor, so one number covers both arches, and
+          # build_unix.sh reads the linked binary back to prove it took.
           - id: macos-arm64
             runner: macos-14
             cflags: ""
@@ -432,6 +500,8 @@ jobs:
             multilib: false
             qemu: ""
             image: ""
+            platform: ""
+            osx_target: "11.0"
             timeout: 15
           # Intel macOS. NOT macos-13 - that image was retired 2025-12-04
           # (deprecation began 2025-09-22), and requesting a dead label
@@ -449,6 +519,8 @@ jobs:
             multilib: false
             qemu: ""
             image: ""
+            platform: ""
+            osx_target: "11.0"
             timeout: 30
 
     runs-on: ${{ matrix.runner }}
@@ -468,11 +540,12 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      # Native legs only: the emulated leg installs its own toolchain
-      # inside the container (see build_unix.sh - one `docker run` means
-      # a separate install step would be thrown away).
+      # Kept for a leg that goes back to building on the runner itself. Every
+      # Linux leg is containerised today, so this is currently inert -- a
+      # container installs its own toolchain inside build_unix.sh, because one
+      # `docker run` means a separate install step would be thrown away.
       - name: Install toolchain (Linux, native)
-        if: runner.os == 'Linux' && matrix.qemu == ''
+        if: runner.os == 'Linux' && matrix.image == ''
         run: |
           sudo apt-get update
           if [ "${{ matrix.multilib }}" = "true" ]; then
@@ -498,29 +571,39 @@ jobs:
         with:
           platforms: ${{ matrix.qemu }}
 
+      # macOS only, now that every Linux leg is containerised. SPFY_OSX_-
+      # DEPLOYMENT_TARGET is the whole point of this step's env block: unset,
+      # the binary silently demands whatever macOS the runner happens to run.
       - name: Configure and build (native)
-        if: matrix.qemu == ''
+        if: matrix.image == ''
         env:
           SPFY_CFLAGS: ${{ matrix.cflags }}
           SPFY_LDFLAGS: ${{ matrix.ldflags }}
           SPFY_VERSION: ${{ needs.setup.outputs.version }}
+          SPFY_OSX_DEPLOYMENT_TARGET: ${{ matrix.osx_target }}
         run: bash spfy/ci/build_unix.sh
 
-      # Same script, run under emulation. The workspace is bind-mounted, so
+      # Same script, inside the container. The workspace is bind-mounted, so
       # build-out lands on the host and the packaging steps below are shared
       # with the native legs.
-      - name: Configure and build (qemu ${{ matrix.qemu }})
-        if: matrix.qemu != ''
+      #
+      # SPFY_MAX_GLIBC is the ceiling build_unix.sh enforces on what the
+      # linked binary may reference. It matches the image on the line above
+      # it, and README.md's compatibility table quotes the same number -- move
+      # one and CI makes you move the others.
+      - name: Configure and build (${{ matrix.image }} on ${{ matrix.platform }})
+        if: matrix.image != ''
         run: |
-          docker run --rm --platform "${{ matrix.qemu }}" \
+          docker run --rm --platform "${{ matrix.platform }}" \
             -v "${GITHUB_WORKSPACE}:/w" -w /w \
             -e SPFY_CFLAGS="${{ matrix.cflags }}" \
             -e SPFY_LDFLAGS="${{ matrix.ldflags }}" \
             -e SPFY_VERSION="${{ needs.setup.outputs.version }}" \
             -e SPFY_INSTALL_DEPS=1 \
-            -e SPFY_MULTILIB=0 \
+            -e SPFY_MULTILIB=${{ matrix.multilib && '1' || '0' }} \
+            -e SPFY_MAX_GLIBC=2.36 \
             "${{ matrix.image }}" \
-            bash spfy/ci/build_unix.sh
+            sh -c 'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null; exec bash spfy/ci/build_unix.sh'
           # Container ran as root, so build-out is root-owned; hand it back
           # or the packaging steps below can't stage into it.
           sudo chown -R "$(id -u):$(id -g)" build-out
@@ -598,6 +681,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ⚠ FIRST, and it has to be. This job used to have no checkout at all --
+      # it only downloads artifacts -- so the manifest step below failed with
+      # "not a git repository" and "can't open installer/updates/
+      # make_manifest.py" on 2026.08.23, AFTER the release had already been
+      # published. Second: checkout cleans the workspace, so running it after
+      # download-artifact would delete dist/.
+      #
+      # Sparse + blob:none because the voice tree is ~2.6 GB of this repo and
+      # this job needs two Python files. History still comes down, which is
+      # what `git log -1` for the [no-notify] marker needs.
+      - name: Check out the manifest tooling
+        uses: actions/checkout@v6
+        with:
+          filter: blob:none
+          sparse-checkout: installer/updates
+          sparse-checkout-cone-mode: true
+
       # One pattern pull grabs the Windows installer plus every matrix
       # tarball (linux-x86 / linux-x86_64 / linux-armv7 / linux-arm64 /
       # macos-*), so adding a target to the matrix needs no change here.
@@ -627,8 +727,16 @@ jobs:
               missing=$((missing + 1))
             fi
           done
-          for t in linux-x86 linux-x86_64 linux-armv7 linux-arm64 macos-arm64 macos-x86_64; do
-            if ! ls dist/spfy-"$t"-*.tar.gz >/dev/null 2>&1; then
+          # ⚠ Exact filenames, not spfy-"$t"-*.tar.gz. The musl ids extend the
+          # glibc ones, so `spfy-linux-x86_64-*` also matches
+          # spfy-linux-x86_64-musl-<ver>.tar.gz -- and a missing glibc tarball
+          # would then be "found" by its musl sibling and never reported.
+          n_unix=0
+          for t in linux-x86 linux-x86_64 linux-armv7 linux-arm64 \
+                   linux-x86_64-musl linux-arm64-musl \
+                   macos-arm64 macos-x86_64; do
+            n_unix=$((n_unix + 1))
+            if [ ! -f "dist/spfy-$t-${{ needs.setup.outputs.version }}.tar.gz" ]; then
               echo "::warning title=Missing target::no artifact for $t - release is partial"
               missing=$((missing + 1))
             fi
@@ -636,7 +744,7 @@ jobs:
           if [ "$missing" -gt 0 ]; then
             echo "::warning title=Partial release::$missing target(s) missing from this release"
           else
-            echo "all 6 unix targets present"
+            echo "all $n_unix unix targets present"
           fi
 
       - name: Resolve release tag

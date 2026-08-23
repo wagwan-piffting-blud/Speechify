@@ -63,7 +63,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           # The voice tree is most of this repo's ~2.6 GB. Nothing here needs
           # spfy/src, reveng/ or demos/, so take the language folders, the

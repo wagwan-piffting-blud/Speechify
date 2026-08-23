@@ -1,4 +1,4 @@
-# Speechify 3 Voices on Modern Windows (tested on Windows 11 25H2 x64)
+# Speechify 3.0.5 - 2003 Speechify TTS Engine Reverse-Engineering/re-implementation
 
 ## Regarding "spfy"
 
@@ -6,45 +6,56 @@ See [SPFY_README.md](SPFY_README.md) for details on the Speechify re-implementat
 
 ---
 
-## Installation Instructions
+## Installation Instructions (for _almost_ any computer from the last 20 years or so)
 
-Step 1: Choose a place to keep your Speechify install. This can be anywhere on your computer, but it's best to keep it in a dedicated folder. For example, you might create a folder called "Speechify" in your user Documents directory. This is what I did personally and works well.
+1. Download the latest spfy release. This can be found [at this link](https://github.com/wagwan-piffting-blud/Speechify/releases/latest).
+2. Run the installer for your platform. The different versions and what platforms they're for are in the table below:
 
-Steps 2 and 3 (For Balabolka/TTS App/SAPI users): Right-click the "BalRegisterVoice.bat" file included in this folder and select "Run as Administrator" to do all the manual setup steps automatically. You should see a command prompt window with some helpful messages pop up. Once it finishes successfully, you can close the command prompt window or hit any key to exit. MAKE SURE YOU RUN THIS AS ADMINISTRATOR, OR IT WILL FAIL SILENTLY. NOTE: If the batch file fails, you can open a command prompt, navigate to this folder (`cd \Users\USERNAME\Documents\Speechify`, for example), and run the batch file from there. This way, you can see any error messages that may help diagnose the issue. If you do run into any issues, contact @wags2piffting on Discord or visit [https://wagspuzzle.space/contact/](https://wagspuzzle.space/contact/). However, most users report no issues when running the batch file as administrator CORRECTLY.
+| Platform | Installer |
+|----------|-----------|
+| Linux (ARM64, i.e. Raspberry Pi 4 / 5 / Zero 2 W on 64-bit Raspberry Pi OS, Orange Pi 5, Radxa Rock, AWS Graviton or Ampere servers, Asahi Linux on an Apple Silicon Mac) | spfy-linux-arm64-20xx.xx.xx.tar.gz |
+| Linux (ARMv7, i.e. Raspberry Pi 2 / 3 / Zero 2 W running **32-bit** Raspberry Pi OS, BeagleBone Black, older armhf single-board machines) | spfy-linux-armv7-20xx.xx.xx.tar.gz |
+| Linux (x86, i.e. 32-bit Debian or Ubuntu on Pentium 4 / Core Duo / Atom netbook-era hardware, or a 32-bit VM) | spfy-linux-x86-20xx.xx.xx.tar.gz |
+| Linux **musl**, 64-bit x86 (i.e. Alpine Linux, a `FROM scratch` container, or any distro too old for the glibc builds above) | spfy-linux-x86_64-musl-20xx.xx.xx.tar.gz |
+| Linux **musl**, ARM64 (i.e. Alpine on a Raspberry Pi, or an arm64 Alpine container) | spfy-linux-arm64-musl-20xx.xx.xx.tar.gz |
+| Linux (x86_64, i.e. Debian 12+, Ubuntu 22.04+, RHEL 9+, Fedora, Arch on any ordinary 64-bit PC or VPS; also WSL2) | spfy-linux-x86_64-20xx.xx.xx.tar.gz |
+| macOS (ARM64, i.e. any Apple Silicon Mac - M1 through M4 - on macOS 11 Big Sur or newer) | spfy-macos-arm64-20xx.xx.xx.tar.gz |
+| macOS (x86_64, i.e. any Intel Mac from roughly 2013 onwards, on macOS 11 Big Sur or newer) | spfy-macos-x86_64-20xx.xx.xx.tar.gz |
+| Windows (x86, i.e. 32-bit Windows 7 through 11; also installable on 64-bit Windows if you want a 32-bit-only install) | spfy-setup-20xx.xx.xx-x86.exe |
+| Windows (x86_64, i.e. 64-bit Windows 7 through 11, including Windows Server 2008 R2 and later) | spfy-setup-20xx.xx.xx.exe |
 
-Step 4: Run Speechify.exe. This is the backend server to make Speechify work at all. You can find it in the `bin` folder in this repository. **This step is REQUIRED to use ANY Speechify voices.** You can create an autorun/Task Scheduler entry for it if you want it to start automatically with Windows. Running it silently is possible, but outside the scope of this README. If you get a Windows firewall prompt asking for permission to allow Speechify.exe to communicate on private/public networks, make sure to allow it on at least private networks (home/work). This is necessary for the TTS frontend (e.g., Balabolka) to communicate with the Speechify backend server.
+**What each build actually requires**:
 
-Step 5: Open your TTS frontend (e.g., Balabolka) and select the "Speechify Tom" entry as your voice. You should now be able to use Speechify 3.0 to convert text to speech. You can also use the command line tool "spfy_dumpwav.exe" to dump audio files without the overhead of the Balabolka GUI (example: `spfy_dumpwav.exe "This is the text you want the voice to say" output.wav`). IMPORTANT NOTE: The registry keys only _say_ "Tom", but all other Speechify voices work under the Tom registry key. You just need to edit the "SWIttsConfig.xml" file in the config folder to switch voices. Have fun using Speechify voices on modern Windows!
+* **The two musl tarballs need nothing at all.** They are statically linked against musl, so there is no interpreter, no `libc.so`, and no version floor: they run on Alpine, on a `FROM scratch` container, and on glibc distros far older than anything CI could build on. If you are unsure which Linux download to take, or the glibc one refuses to start, take a musl build. They are byte-for-byte identical in output to the glibc builds - the reference-WAV check is run against each.
+* **The glibc Linux tarballs** need **glibc 2.34 or newer** as measured, with **2.36** as the guaranteed ceiling - so Debian 12 (bookworm), Raspberry Pi OS bookworm, Ubuntu 22.04 and newer, RHEL 9 and Fedora 35+ all run these as-is. All four targets build inside a `debian:bookworm` container, and CI reads the linked binary back and **fails the build** if anything references a symbol newer than 2.36, so this cannot quietly regress the next time a runner image is updated. Each build prints its own figure ("highest glibc symbol referenced").
+* **macOS** builds declare **macOS 11.0 (Big Sur) or newer** on both arches, verified from the binary's Mach-O load commands. Big Sur covers Apple Silicon from day one and Intel Macs back to roughly 2013.
+* **Windows** requires **Windows 7 or newer**. The x64 installer refuses to run on 32-bit Windows; the x86 one runs on both.
+* The **unix tarballs are the command-line engine only** (`bin/spfy_synth` plus `bin/spfy_update`). SAPI is a Windows COM interface, so "Refresh SAPI Voices", Balabolka and Narrator are Windows-only - on Linux and macOS you drive `spfy_synth` directly, as in the example below.
 
-### Installation Notes
+3. Download any voices you want to use. The voices can be downloaded individually, or in packs per FE language [at this page](https://github.com/wagwan-piffting-blud/Speechify/releases/tag/voices).
+4. Unpack the voices to your Speechify Documents folder (usually `C:\Users\{your_username}\Documents\Speechify\{lang_code}\{voice_name}`). On Linux or macOS, unpack to your home directory or wherever you want, and set the `SPFY_VOICE_DIR` environment variable to point to the folder containing the voices.
 
-- Make sure to run Speechify.exe **every time** you want to use Speechify voices. You can set it to run automatically at startup if you prefer (look up a guide on Task Scheduler in Windows).
-- If you encounter any issues, double-check that you have followed all the steps correctly. Admin access is REQUIRED for the batch file to work, and you must run Speechify.exe for the voices to work at all due to the server/client architecture of Speechify.
-- This setup is specifically tested on Windows 11 25H2 x64, but it should work on many other versions of Windows as well. However, they have not been tested, so your mileage may vary.
-- To switch voices, simply edit the "SWIttsConfig.xml" file in the config folder and change the "tts.voice.name" and "tts.voice.language" parameters to your desired voice and language. **DO NOT CHANGE ANY OTHER PARAMETERS IN THIS FILE**. Then, restart Speechify.exe for the changes to take effect. You MUST restart the backend server for the changes to apply, as it only reads the config file on startup. The available voices (and their languages) are:
+For Windows users ONLY:
 
-  - Tom (en-US)
-  - AI Mara (en-US) \*
-  - AI Mara v2 (en-US) \*
-  - AI Craig (en-US) \*
-  - Jill (en-US)
-  - Felix (fr-CA)
-  - Javier (es-MX)
-  - Paulina (es-MX)
+5. Run "Refresh SAPI voices" from the Start Menu to make the voices available in SAPI and Balabolka.
+6. Run your SAPI client of choice (Balabolka, TTSApp, etc.) and select the voice you want to use. You can also use the `spfy_synth.exe` command-line tool to synthesize audio directly from spfy. NOTE: If you use spfy_synth.exe, you MUST use it from OUTSIDE the Program Files folder, as it will not work from inside that folder due to Windows permission restrictions. Specify the full path to it from the command line running from another folder (i.e. your Desktop, Documents, etc.), like so (note the quotes around the path to the executable and all other arguments, this is because of the space in "Program Files" and to ensure everything is passed correctly to the executable):
 
-Demos of what each voice sounds like are available in the "demos" folder in this repository.
+```sh
+cd C:\Users\{your_username}\Desktop
+"C:\Program Files\Speechify\bin\spfy_synth.exe" "tom" "Hello, world!" "hello_world.wav"
+```
 
-\* = created with Claude Code, not official
+Other platforms (Linux, macOS) do not have this restriction, so you can run `spfy_synth` from anywhere, so long as you point it to the correct voice directory (either via `SPFY_VOICE_DIR` or by specifying the full paths to the voice file triplet in the order vin, vdb, vcf).
 
 ---
 
-## The spfy_dumpwav.exe Command Line Tool
+## The spfy_dumpwav.exe Command Line Tool (for the original Speechify.exe 3.0.5 engine)
 
 `spfy_dumpwav.exe` is a lightweight command-line synthesis tool that talks directly to the Speechify server. It does not require Balabolka, SAPI, or any GUI, just the running `Speechify.exe` backend. It supports text-to-speech, phoneme input/output, and format conversion.
 
-**Note:** The Speechify server (`bin/Speechify.exe`) must be running before using this tool.
+**Note: The Speechify server (`bin/Speechify.exe`) MUST be running before using this tool. If it is not, it will fail.**
 
-### Basic Synthesis
+### Basic Synthesis, using the current voice configured in `config\SWIttsConfig.xml`
 
 ```sh
 spfy_dumpwav.exe "Hello, world!" output.wav
@@ -111,7 +122,7 @@ Balabolka format uses space-separated ARPAbet codes with stress markers after vo
 
 `--expand` prints the `\!` codes a text lowers to, through the same expander synthesis uses - the way to see why a `<pron>`, `<prosody>` or `<say-as>` did not come out as expected, without a server and without waiting for audio. It accepts `-f FILE`.
 
-⚠ `--g2p` is **not** offline. The grapheme-to-phoneme tables live in the server's front end, so it needs Speechify running.
+WARNING: `--g2p` is **not** offline. The grapheme-to-phoneme tables live in the server's front end, so it needs Speechify running.
 
 ### SPR Symbol Reference
 
@@ -137,37 +148,11 @@ Balabolka format uses space-separated ARPAbet codes with stress markers after vo
 | `--expand "..."` | Print the `\!` codes a text expands to - **offline**, accepts `-f FILE` |
 | `--help`, `-h` | Usage and the SPR symbol table - **offline** |
 
-### Speed Fix (patch_speed.py)
-
-Out of the box, the Speechify engine throttles synthesis to match realtime playback speed, which makes batch file output extremely slow (~41 seconds for a 200-word paragraph). This is unnecessary for file output. The included `patch_speed.py` removes this throttle by patching a single Sleep call in `SWIttsEngine.dll`, resulting in a **7-8x speedup** (41s down to ~5s for the same text).
-
-To apply:
-
-1. Stop Speechify.exe
-2. cd bin
-3. python patch_speed.py
-4. Restart Speechify.exe
-
-The patch backs up the original DLL as `SWIttsEngine_orig.dll`. To revert, copy the backup over `SWIttsEngine.dll`. For technical details on how this was discovered and how the throttle works, see [reveng/SPEED_FIX.md](reveng/SPEED_FIX.md).
-
-### Building from Source
-
-Requires Microsoft Visual C++ (any version with `cl.exe`):
-
-```sh
-cd bin
-cl spfy_dumpwav.c /Fe:spfy_dumpwav.exe
-```
-
-The only dependency is `swi_min.h` (included) and `SWItts.dll` (in the bin folder).
-
-This step should not be required for most users, however, as I have included a precompiled binary in the `bin` folder, but it's here if you want to build it yourself or make your own modifications to it. The source code is also included in the `bin` folder as "spfy_dumpwav.c". This tool is open-source and licensed under the GNU GPL 3 (see [LICENSE](./LICENSE)), so feel free to modify and use it as you see fit.
-
 ---
 
-## Note on "AI Mara"
+## Note on "CRS Mara"
 
-"AI Mara" is a fully custom voice created by me using Claude Code and uses the Speechify TTS engine, which has been fully reverse-engineered (see the `reveng/` folder). It is not an official SpeechWorks voice, but it is included in this Speechify 3.0 package. The voice is based on the original "Mara" voice that was available in older versions of Speechify that are now presumed lost media, but it has been generated to work with this version of the Speechify TTS engine. If you know where the True Mara voice is located (usually on Speech Server 2004 Beta 1/2), please [contact me](https://wagspuzzle.space/mara) as I would love to add it to this package and not use the AI Mara at all. Same with Craig and AI Craig.
+"CRS Mara" (and "CRS Tom") are fully custom voices created by me using Claude Code and uses the Speechify TTS engine, which has been fully reverse-engineered (see the `reveng/` folder). They are not official SpeechWorks voices, but they are included in this Speechify 3.0 package. The voices are based on the original "Mara" voice that was available in older versions of Speechify that are now presumed lost media, but they have been generated to work with this version of the Speechify TTS engine. If you know where the True Mara voice is located (usually on Microsoft Speech Server 2004 Beta 1/2), please [contact me](https://wagspuzzle.space/mara) as I would love to add it to this package and not use CRS Mara at all. Same with Craig/AI Craig.
 
 ## Credits
 
