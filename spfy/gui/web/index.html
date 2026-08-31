@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>Speechify</title>
+        <link rel="stylesheet" href="./styles.css" />
+    </head>
+    <body>
+        <!--
+            ACCESSIBILITY IS THE REASON THIS IS A WEBVIEW AT ALL.
+
+            An immediate-mode toolkit (Dear ImGui, Nuklear, raylib, FLTK) paints
+            its own pixels and exposes nothing to UIA / AT-SPI /
+            NSAccessibility: to a blind user the window is empty. A webview
+            exposes the DOM, so the platform screen reader sees real controls
+            for free -- but only if the markup is real controls. Every widget
+            here is a native element with a real <label for>. No div-buttons,
+            no role="button" on a span, no placeholder standing in for a label.
+
+            This is a speech synthesizer. A meaningful share of its users run
+            NVDA, Narrator or Balabolka.
+
+            ⚠ NO INLINE STYLES ANYWHERE. tauri.conf.json sets
+            `style-src 'self'`, so a style="" attribute is blocked outright and
+            the element silently renders unstyled.
+        -->
+        <a class="skip" href="#text-input">Skip to the text box</a>
+
+        <header class="topbar">
+            <h1 class="wordmark">Speechify</h1>
+
+            <div class="voicebar">
+                <label class="micro" for="voice-select">Voice</label>
+                <select id="voice-select" disabled>
+                    <option>Loading…</option>
+                </select>
+                <button id="refresh-btn" type="button" class="ghost">
+                    Rescan
+                </button>
+                <button id="get-btn" type="button" class="ghost">
+                    Get voices…
+                </button>
+            </div>
+        </header>
+
+        <main>
+            <!-- Engine problems. role="alert" is assertive by definition,
+                 which is the right trade for something that stops work. -->
+            <div id="fatal" class="alert" role="alert" hidden></div>
+
+            <!-- The normal first run, not a failure: voices are 66-222 MB and
+                 are not bundled. Says where to put one. -->
+            <div id="no-voices" class="notice" hidden>
+                <p><strong>No voices installed.</strong></p>
+                <p>
+                    Voices are large (66&ndash;222&nbsp;MB) and ship separately.
+                    Put a voice folder &mdash; holding
+                    <code>&lt;name&gt;.vin</code>,
+                    <code>&lt;name&gt;8.vdb</code> and
+                    <code>&lt;name&gt;.vcf</code> &mdash; under a language
+                    directory here, then choose Rescan.
+                </p>
+                <p><code id="search-path"></code></p>
+            </div>
+
+            <section class="palette" aria-labelledby="palette-h">
+                <!-- Still an <h2> so the palette stays a landmark a screen
+                     reader can jump to by heading; the button inside is what
+                     carries the expanded/collapsed state. Wrapping the
+                     button in the heading keeps both. -->
+                <h2 class="palette-h" id="palette-h">
+                    <button type="button" class="disclosure micro"
+                        id="palette-toggle" aria-expanded="true"
+                        aria-controls="palette-body">Insert</button>
+                </h2>
+                <div id="palette-body">
+                    <!-- Tabs and panels are BUILT IN JS from one table
+                         (PALETTE in index.js) so the tab, its panel, and the
+                         aria-controls / aria-labelledby pair between them
+                         cannot drift apart. -->
+                    <div class="tabs" role="tablist"
+                         aria-labelledby="palette-h" id="palette-tabs"></div>
+                    <div id="palette-panels"></div>
+                </div>
+            </section>
+
+            <div class="editor">
+                <label class="micro" for="text-input">Text to speak</label>
+                <textarea id="text-input" spellcheck="true"
+                    aria-describedby="text-help"></textarea>
+                <p id="text-help" class="help">
+                    SSML and inline phonemes both work here. Ctrl+Enter speaks,
+                    Escape stops.
+                </p>
+            </div>
+        </main>
+
+        <footer class="transport">
+            <!--
+                aria-live="polite" so results are ANNOUNCED, not just drawn.
+                Polite, not assertive: these arrive every few seconds and would
+                otherwise interrupt the user mid-word.
+
+                The tally dot is aria-hidden -- it is a second, redundant
+                channel for something the text already says, so state is never
+                carried by colour alone.
+            -->
+            <p class="status" role="status" aria-live="polite">
+                <span class="tally" id="tally" aria-hidden="true"></span>
+                <span id="status"></span>
+            </p>
+
+            <div class="controls">
+                <button id="speak-btn" type="button" class="primary" disabled>
+                    Speak
+                </button>
+                <button id="stop-btn" type="button" disabled>Stop</button>
+                <button id="save-btn" type="button" disabled>Save WAV…</button>
+            </div>
+        </footer>
+
+        <!--
+            A native <dialog>, not a div pretending to be one. showModal()
+            gives focus trapping, Escape-to-close, inertness of the page
+            behind it and a real `dialog` role to the accessibility tree -
+            four things a hand-rolled overlay has to reimplement and usually
+            only reimplements three of.
+        -->
+        <dialog id="get-dialog" aria-labelledby="get-h">
+            <h2 id="get-h">Get voices</h2>
+            <p id="get-status" class="help" role="status"
+               aria-live="polite"></p>
+            <div id="get-list"></div>
+            <div class="controls">
+                <button id="get-close" type="button">Close</button>
+            </div>
+        </dialog>
+
+        <script src="./index.js"></script>
+    </body>
+</html>

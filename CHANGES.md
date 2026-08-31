@@ -1,5 +1,13 @@
 # Speechify/spfy Changelog
 
+## 2026-08-31
+
+- **spfy now has a GUI!** The GUI is a simple wrapper around the CLI, and is intended to make it easier for users to synthesize speech without having to use the command line. It is built using [Tauri](https://tauri.app/) and is available for Windows, macOS, and Linux. The GUI can be launched by running `spfy_gui` from the command line, or by double-clicking the executable in the installation directory.
+
+- Various voice and engine updates.
+
+---
+
 ## 2026-08-22
 
 - **spfy now tells you when there is a newer engine, or a rebuilt version of a voice you already have.** It checks at most once a week, and only when you actually use the engine - there is no background service, no scheduled task and nothing running when you are not synthesizing. `spfy_synth --check-update` asks immediately; `spfy_update --status` shows what it knows; `spfy_update --disable`, `--no-update-check` or `SPFY_NO_UPDATE_CHECK=1` turn it off, as does clearing the "Check for engine and voice updates" box in the installer (which switches it off for every account on that machine).

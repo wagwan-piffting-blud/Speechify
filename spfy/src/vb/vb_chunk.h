@@ -316,10 +316,22 @@ void spfy_vb_anchors_free(spfy_vb_anchors *a);
 size_t spfy_vb_anchors_filter(spfy_vb_anchors *a, const uint8_t *gated,
                               size_t n_uid);
 
-/* Is this recording stem one of the SYNTHETIC sources (`rvc_*`, `st2_*`)?
- * Shared so the prefix test exists once; it used to be spelled out in
- * vb_corpus.c and nowhere else, which is how anchor suppression came to mean
- * two different things. */
+/* Is this recording stem SYNTHETIC -- anything that is not her own audio?
+ *
+ * ⭐ ALLOW-LIST, NOT DENY-LIST. Asks whether the stem has the shape of a REAL
+ * recording; everything else is synthetic, INCLUDING sources that do not exist
+ * yet. A deny-list of known prefixes (`rvc_`, `st2_`) meant each new source
+ * counted as REAL until someone remembered to add it, and --rvc-policy
+ * prefer-real then protected nothing while its log reported zero converted.
+ *
+ *     <5 digits>_<UPPER>...     archive cut   00000_KEC49_cycle_2016_0001
+ *     <3 lower>_<8+ digits>...  wayback feed  lwx_20120204060659_WBCHWRNW6
+ *
+ * Shared so the test exists once; it used to be spelled out in vb_corpus.c and
+ * nowhere else, which is how anchor suppression came to mean two different
+ * things. The Python side mirrors this in
+ * reveng/spfy4/tools/voicebuild/vb_stemclass.py, which has a
+ * --verify-against-c harness that compiles THIS function and fuzzes both. */
 int spfy_vb_stem_is_synth(const char *stem);
 
 /* ⭐ prefer-real ONE LEVEL UP FROM THE POOLS. A winning anchor OVERWRITES the

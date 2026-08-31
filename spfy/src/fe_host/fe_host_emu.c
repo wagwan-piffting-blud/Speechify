@@ -23,6 +23,10 @@
  */
 
 #include "fe.h"
+/* SPFY_SILENT: this file's two status lines are unconditional and reach
+ * stderr even under -q, which is fine for a terminal and wrong for the
+ * subprocess callers spfy_synth --silent exists for. */
+#include "../common/env.h"
 #include "fe_parse.h"
 #include "phoneset.h"
 #include "../voice/voice.h"
@@ -417,8 +421,9 @@ int spfy_fe_synth_text(spfy_fe_t                  *opaque,
     u->hints = hints;
     parse_fe_output_into_slots(fe, tagged, hints, u);
 
-    fprintf(stderr, "[fe_host_emu] tagged output (%zu bytes): %s\n",
-            strlen(tagged), tagged);
+    if (!spfy_env("SPFY_SILENT"))
+        fprintf(stderr, "[fe_host_emu] tagged output (%zu bytes): %s\n",
+                strlen(tagged), tagged);
     free(tagged);
 
     *out_utt = u;
@@ -508,8 +513,10 @@ int spfy_fe_set_voice_vcf(spfy_fe_t *opaque, const char *vcf_path) {
         return rc;
     }
     fe->phoneset_loaded = 1;
-    fprintf(stderr, "[fe_host_emu] phoneset loaded: %u phonemes, silence=%u\n",
-            fe->phoneset.n_phones, fe->phoneset.silence_phone_id);
+    if (!spfy_env("SPFY_SILENT"))
+        fprintf(stderr, "[fe_host_emu] phoneset loaded: %u phonemes, "
+                        "silence=%u\n",
+                fe->phoneset.n_phones, fe->phoneset.silence_phone_id);
     return 0;
 }
 

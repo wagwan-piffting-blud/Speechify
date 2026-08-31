@@ -3,12 +3,12 @@
   "id": "crsmara",
   "display": "CRS Mara",
   "lang": "en-US",
-  "version": "2026.08.22",
+  "version": "2026.08.31",
   "files": [
     {
       "name": "crsmara.vin",
-      "bytes": 39425094,
-      "sha256": "099ece103fb2086e2d290aaa851d32447a48ac42544bbda6f67b1e50840c4d85"
+      "bytes": 39425082,
+      "sha256": "d98823fcbac5c2381dd2103895635fd2d38b29f16e45ddee61613d7057634ee0"
     },
     {
       "name": "crsmara8.vdb",

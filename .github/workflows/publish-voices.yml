@@ -20,6 +20,12 @@
 #
 # Neither tag is "Latest": that badge stays on the dated engine release.
 #
+# Assets accumulate: <id>-<version>.zip means a re-publish adds rather than
+# replaces, so updating every voice at once leaves the whole previous set
+# attached. Tick `prune` to delete the zips the new catalog no longer names.
+# It never touches one the catalog still points at -- which includes voices
+# this run did not pack and the externals CI cannot rebuild (Paulina).
+#
 # The zips unpack as <lang>/<voice>/<files>, which is exactly the layout under
 # %USERPROFILE%\Documents\Speechify\ -- so "unzip it there and re-run
 # refresh_voices.bat" is the whole install instruction.
@@ -46,8 +52,16 @@ on:
         description: "Also publish one zip per language"
         type: boolean
         default: true
+      all_bundle:
+        description: "Also publish all-voices-<ver>.zip (every voice, every language)"
+        type: boolean
+        default: false
       force:
         description: "Repack even voices whose data is unchanged"
+        type: boolean
+        default: false
+      prune:
+        description: "Delete superseded zips the new catalog no longer names"
         type: boolean
         default: false
       dry_run:
@@ -111,6 +125,33 @@ jobs:
       # runner has only voices.json. So a voice whose data is unchanged is
       # repacked anyway -- correct, just not free. It keeps its old version
       # string either way, which is the part that matters.
+      # An all-voices archive has to contain PAULINA, and a runner cannot pack
+      # her: her 264 MB VDB is over GitHub's per-file push limit, so
+      # es-MX/paulina/ is gitignored and the source is not in the checkout.
+      #
+      # She does not change, and her per-voice zip is already a release asset —
+      # which is not a git object and has no such limit. So download that one
+      # asset and let pack_voices.py unpack it straight back into the bundle.
+      # The result is genuinely complete rather than complete-looking.
+      #
+      # Downloading here rather than inside pack_voices.py keeps the packer
+      # offline: a failed publish is then unambiguously "could not read the
+      # disk" and never "could not reach GitHub".
+      - name: Fetch external voice zips
+        if: ${{ inputs.all_bundle }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p extzips
+          ids="$(python3 -c "import json,sys; d=json.load(open('installer/updates/external_voices.json')); print(' '.join(v['id'] for v in d.get('voices', [])))")"
+          for id in $ids; do
+            echo "fetching published zip for $id"
+            gh release download voices --repo "$GITHUB_REPOSITORY" \
+              --pattern "$id-*.zip" --dir extzips --clobber
+          done
+          ls -la extzips/ || true
+
       - name: Pack
         run: |
           set -eu
@@ -118,6 +159,7 @@ jobs:
           [ -n "${{ inputs.voices }}" ] && args="$args --voices ${{ inputs.voices }}"
           [ -n "${{ inputs.version }}" ] && args="$args --version ${{ inputs.version }}"
           [ "${{ inputs.bundles }}" = "true" ] && args="$args --bundles"
+          [ "${{ inputs.all_bundle }}" = "true" ] && args="$args --all-bundle --external-zip-dir extzips"
           [ "${{ inputs.force }}" = "true" ] && args="$args --force"
           # shellcheck disable=SC2086
           python3 installer/updates/pack_voices.py --out dist $args
@@ -138,6 +180,45 @@ jobs:
           # an asset that is not there yet.
           gh release upload voices dist/*.zip dist/voices.json \
             --repo "$GITHUB_REPOSITORY" --clobber
+
+      # A zip is named <id>-<version>.zip, so a version bump publishes beside
+      # the old build instead of replacing it -- re-publish every voice once
+      # and the release holds two of everything. Deleting is opt-in because
+      # the superseded zip is the only rollback that exists.
+      #
+      # Runs AFTER the upload and BEFORE the manifest, so the verify below
+      # covers the deletion too: anything update.json still needs and this
+      # step removed would fail the publish rather than 404 a user.
+      - name: Prune superseded voice zips
+        if: ${{ inputs.prune }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          : > attached.txt
+          gh release view voices --repo "$GITHUB_REPOSITORY" \
+            --json assets --jq '.assets[].name' > attached.txt 2>/dev/null \
+            || echo "::notice title=Nothing to prune::no voices release yet"
+          python3 installer/updates/prune_release_assets.py \
+            --catalog dist/voices.json --assets attached.txt \
+            --keep-dir dist -o stale.txt
+          {
+            echo "### Pruned"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo "would delete $name"
+              echo "- \`$name\` (dry run, kept)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "deleting $name"
+              gh release delete-asset voices "$name" \
+                --repo "$GITHUB_REPOSITORY" --yes
+              echo "- \`$name\`" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done < stale.txt
+          [ -s stale.txt ] || echo "_nothing superseded_" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish the update manifest
         if: ${{ !inputs.dry_run }}

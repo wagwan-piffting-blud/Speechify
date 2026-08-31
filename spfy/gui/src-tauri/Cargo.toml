@@ -1,0 +1,31 @@
+[package]
+name = "spfy-gui"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop front end for the Speechify (spfy) engine"
+license = "GPL-3.0-or-later"
+rust-version = "1.77"
+
+# The binary is named spfy_gui, matching the underscore convention of every
+# other executable this project ships (spfy_synth, spfy_update).
+[[bin]]
+name = "spfy_gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# The GUI ships next to a 17 MB spfy_synth.exe in the same installer; there is
+# no reason for the shell to be large too.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -14,16 +14,6 @@
 ;   4. On uninstall: deregisters cleanly (which removes voice tokens
 ;      from both registry views) and deletes the bundled binaries.
 ;
-; Voices (VIN/VDB/VCF) are NOT bundled - they're proprietary SpeechWorks
-; assets. The user drops them into
-; %USERPROFILE%\Documents\Speechify\en-US\<voicename>\ themselves;
-; auto-scan picks them up at registration time (re-run regsvr32 after
-; adding a voice to refresh the token list).
-;
-; Tom's PITCH MARKS (tom8.pmindex / tom8.pmdata) ARE bundled - see the
-; [Files] note. They are measured metadata, not voice data, and Speechify 4
-; mode does not start without them.
-;
 ; Build:  iscc spfy_setup.iss
 ; Override paths: iscc /DBuildDir=C:\tmp\spfy_build32 /DSourceRoot=..  spfy_setup.iss
 
@@ -84,6 +74,56 @@
 #define RegSvrDir "{sys}"
 #else
 #define RegSvrDir "{syswow64}"
+#endif
+
+; ---------------------------------------------------------------------
+; The GUI (spfy/gui, Tauri) - OPT-IN, and deliberately so.
+; ---------------------------------------------------------------------
+;
+; The GUI is built by a completely different toolchain (cargo + the Tauri CLI)
+; from a different directory, and it is NOT produced by build32.bat. So an
+; ordinary `iscc spfy_setup.iss` in a tree that has only ever run the C build
+; must keep working exactly as it did.
+;
+;   iscc                 spfy_setup.iss   ->  no GUI, exactly as before
+;   iscc /DWithGui       spfy_setup.iss   ->  ships spfy_gui.exe
+;
+; ⚠ THE [Files] ENTRY BELOW HAS NO `skipifsourcedoesntexist`, and must not
+; grow one. Once /DWithGui is passed, the caller has SAID the GUI is part of
+; this build; a missing exe must fail the compile loudly rather than quietly
+; produce an installer whose Start Menu shortcut points at nothing. Same
+; reasoning the pitch-mark entries carry.
+;
+; ⚠ THE TWO ARCHES COME FROM DIFFERENT CARGO DIRECTORIES. `cargo build` with
+; no --target writes to target\release and produces a binary for the HOST
+; triple, which on any Windows runner is x86_64. The x86 installer needs an
+; explicit `--target i686-pc-windows-msvc`, and cargo then writes to
+; target\i686-pc-windows-msvc\release instead. Defaulting GuiDir per arch is
+; what keeps `iscc /DWithGui` correct for both without the caller having to
+; know that; pass /DGuiDir=... to override.
+;
+; ⛔ THE DEFAULT MUST NOT BE SHARED. Pointing the x86 build at target\release
+; would silently pick up an x86_64 exe, produce an installer that compiles
+; cleanly, and hand 32-bit users a GUI that cannot start.
+;
+; ⚠ INNO CANNOT CATCH THAT. It copies whatever file it is given and has no
+; idea what machine type is inside it, so nothing in this script can detect a
+; mismatched GuiDir. The check lives in CI instead: the "Verify build outputs"
+; step runs `objdump -f` on spfy_gui.exe and asserts matrix.guiArch BEFORE
+; iscc is invoked. If you compile this script by hand with /DGuiDir, that
+; check is not running and the arch is on you.
+#ifdef WithGui
+  #if TargetArch == "x86"
+    #ifndef GuiDir
+      #define GuiDir SourceRoot + "\spfy\gui\src-tauri\target\i686-pc-windows-msvc\release"
+    #endif
+    #define GuiBits "32bit"
+  #else
+    #ifndef GuiDir
+      #define GuiDir SourceRoot + "\spfy\gui\src-tauri\target\release"
+    #endif
+    #define GuiBits "64bit"
+  #endif
 #endif
 
 #define MyAppName       "Speechify (spfy)"
@@ -229,6 +269,15 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "updatecheck"; Description: "Check for engine and voice updates"; \
   GroupDescription: "Updates:"; Flags: checkedonce
 
+; Only offered when there is actually a GUI to put on the desktop. Unchecked
+; by default -- the Start Menu entry is always created, and a desktop icon
+; nobody asked for is the kind of thing that makes people distrust an
+; installer.
+#ifdef WithGui
+Name: "desktopicon"; Description: "Create a desktop shortcut for Speechify"; \
+  GroupDescription: "Shortcuts:"; Flags: unchecked
+#endif
+
 ; ---------------------------------------------------------------------
 ; [Files]
 ; ---------------------------------------------------------------------
@@ -252,6 +301,20 @@ Source: "{#BuildDir}\src\sapi\spfy_sapi.dll";   DestDir: "{app}"; Flags: ignorev
 Source: "{#BuildDir}\src\sapi\spfy_sapi64.dll"; DestDir: "{app}"; Flags: ignoreversion 64bit
 #endif
 Source: "{#BuildDir}\src\cli\spfy_synth.exe";   DestDir: "{app}"; Flags: ignoreversion 32bit
+
+; The GUI (opt-in via /DWithGui; see the preprocessor block at the top).
+;
+; It MUST land in {app}, beside spfy_synth.exe. That is not tidiness: the GUI
+; resolves the engine by looking (1) at $SPFY_SYNTH, (2) NEXT TO ITSELF,
+; (3) on PATH. "Next to itself" is the case that makes the shipped install work
+; with no environment variable and no PATH entry.
+;
+; {#GuiBits} is 64bit on the x64 build and 32bit on x86, matching the cargo
+; target GuiDir points at. It tracks spfy_synth.exe's own flag on the x86 leg,
+; where the whole stack -- engine, SAPI DLL, CLI and GUI -- is i686.
+#ifdef WithGui
+Source: "{#GuiDir}\spfy_gui.exe";              DestDir: "{app}"; Flags: ignoreversion {#GuiBits}
+#endif
 
 ; The update checker. It MUST land in {app}, beside spfy_sapi.dll: that DLL
 ; resolves its own directory and starts this by name, and it starts nothing
@@ -333,6 +396,36 @@ Source: "spfy.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceRoot}\en-US\tom\tom8.pmindex"; DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "{#SourceRoot}\en-US\tom\tom8.pmdata";  DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
 
+; --- Tom himself: the starter voice ---
+;
+; ⚠ THIS IS WHAT MAKES A FRESH INSTALL END WITH A WORKING SAPI VOICE.
+; DllRegisterServer auto-scans {userdocs}\Speechify\en-US\* during the
+; [Run] regsvr32 below, and Inno runs [Files] before [Run]. Without a voice
+; present at that moment the scan finds nothing, registers no voice tokens,
+; and Narrator / Balabolka / NVDA see no Speechify voice at all until the
+; user drops one in AND re-runs refresh_voices.bat. That was the single
+; roughest edge in the first-run experience.
+;
+; ~89.5 MB uncompressed. Every other voice is still a download -- see
+; `spfy_synth --list-available` and `--install-voice <name>`, or the
+; `voices` release. Tom is here because it is the baseline the whole
+; project is built against, not because it is anyone's favourite.
+;
+; ⚠ FLAGS ARE THE SAME LOAD-BEARING PAIR THE PITCH MARKS CARRY, and for the
+; same reasons. onlyifdoesntexist: {userdocs}\Speechify is the MAINTAINER'S
+; CHECKOUT on at least one machine, and clobbering a locally rebuilt tom
+; with the frozen one would be silent and unrecoverable. uninsneveruninstall:
+; an uninstall must not delete a voice out of that tree -- an earlier
+; revision of this script did exactly that with the FE tables and took
+; tracked files with it.
+;
+; NO skipifsourcedoesntexist, deliberately: shipping an installer that
+; quietly contains no voice, and therefore registers no voice, is the exact
+; failure this entry exists to prevent. A missing tom must fail the compile.
+Source: "{#SourceRoot}\en-US\tom\tom.vin";      DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceRoot}\en-US\tom\tom8.vdb";     DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "{#SourceRoot}\en-US\tom\tom.vcf";      DestDir: "{userdocs}\Speechify\en-US\tom"; Flags: onlyifdoesntexist uninsneveruninstall
+
 ; --- Documentation (best-effort, not all repos will have these) ---
 Source: "{#SourceRoot}\SPFY_README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SourceRoot}\SPEECHIFY_4_FINDINGS.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -342,6 +435,16 @@ Source: "{#SourceRoot}\SPEECHIFY_4_FINDINGS.md"; DestDir: "{app}"; Flags: ignore
 ; ---------------------------------------------------------------------
 
 [Icons]
+; The GUI goes FIRST in the group, because for anyone who is not already a
+; command-line user it is the only entry here that does the thing the product
+; is for. IconFilename is the exe's own, not a shell32 index.
+#ifdef WithGui
+Name: "{group}\Speechify"; Filename: "{app}\spfy_gui.exe"; \
+  WorkingDir: "{app}"; Comment: "Pick a voice, type text, hear it, save the WAV"
+Name: "{autodesktop}\Speechify"; Filename: "{app}\spfy_gui.exe"; \
+  WorkingDir: "{app}"; Tasks: desktopicon
+#endif
+
 ; Primary user-facing action: re-scan the voices folder. The user runs
 ; this after dropping new voice folders (containing <name>.vin /
 ; <name>8.vdb / <name>.vcf) into %USERPROFILE%\Documents\Speechify\
@@ -363,6 +466,34 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 ; [Run] - post-install actions
 ; ---------------------------------------------------------------------
 
+; ---------------------------------------------------------------------
+; [Registry] - App Paths, so the GUI is reachable without a shortcut
+; ---------------------------------------------------------------------
+
+#ifdef WithGui
+[Registry]
+; Makes Win+R "spfy_gui" and Start-menu search find the app even if the
+; shortcut is deleted, and tells the shell what working directory to give it.
+;
+; ⚠ App Paths is a ShellExecute mechanism, NOT a PATH entry: this does
+; nothing for a cmd/PowerShell prompt, and it is deliberately not extended to
+; spfy_synth.exe. Putting {app} on the system PATH would be the CLI's
+; equivalent, and that is a bigger decision than this change - it is machine
+; wide, it needs ChangesEnvironment=yes plus a WM_SETTINGCHANGE broadcast, and
+; it would shadow any other spfy_synth already on a developer's PATH.
+;
+; `uninsdeletekey` on the first entry removes the whole key, values included.
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\spfy_gui.exe"; \
+  ValueType: string; ValueName: ""; ValueData: "{app}\spfy_gui.exe"; \
+  Flags: uninsdeletekey
+Root: HKLM; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\spfy_gui.exe"; \
+  ValueType: string; ValueName: "Path"; ValueData: "{app}"
+#endif
+
+; ---------------------------------------------------------------------
+; [Run]
+; ---------------------------------------------------------------------
+
 [Run]
 ; Register the 32-bit SAPI DLL. SysWOW64\regsvr32.exe is the 32-bit one
 ; (yes, the naming is backwards - Windows historical legacy). The DLL's
@@ -379,6 +510,20 @@ Filename: "{#RegSvrDir}\regsvr32.exe"; \
   Parameters: "/s ""{app}\spfy_sapi.dll"""; \
   StatusMsg: "Registering SAPI voice DLL..."; \
   Flags: runascurrentuser waituntilterminated
+
+; Finish-page "Launch Speechify" checkbox. Listed AFTER regsvr32 so the voice
+; the GUI is about to offer is already registered.
+;
+; ⛔ `runasoriginaluser` IS LOAD-BEARING, NOT TIDINESS. This installer is
+; PrivilegesRequired=admin, and a [Run] entry without that flag inherits the
+; elevated token - so the GUI would start as Administrator, read the
+; ADMINISTRATOR's Documents\Speechify for voices (finding none, on the machine
+; that just installed one), and write any saved WAV as a file the user cannot
+; then edit. Same trap the no_update_check marker documents in [Tasks].
+#ifdef WithGui
+Filename: "{app}\spfy_gui.exe"; Description: "Launch Speechify"; \
+  Flags: postinstall nowait skipifsilent runasoriginaluser
+#endif
 
 ; ---------------------------------------------------------------------
 ; [UninstallRun] - pre-uninstall actions

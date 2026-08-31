@@ -49,6 +49,9 @@
 #include "../fe/prosody.h"
 #include "../fe/baked_pos.h"
 
+/* SSML -> embedded-tag translation, above the \!-tag pre-pass. */
+#include "../common/ssml.h"
+
 /* Live-trace event emitters. */
 #include "../common/le.h"
 #include "../common/log.h"
@@ -413,6 +416,24 @@ static int synth_is_verbose(void)
         spfy_synth_verbose = (spfy_env("SPFY_VERBOSE") != NULL
                               || spfy_env("SPFY_SYNTH_DEBUG") != NULL) ? 1 : 0;
     return spfy_synth_verbose;
+}
+
+/* --silent / SPFY_SILENT: suppress even the once-per-process FE-backend
+ * banner, which -q deliberately keeps.
+ *
+ * That distinction is right for a terminal, where the banner answers "which
+ * front end am I actually running?" once and costs nothing, and wrong for a
+ * SUBPROCESS, where every line on stderr is something the parent has to
+ * recognise and discard. The GUI spawns this binary per utterance (see
+ * SPFY_GUI_HANDOFF.md); a banner it must pattern-match is a banner that will
+ * eventually be pattern-matched wrong. */
+static int spfy_synth_silent = -1;
+
+static int synth_is_silent(void)
+{
+    if (spfy_synth_silent < 0)
+        spfy_synth_silent = (spfy_env("SPFY_SILENT") != NULL) ? 1 : 0;
+    return spfy_synth_silent;
 }
 
 
@@ -2162,13 +2183,37 @@ static int spfy_etags_need_resolve(const char *text)
     return 0;
 }
 
-/* Match `\!<vp|vd|rp|rd>(<digits>|r)` (volume/rate control) at p with a
- * valid tag boundary. */
+/* Match `\!<vp|vd|rp|rd|pp|pd|wp|wd>(<digits>|r)` at p with a valid tag
+ * boundary. Four kinds, and the last two are new:
+ *
+ *   v  volume    per-syllable gain at the concat stage        (existing)
+ *   r  rate      bias on the CART duration TARGET             (existing)
+ *   p  pitch     selection bias + PSOLA residual at the sink  (new)
+ *   w  wsola     time-scale on the rendered audio at the sink (new)
+ *
+ * `r` and `w` are BOTH "rate" and are deliberately distinct. SPFY_README.md
+ * documents `\!rp` as changing which units get selected, saturating near +9%
+ * in the slow direction; `\!wp` is the plain time-scale the same README tells
+ * people to reach for SPFY_RATE to get, now available per span. SSML
+ * <prosody rate> translates to `\!wp`.
+ *
+ * ⚠ `p` (pitch) DOES NOT COLLIDE WITH `\!pN` (pause), and the reason is the
+ * character after the kind letter: the pause tag is `\!p` followed by a
+ * DIGIT, the pitch tag is `\!p` followed by `p` or `d`. Every other reader of
+ * these tags -- find_inline_token's SEG_PAUSE test, spfy_etags_need_resolve,
+ * and the pause passthrough inside spfy_etags_resolve -- already spells its
+ * test as `p[2] == 'p' && isdigit(p[3])`, so they all skip `\!pp` untouched.
+ * Keep that shape if any of them is ever rewritten.
+ *
+ * Pitch rides on the same 100-is-neutral percentage axis as volume and rate
+ * so the tag family stays uniform; spfy_ssml_pct_to_semitones() converts it
+ * where the engine wants semitones. */
 static const char *etag_vr(const char *p, int *knd, int *rel, int *reset, int *val)
 {
     if (p[0] != '\\' || p[1] != '!') return NULL;
     int k = (unsigned char)p[2], r = (unsigned char)p[3];
-    if ((k != 'v' && k != 'r') || (r != 'p' && r != 'd')) return NULL;
+    if ((k != 'v' && k != 'r' && k != 'p' && k != 'w')
+        || (r != 'p' && r != 'd')) return NULL;
     const char *q = p + 4;
     if (*q == 'r' && !isalnum((unsigned char)q[1])) {
         *knd = k; *rel = r; *reset = 1; *val = 0; return q + 1;
@@ -2188,6 +2233,7 @@ static const char *etag_vr(const char *p, int *knd, int *rel, int *reset, int *v
  * char_start). */
 static char *spfy_etags_resolve(const char *text,
                                 uint16_t **out_vol, uint16_t **out_rate,
+                                uint16_t **out_pitch, uint16_t **out_wsola,
                                 uint8_t **out_acc)
 {
     size_t len = strlen(text);
@@ -2195,10 +2241,17 @@ static char *spfy_etags_resolve(const char *text,
     char *out = (char *)malloc(cap);
     uint16_t *mvol = (uint16_t *)calloc(cap, sizeof *mvol);
     uint16_t *mrate = (uint16_t *)calloc(cap, sizeof *mrate);
+    /* Per-char pitch percentage from \!pp/\!pd (and therefore from SSML
+     * <prosody pitch>); 0 means "no tag covered this character". */
+    uint16_t *mpitch = (uint16_t *)calloc(cap, sizeof *mpitch);
+    /* Per-char WSOLA time-scale percentage from \!wp/\!wd (SSML
+     * <prosody rate>); 0 means "no tag covered this character". */
+    uint16_t *mwsola = (uint16_t *)calloc(cap, sizeof *mwsola);
     /* Per-char pitch-accent override from \![ToBI:...]. */
     uint8_t *macc = (uint8_t *)calloc(cap, sizeof *macc);
-    if (!out || !mvol || !mrate || !macc) {
-        free(out); free(mvol); free(mrate); free(macc); return NULL;
+    if (!out || !mvol || !mrate || !mpitch || !mwsola || !macc) {
+        free(out); free(mvol); free(mrate); free(mpitch); free(mwsola);
+        free(macc); return NULL;
     }
     char *o = out, *eo = out + cap - 64;
 
@@ -2206,16 +2259,19 @@ static char *spfy_etags_resolve(const char *text,
     int ny = '1';
     int last = 0;
 
-    /* Volume/rate state. */
+    /* Volume/rate/pitch state. */
     int port_vol = 100, base_vol = 100, port_rate = 100, base_rate = 100;
-    int pv = 100, pr = 100;
+    int port_pitch = 100, base_pitch = 100;
+    int port_wsola = 100, base_wsola = 100;
+    int pv = 100, pr = 100, pp = 100, pw = 100;
     /* Accent override is ONE-SHOT: it binds to the next word and then
      * clears, unlike volume and rate which stay in effect until changed. */
     int pa = 0, pa_started = 0;
     size_t filled = 0;
 #define ETAG_FLUSH() do { size_t _e = (size_t)(o - out); \
         for (size_t _i = filled; _i < _e; _i++) { mvol[_i] = (uint16_t)pv; \
-            mrate[_i] = (uint16_t)pr; macc[_i] = (uint8_t)pa; } \
+            mrate[_i] = (uint16_t)pr; mpitch[_i] = (uint16_t)pp; \
+            mwsola[_i] = (uint16_t)pw; macc[_i] = (uint8_t)pa; } \
         filled = _e; } while (0)
 
     const char *p = text;
@@ -2226,11 +2282,18 @@ static char *spfy_etags_resolve(const char *text,
             const char *a2 = etag_vr(p, &k, &rel, &rst, &val);
             if (a2) {
                 ETAG_FLUSH();
-                int basis = (rel == 'p') ? (k == 'v' ? port_vol : port_rate)
-                                         : (k == 'v' ? base_vol : base_rate);
+                int basis;
+                if (rel == 'p')
+                    basis = (k == 'v') ? port_vol  : (k == 'r') ? port_rate
+                          : (k == 'p') ? port_pitch : port_wsola;
+                else
+                    basis = (k == 'v') ? base_vol  : (k == 'r') ? base_rate
+                          : (k == 'p') ? base_pitch : base_wsola;
                 int nv = rst ? basis : (val * basis / 100);
-                if (k == 'v') { if (nv < 0) nv = 0; pv = nv; }
-                else { if (nv < 33) nv = 33; if (nv > 300) nv = 300; pr = nv; }
+                if (k == 'v')      { if (nv < 0) nv = 0; pv = nv; }
+                else if (k == 'r') { if (nv < 33) nv = 33; if (nv > 300) nv = 300; pr = nv; }
+                else if (k == 'p') { if (nv < 25) nv = 25; if (nv > 400) nv = 400; pp = nv; }
+                else               { if (nv < 25) nv = 25; if (nv > 400) nv = 400; pw = nv; }
                 p = a2; continue;
             }
         }
@@ -2400,6 +2463,8 @@ static char *spfy_etags_resolve(const char *text,
     }
     *out_vol = mvol;
     *out_rate = mrate;
+    *out_pitch = mpitch;
+    *out_wsola = mwsola;
     *out_acc = macc;
     return out;
 }
@@ -2897,6 +2962,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     /* Per-hp SSML / Balabolka prosody overrides (signed; 0 = neutral). */
     int8_t   *hp_pitch_st = NULL;
     int8_t   *hp_rate_pct = NULL;
+    /* The half of <prosody pitch> the corpus cannot supply by selection, and
+     * the <prosody rate> time-scale. Both are handed to the sink as spans. */
+    float    *hp_psola_st = NULL;
+    uint16_t *hp_wsola    = NULL;
     uint16_t *syl_vol = NULL;      /* per-syllable volume % from \!vp/\!vd (0 = 100), indexed by fe_shared-1
  * (reliable, unlike the tree-word -> parsed-word count) */
     spfy_viterbi_slot_t *vslots = NULL;
@@ -2928,18 +2997,61 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
  * syllable */
     int rc;
     char *etags_text = NULL;
+    char *ssml_text = NULL;
     uint16_t *etag_vol = NULL;
     uint16_t *etag_rate = NULL;
+    uint16_t *etag_pitch = NULL;
+    uint16_t *etag_wsola = NULL;
     uint8_t  *etag_acc = NULL;
+    /* Sink-side DSP spans, accumulated across EVERY phrase -- declared out
+     * here rather than in the phrase loop because the sink is one stream and
+     * the offsets are absolute within it. */
+    spfy_wav_span_t *dsp_spans = NULL;
+    size_t dsp_spans_n = 0, dsp_spans_cap = 0;
     uint8_t  *hp_tobi = NULL;
     size_t etag_maps_n = 0;
     spfy_prosody_hints_init(&hints);
 
+    /* SSML pre-pass, ABOVE the \!-tag pass because it is a translator into
+     * that dialect and not a second parser -- see src/common/ssml.h.
+     *
+     * Before this existed, a default `spfy_synth` run SPOKE the markup:
+     * `<speak>Hello <prosody rate="x-slow">slow world</prosody>.</speak>`
+     * came out as "speakhello prosody rate equals eks slow greater than slow
+     * world slash prosody". SSML was handled only by SAPI (which parses the
+     * XML itself and hands us SPVSTATE fragments, so nothing arrives here
+     * with tags in it) and, behind SPFY_FE_INTERNAL=1, by text_norm.c.
+     *
+     * SPFY_NO_SSML=1 restores the old behaviour for anyone whose text
+     * legitimately contains something shaped like an SSML element. */
+    if (text && !spfy_env("SPFY_NO_SSML") && spfy_ssml_detect(text)) {
+        ssml_text = spfy_ssml_to_etags(text);
+        if (ssml_text) text = ssml_text;
+        if (spfy_env("SPFY_SSML_DUMP"))
+            fprintf(stderr, "[ssml] -> %s\n", text);
+    }
+
     /* Embedded \!-tag pre-pass (Speechify User's Guide ch. */
     if (spfy_etags_need_resolve(text)) {
         etags_text = spfy_etags_resolve(text, &etag_vol, &etag_rate,
-                                        &etag_acc);
+                                        &etag_pitch, &etag_wsola, &etag_acc);
         if (etags_text) { text = etags_text; etag_maps_n = strlen(etags_text); }
+    }
+
+    /* Arm the sink's hold buffer BEFORE the first sample is written -- a
+     * sample already handed to the file or the callback cannot be pitch-
+     * shifted afterwards. Whether any span EXISTS is knowable now, from the
+     * character maps; where the spans FALL is not known until the render
+     * loop has produced sample offsets, so the two are separate calls. */
+    if (sink && (etag_pitch || etag_wsola)) {
+        for (size_t i = 0; i < etag_maps_n; ++i) {
+            int pv_ = etag_pitch ? etag_pitch[i] : 0;
+            int wv_ = etag_wsola ? etag_wsola[i] : 0;
+            if ((pv_ && pv_ != 100) || (wv_ && wv_ != 100)) {
+                spfy_wav_hold(sink);
+                break;
+            }
+        }
     }
     if (spfy_env("SPFY_ETAGS_DUMP"))
         fprintf(stderr, "[etags] resolved: %s\n", text);
@@ -3025,7 +3137,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             /* In-house FE path: text → fe_internal → tagged-text →
              * spfy_fe_synth_tagged → slot tree. */
             static int logged = 0;
-            if (!logged) {
+            if (!logged && !synth_is_silent()) {
                 fprintf(stderr,
                     "[spfy] FE backend: IN-HOUSE pure-C "
                     "(SPFY_FE_INTERNAL forced override)\n");
@@ -3048,7 +3160,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             fe_parse_set_refine(refine_prev);
         } else {
             static int logged = 0;
-            if (!logged) {
+            if (!logged && !synth_is_silent()) {
 #if defined(SPFY_FE_EMU)
                 fprintf(stderr,
                     "[spfy] FE backend: EMULATED DLL "
@@ -3566,6 +3678,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     /* Per-hp SSML / Balabolka prosody overrides. */
     hp_pitch_st = (int8_t *)calloc(n_hp, sizeof *hp_pitch_st);
     hp_rate_pct = (int8_t *)calloc(n_hp, sizeof *hp_rate_pct);
+    hp_psola_st = (float *)calloc(n_hp, sizeof *hp_psola_st);
+    hp_wsola    = (uint16_t *)calloc(n_hp, sizeof *hp_wsola);
     hp_tobi     = (uint8_t *)calloc(n_hp, sizeof *hp_tobi);
     syl_vol = (uint16_t *)calloc(fe_utt.n_syls ? fe_utt.n_syls : 1,
                                  sizeof *syl_vol);
@@ -3650,6 +3764,49 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                                         hp_rate_pct[hp] = (int8_t)rp;
                                     }
                                 }
+                                /* \!pp / \!pd, i.e. SSML <prosody pitch>.
+                                 * The map is a percentage of base F0;
+                                 * hp_pitch_st is semitones.
+                                 *
+                                 * ⚠ OUTSIDE the `stressed` gate above, and
+                                 * that is the difference between a pitch
+                                 * SHIFT and a pitch ACCENT. \![ToBI:] marks
+                                 * one accent, which belongs on the stressed
+                                 * syllable and nowhere else. <prosody pitch>
+                                 * transposes a whole span; gating it the
+                                 * same way would raise the stressed syllable
+                                 * of every word and leave the rest at base,
+                                 * which is an accent pattern, not a
+                                 * transposition.
+                                 *
+                                 * The split is spfy_synth_split_pitch's, the
+                                 * same one spfy_sapi.c uses: bias selection
+                                 * only as far as the corpus actually reaches
+                                 * (+1.5 / -2.0 st on Tom, measured from its
+                                 * f0_mid p1..p99) and PSOLA the remainder.
+                                 * Selection alone delivered +2.43 st of a
+                                 * requested +6 and +0.82 st of a requested
+                                 * -6 -- the corpus simply has no units down
+                                 * there to pick. */
+                                if (cs >= 0 && (size_t)cs < etag_maps_n
+                                    && etag_pitch && etag_pitch[cs]
+                                    && etag_pitch[cs] != 100u) {
+                                    float want = (float)
+                                        spfy_ssml_pct_to_semitones(
+                                            (int)etag_pitch[cs]);
+                                    float sel = 0.0f, res = 0.0f;
+                                    spfy_synth_split_pitch(want, &sel, &res);
+                                    hp_pitch_st[hp] = (int8_t)lrintf(sel);
+                                    if (hp_psola_st) hp_psola_st[hp] = res;
+                                }
+                                /* \!wp / \!wd, i.e. SSML <prosody rate>: a
+                                 * time-scale on the rendered audio, kept
+                                 * clear of hp_rate_pct's documented
+                                 * selection bias. */
+                                if (cs >= 0 && (size_t)cs < etag_maps_n
+                                    && etag_wsola && etag_wsola[cs]
+                                    && hp_wsola)
+                                    hp_wsola[hp] = etag_wsola[cs];
                             }
                         }
                     }
@@ -5991,6 +6148,39 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 ++run_n;
             }
         }
+        /* Sink-side DSP span for this slot: open a new one whenever the
+         * (pitch residual, time-scale) pair changes, so a run of slots that
+         * share a <prosody> element is processed as ONE contiguous block.
+         *
+         * ⚠ The offset is `sink->n_samples_written`, which is where the sink
+         * stands BEFORE this slot's audio is pushed -- not exactly where the
+         * slot's first sample lands, because WSOLA holds a window internally.
+         * The slop is one WSOLA frame at a prosody boundary, which is a place
+         * the audio is about to change anyway. Sample-exact attribution would
+         * mean draining the streamer at every boundary, which is a seam. */
+        if (hp_psola_st && hp_wsola) {
+            float want_st = hp_psola_st[s];
+            float want_rt = hp_wsola[s] ? (float)hp_wsola[s] / 100.0f : 1.0f;
+            int changed = (dsp_spans_n == 0)
+                       || dsp_spans[dsp_spans_n - 1].psola_st != want_st
+                       || dsp_spans[dsp_spans_n - 1].rate     != want_rt;
+            if (changed && (want_st != 0.0f || want_rt != 1.0f
+                            || dsp_spans_n > 0)) {
+                if (dsp_spans_n == dsp_spans_cap) {
+                    size_t nc = dsp_spans_cap ? dsp_spans_cap * 2u : 16u;
+                    spfy_wav_span_t *nb = (spfy_wav_span_t *)realloc(
+                        dsp_spans, nc * sizeof *nb);
+                    if (nb) { dsp_spans = nb; dsp_spans_cap = nc; }
+                }
+                if (dsp_spans_n < dsp_spans_cap) {
+                    dsp_spans[dsp_spans_n].start = sink->n_samples_written;
+                    dsp_spans[dsp_spans_n].psola_st = want_st;
+                    dsp_spans[dsp_spans_n].rate = want_rt;
+                    ++dsp_spans_n;
+                }
+            }
+        }
+
         /* Per-word volume gain for this slot (\!vp/\!vd), via the slot's
          * parent-syllable fe_shared into the syl_vol map. */
         float vol_gain = 1.0f;
@@ -6261,6 +6451,8 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     free(hp_word_idx); hp_word_idx = NULL;
     free(hp_pitch_st);
     free(hp_rate_pct);
+    free(hp_psola_st); hp_psola_st = NULL;
+    free(hp_wsola);    hp_wsola    = NULL;
     free(syl_vol);
     if (pros.on) {
         spfy_pmarks_free(&pros.marks);
@@ -6351,6 +6543,19 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
 
     rc = spfy_wsola_flush(&ws);
 
+    /* Hand the sink its DSP plan. AFTER the flush, so the last span covers
+     * WSOLA's own tail, and before close(), which is where it is applied. */
+    if (sink && dsp_spans_n) {
+        spfy_wav_set_spans(sink, dsp_spans, dsp_spans_n);
+        if (spfy_env("SPFY_SSML_DUMP")) {
+            for (size_t i = 0; i < dsp_spans_n; ++i)
+                fprintf(stderr, "[ssml] span %zu: start=%u psola=%+.2f st "
+                        "rate=%.3f\n", i, dsp_spans[i].start,
+                        (double)dsp_spans[i].psola_st,
+                        (double)dsp_spans[i].rate);
+        }
+    }
+
     if (out_stats) {
         out_stats->total_played           = total_played;
         out_stats->total_skipped          = total_skipped;
@@ -6421,10 +6626,14 @@ cleanup:
     free(pow_mean);
     free(pow_sd);
     free(etags_text);
+    free(ssml_text);
     free(etag_acc);
     free(hp_tobi);
     free(etag_vol);
     free(etag_rate);
+    free(etag_pitch);
+    free(etag_wsola);
+    free(dsp_spans);
     /* Everything previously freed here individually (v->bucket, carts,
      * v->chunks, FE, v->hpc, v->prsl, v->hash, v->pros, v->maps, v->ccos,
      * v->lookup, v->feat, v->vcf, v->vdb, v->vin, v->voicing_buf) is owned
@@ -6560,14 +6769,73 @@ static const char *resolve_assets(const char *argv0, spfy_asset_paths_t *out)
     return NULL;
 }
 
+/* Byte size of one file, or 0 when it cannot be read. */
+static long voice_file_size(const char *path)
+{
+    if (!path || !*path) return 0;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    long n = 0;
+    if (fseek(fp, 0, SEEK_END) == 0) n = ftell(fp);
+    fclose(fp);
+    return n > 0 ? n : 0;
+}
+
+/* Emit `s` as a JSON string body. Windows paths are full of backslashes, so
+ * this is not decoration -- an unescaped `C:\Users\...` is invalid JSON and
+ * every consumer would reject the whole document. */
+static void json_str(FILE *fp, const char *s)
+{
+    fputc('"', fp);
+    for (const unsigned char *p = (const unsigned char *)s; p && *p; ++p) {
+        switch (*p) {
+            case '"':  fputs("\\\"", fp); break;
+            case '\\': fputs("\\\\", fp); break;
+            case '\n': fputs("\\n", fp);  break;
+            case '\r': fputs("\\r", fp);  break;
+            case '\t': fputs("\\t", fp);  break;
+            default:
+                if (*p < 0x20) fprintf(fp, "\\u%04x", (unsigned)*p);
+                else           fputc((int)*p, fp);
+        }
+    }
+    fputc('"', fp);
+}
+
 /* Print every voice the search path can see. Used by --list-voices and by
  * the "no such voice" error, because a name that did not match is only
- * actionable next to the names that would have. */
-static void print_voice_list(const char *argv0, FILE *fp)
+ * actionable next to the names that would have.
+ *
+ * `json` switches to a machine-readable form. The human form is
+ * `%-12s %-7s %s`, which every front end would have to parse by column and
+ * would silently mis-split the first voice whose name runs past 12
+ * characters or whose directory contains a space. */
+static void print_voice_list(const char *argv0, FILE *fp, int json)
 {
     static spfy_voice_paths v[256];
     size_t n = spfy_voice_list(argv0, v, sizeof v / sizeof v[0]);
     size_t i;
+
+    if (json) {
+        fputs("{\"search_path\":", fp);
+        json_str(fp, spfy_voice_search_path());
+        fputs(",\"voices\":[", fp);
+        for (i = 0; i < n; ++i) {
+            long bytes = voice_file_size(v[i].vin)
+                       + voice_file_size(v[i].vdb)
+                       + voice_file_size(v[i].vcf);
+            fputs(i ? ",\n  {\"name\":" : "\n  {\"name\":", fp);
+            json_str(fp, v[i].name);
+            fputs(",\"lang\":", fp);   json_str(fp, v[i].lang);
+            fputs(",\"dir\":", fp);    json_str(fp, v[i].dir);
+            fputs(",\"vin\":", fp);    json_str(fp, v[i].vin);
+            fputs(",\"vdb\":", fp);    json_str(fp, v[i].vdb);
+            fputs(",\"vcf\":", fp);    json_str(fp, v[i].vcf);
+            fprintf(fp, ",\"bytes\":%ld}", bytes);
+        }
+        fputs(n ? "\n]}\n" : "]}\n", fp);
+        return;
+    }
 
     if (n == 0) {
         fprintf(fp, "no voices found. searched:\n");
@@ -6667,6 +6935,11 @@ int main(int argc, char **argv)
     const char *file_path_arg = NULL;
     /* --trace-stream: emit the live NDJSON event stream to stdout. */
     int trace_stream = 0;
+    /* --list-voices, and whether --json turns it machine-readable. */
+    int list_voices = 0, json_out = 0;
+    /* Voice catalog actions, both deferred so --json can follow them. */
+    int list_available = 0;
+    const char *install_voice = NULL;
     /* --s4 / -4 turn on Speechify 4 mode; --no-s4 forces it off even when
      * SPFY_4_MODE is exported. */
     int s4_flag = 0;
@@ -6695,17 +6968,50 @@ int main(int argc, char **argv)
                 file_path_arg = a + 3;
             } else if (strcmp(a, "-q") == 0 || strcmp(a, "--quiet") == 0) {
                 spfy_synth_verbose = 0;
+            } else if (strcmp(a, "-s") == 0 || strcmp(a, "--silent") == 0) {
+                spfy_synth_verbose = 0;
+                spfy_synth_silent  = 1;
+                /* Push it into the ENVIRONMENT as well, because the last two
+                 * status lines are not ours: src/fe_host/fe_host_emu.c
+                 * prints the phoneset and the tagged output unconditionally
+                 * and has no CLI to consult. Set before anything can cache a
+                 * lookup, then reset the cache to be sure. */
+#ifdef _WIN32
+                _putenv("SPFY_SILENT=1");
+#else
+                setenv("SPFY_SILENT", "1", 1);
+#endif
+                spfy_env_reset();
             } else if (strcmp(a, "-v") == 0 || strcmp(a, "--verbose") == 0) {
                 spfy_synth_verbose = 1;
             } else if (strcmp(a, "--trace-stream") == 0) {
                 trace_stream = 1;
+            } else if (strcmp(a, "--json") == 0) {
+                json_out = 1;
             } else if (strcmp(a, "--list-voices") == 0) {
-                print_voice_list(argv[0], stdout);
-                return 0;
+                /* Deferred, NOT acted on here: `--list-voices --json` puts
+                 * the modifier AFTER the action, and acting immediately
+                 * would print the human form and exit before --json is
+                 * ever seen. */
+                list_voices = 1;
 #ifdef SPFY_HAVE_UPDATE_CHECK
             } else if (strcmp(a, "--version") == 0) {
                 printf("%s\n", SPFY_VERSION);
                 return 0;
+            } else if (strcmp(a, "--list-available") == 0) {
+                /* Deferred like --list-voices, and for the same reason:
+                 * `--list-available --json` puts the modifier after the
+                 * action. */
+                list_available = 1;
+            } else if (strcmp(a, "--install-voice") == 0) {
+                if (r + 1 >= argc) {
+                    fprintf(stderr, "%s: --install-voice needs a voice name "
+                                    "(see --list-available)\n", argv[0]);
+                    return 2;
+                }
+                install_voice = argv[++r];
+            } else if (strncmp(a, "--install-voice=", 16) == 0) {
+                install_voice = a + 16;
             } else if (strcmp(a, "--no-update-check") == 0) {
                 update_check = 0;
             } else if (strcmp(a, "--check-update") == 0) {
@@ -6724,6 +7030,64 @@ int main(int argc, char **argv)
         }
         argc = w;
     }
+
+    if (list_voices) {
+        print_voice_list(argv[0], stdout, json_out);
+        return 0;
+    }
+
+#ifdef SPFY_HAVE_UPDATE_CHECK
+    if (install_voice) {
+        char emsg[512];
+        if (spfy_voice_install(install_voice, emsg, sizeof emsg) != 0) {
+            fprintf(stderr, "%s: %s\n", argv[0],
+                    emsg[0] ? emsg : "install failed");
+            return 1;
+        }
+        return 0;
+    }
+    if (list_available) {
+        /* What the RELEASE offers, and which of it is already here.
+         * Deliberately separate from --list-voices, which answers "what can I
+         * use right now" and has to keep working with no network. */
+        static spfy_voice_avail av[64];
+        int nav = spfy_voice_catalog(av, sizeof av / sizeof av[0]);
+        int k;
+        if (nav < 0) {
+            fprintf(stderr, "could not reach the voice catalog (offline, or "
+                            "GitHub is unreachable)\n");
+            return 1;
+        }
+        if (json_out) {
+            fputs("{\"voices\":[", stdout);
+            for (k = 0; k < nav; k++) {
+                fputs(k ? ",\n  {\"id\":" : "\n  {\"id\":", stdout);
+                json_str(stdout, av[k].id);
+                fputs(",\"display\":", stdout); json_str(stdout, av[k].display);
+                fputs(",\"lang\":", stdout);    json_str(stdout, av[k].lang);
+                fputs(",\"version\":", stdout); json_str(stdout, av[k].version);
+                fprintf(stdout, ",\"bytes\":%llu,\"installed\":%s}",
+                        av[k].zip_bytes, av[k].installed ? "true" : "false");
+            }
+            fputs(nav ? "\n]}\n" : "]}\n", stdout);
+        } else {
+            printf("%d voice%s available:\n", nav, nav == 1 ? "" : "s");
+            for (k = 0; k < nav; k++)
+                printf("  %-12s %-7s %6.0f MB  %s\n", av[k].id, av[k].lang,
+                       (double)av[k].zip_bytes / 1048576.0,
+                       av[k].installed ? "installed" : "");
+            if (nav)
+                printf("\ninstall one with: %s --install-voice <name>\n", argv[0]);
+        }
+        return 0;
+    }
+#else
+    if (install_voice || list_available) {
+        fprintf(stderr, "%s: this build has no update support, so it cannot "
+                        "download voices.\n", argv[0]);
+        return 2;
+    }
+#endif
 
     /* Three positional layouts, told apart by count alone -- 1 path, 3 paths
      * or 7 paths -- so nothing has to guess at what a token means. */
@@ -6754,12 +7118,23 @@ int main(int argc, char **argv)
             "  -f, --file <path>   read input text from <path> instead of the\n"
             "                      \"<text>\" argument (which is then omitted)\n"
             "      --list-voices   print every discoverable voice and exit\n"
+            "      --json          with --list-voices, emit JSON instead of\n"
+            "                      human columns (name, lang, dir, the three\n"
+            "                      file paths and their total size)\n"
+            "      --list-available   list voices that can be DOWNLOADED,\n"
+            "                      marking those already installed (--json works)\n"
+            "      --install-voice <name>   download, verify and unpack one\n"
+            "                      into ~/Documents/Speechify (or $SPFY_VOICE_DIR),\n"
+            "                      where --list-voices then finds it\n"
             "      --version       print the build version and exit\n"
             "      --check-update  check now for a newer engine or voice\n"
             "      --no-update-check   skip the automatic check this run\n"
             "                      (SPFY_NO_UPDATE_CHECK=1 disables it for good)\n"
             "  -q, --quiet         suppress per-synth diagnostics, keeping only\n"
             "                      the FE-backend banner (default)\n"
+            "  -s, --silent        as -q, and drop the FE-backend banner too.\n"
+            "                      For SUBPROCESS callers: nothing but real\n"
+            "                      errors reaches stderr. (SPFY_SILENT=1)\n"
             "  -v, --verbose       print the full FE/synth pipeline diagnostics\n"
             "  -4, --s4            Speechify 4 mode: the f95_k1 prosody\n"
             "                      configuration, equivalent to SPFY_4_MODE=1.\n"
@@ -6791,7 +7166,7 @@ int main(int argc, char **argv)
             int rc = spfy_voice_resolve(want, argv[0], &found);
             if (rc == -1) {
                 fprintf(stderr, "%s: no voice named '%s'.\n", argv[0], want);
-                print_voice_list(argv[0], stderr);
+                print_voice_list(argv[0], stderr, 0);
                 free(file_text);
                 return 1;
             }

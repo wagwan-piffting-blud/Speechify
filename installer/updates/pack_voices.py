@@ -172,6 +172,71 @@ def pack_bundle(job):
             "voices": [v["id"] for v in job["voices"]]}
 
 
+def pack_all_bundle(out, version, voices, external_zips):
+    """Every voice of EVERY language in one zip: the "just give me all of it"
+    download, and what the Android app offers as a single choice.
+
+    ⚠ A VOICE WHOSE SOURCE IS NOT ON THIS MACHINE IS TAKEN FROM ITS OWN
+    PUBLISHED ZIP, not skipped. Paulina is the case: her 264 MB VDB is over
+    GitHub's per-file push limit, so `es-MX/paulina/` is gitignored and a CI
+    runner never sees the files. But she does not change, and her per-voice
+    zip is already on the release -- so CI downloads that one asset, and this
+    unpacks it straight back into the bundle. The result is genuinely
+    complete rather than complete-looking.
+
+    `external_zips` maps voice id -> Path of an already-downloaded per-voice
+    zip. Downloading is the CALLER's job: this is a packer, and giving it
+    network access would make a failed publish ambiguous between "could not
+    reach GitHub" and "could not read the disk".
+
+    Returns None when a voice can be neither read nor recovered from a zip.
+    Refusing is the point -- an incomplete archive named `all-voices` is worse
+    than no archive at all, because nobody checks a name that confident.
+    """
+    zip_path = out / f"all-voices-{version}.zip"
+    tmp = zip_path.with_suffix(".zip.part")
+    included = []
+
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        for v in sorted(voices, key=lambda x: (x["lang"], x["id"])):
+            vid, lang = v["id"], v["lang"]
+            d = Path(v["dir"]) if v.get("dir") else None
+            if d and d.is_dir():
+                hashed, extra = voice_members(d, vid)
+                vj = d / "voice.json"
+                if vj.is_file():
+                    extra = extra + [vj]
+                for p in hashed + extra:
+                    z.write(p, f"{lang}/{vid}/{p.name}")
+                included.append(vid)
+                continue
+
+            src = external_zips.get(vid)
+            if not src or not Path(src).is_file():
+                print(f"  ! all-voices: {lang}/{vid} is neither on disk nor "
+                      f"available as a downloaded zip. NOT building an "
+                      f"'all-voices' archive that is missing a voice.")
+                tmp.unlink(missing_ok=True)
+                return None
+            # Copy members across rather than nesting the zip. The published
+            # per-voice zip already uses the <lang>/<id>/<file> layout this
+            # bundle wants, so entries transfer name-for-name.
+            with zipfile.ZipFile(src) as sz:
+                for info in sz.infolist():
+                    if info.is_dir():
+                        continue
+                    with sz.open(info) as fp:
+                        z.writestr(info.filename, fp.read())
+            included.append(vid)
+            print(f"  + all-voices: {lang}/{vid} taken from {Path(src).name}")
+
+    os.replace(tmp, zip_path)
+    return {"version": version, "zip": zip_path.name,
+            "zip_bytes": zip_path.stat().st_size,
+            "zip_sha256": sha256_file(zip_path),
+            "voices": sorted(included)}
+
+
 def discover(root, only):
     """The repo convention, same as stage_voices.py: <lang>/<id>/<id>.vin +
     <id>8.vdb + <id>.vcf. A voice appears here by existing."""
@@ -218,6 +283,16 @@ def main():
                          "(default: today, UTC)")
     ap.add_argument("--voices", default="",
                     help="comma-separated ids; default is every voice found")
+    ap.add_argument("--all-bundle", action="store_true",
+                    help="also pack every voice of every language into one "
+                         "all-voices-<version>.zip. A voice whose source is "
+                         "not on this machine is taken from its published "
+                         "per-voice zip; see --external-zip-dir.")
+    ap.add_argument("--external-zip-dir", default="",
+                    help="directory holding already-downloaded per-voice zips "
+                         "for voices this machine cannot pack (Paulina). Used "
+                         "only by --all-bundle. CI downloads them with "
+                         "`gh release download`; this script never fetches.")
     ap.add_argument("--bundles", action="store_true",
                     help="also write one <lang>-voices-<version>.zip per language")
     ap.add_argument("--force", action="store_true",
@@ -410,12 +485,52 @@ def main():
             }, indent=2) + "\n", encoding="utf-8")
             print(f"wrote {EXTERNAL} ({', '.join(e['id'] for e in keep)})")
 
+    # Every voice, every language, one zip. Carried forward when not rebuilt,
+    # for the same reason the language bundles are: "not asked to rebuild" is
+    # not "there is none", and dropping the key would delete the asset's entry
+    # from the catalog on the next publish.
+    all_bundle = prev_doc.get("all")
+    if args.all_bundle:
+        if only:
+            print("  ~ all-voices: NOT rebuilt -- --voices selects a subset, "
+                  "so the archive would be missing the rest. Keeping the "
+                  "published one.")
+        else:
+            ext_zips = {}
+            if args.external_zip_dir:
+                ezd = Path(args.external_zip_dir)
+                # Match a downloaded zip to its voice by the catalog's own
+                # record of the asset name, not by guessing from the filename.
+                for e in list(ext_doc.get("voices", [])) + entries:
+                    z = ezd / e.get("zip", "")
+                    if e.get("zip") and z.is_file():
+                        ext_zips.setdefault(e["id"], z)
+            # `voices` holds what is ON DISK; externals are absent from it, so
+            # add a dir-less stub for each so pack_all_bundle can look them up
+            # in ext_zips and fail loudly if one is missing.
+            on_disk = {v["id"] for v in voices}
+            want = list(voices) + [
+                {"id": e["id"], "lang": e["lang"], "dir": None}
+                for e in ext_doc.get("voices", []) if e["id"] not in on_disk]
+            built = pack_all_bundle(out, version, want, ext_zips)
+            if built:
+                all_bundle = built
+                print(f"  + all-voices: {built['zip']} "
+                      f"({built['zip_bytes'] / 1048576:.0f} MB, "
+                      f"{len(built['voices'])} voices)")
+    elif all_bundle:
+        print("  ~ all-voices: not rebuilt (--all-bundle not given); keeping "
+              "the published one")
+
     cat = {"schema": 1,
            "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
            "voices": entries,
            "bundles": bundles}
+    if all_bundle:
+        cat["all"] = all_bundle
     cat_path.write_text(json.dumps(cat, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {cat_path} ({len(entries)} voice(s), {len(bundles)} bundle(s))")
+    print(f"wrote {cat_path} ({len(entries)} voice(s), {len(bundles)} bundle(s)"
+          f"{', all-voices' if all_bundle else ''})")
     return 0
 
 

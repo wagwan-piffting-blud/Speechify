@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Info.plist for Speechify.app.
+
+    ⚠ THIS IS WHAT MAKES THE GUI AN APPLICATION RATHER THAN A FILE. A bare
+    Mach-O in bin/ runs from a terminal and is invisible to Launchpad, Spotlight
+    and the Dock; macOS only treats something as an app when it is a bundle
+    directory with this file in it. The Windows side gets the same thing from
+    the Start Menu shortcut, and Linux from the .desktop file.
+
+    @VERSION@ is substituted by the Package tarball step in
+    .github/workflows/build-installer.yml.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Speechify</string>
+    <key>CFBundleDisplayName</key>
+    <string>Speechify</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.speechify.spfy.gui</string>
+
+    <!-- Must match the file in Contents/MacOS. -->
+    <key>CFBundleExecutable</key>
+    <string>spfy_gui</string>
+
+    <!-- ⚠ NO .icns EXTENSION. CFBundleIconFile names the resource; adding the
+         extension is tolerated by some macOS versions and silently yields the
+         generic blank-page icon on others. -->
+    <key>CFBundleIconFile</key>
+    <string>icon</string>
+
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@VERSION@</string>
+
+    <!-- Matches SPFY_OSX_DEPLOYMENT_TARGET in the build matrix. One number
+         covers both arches because 11.0 is Apple Silicon's own floor. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- Not a background agent: it must own a Dock tile and a menu bar. -->
+    <key>LSUIElement</key>
+    <false/>
+
+    <key>NSHumanReadableCopyright</key>
+    <string>GPL-3.0-or-later. Speechify Open-Source Reimplementation.</string>
+</dict>
+</plist>

@@ -147,7 +147,15 @@ static int winhttp_load(struct winhttp_api *w)
     return 0;
 }
 
-static int fetch_win(const char *url, int timeout_s, char **out, size_t *out_n)
+/* `sink`, when non-NULL, sends the body straight to a file instead of a
+ * malloc'd buffer, and `out`/`out_n` are then unused.
+ *
+ * ⚠ THE BUFFERED PATH CANNOT DOWNLOAD A VOICE. UPD_MAX_BODY is 4 MB, which is
+ * right for a manifest and three orders of magnitude short of a 92 MB voice
+ * zip. Rather than duplicate sixty lines of WinHTTP bring-up for the file
+ * case, the same request grows one branch in its read loop. */
+static int fetch_win(const char *url, int timeout_s, char **out, size_t *out_n,
+                     FILE *sink, spfy_upd_progress_fn on_progress, void *pctx)
 {
     struct winhttp_api w;
     WCHAR wurl[2048], host[256], upath[1536], extra[1024], obj[2560];
@@ -201,6 +209,32 @@ static int fetch_win(const char *url, int timeout_s, char **out, size_t *out_n)
                         WINHTTP_NO_HEADER_INDEX))
         goto done;
     if (status != 200) goto done;
+
+    if (sink) {
+        /* Content-Length is advisory here: it is only used to drive a
+         * progress figure, and a server that omits it just means the caller
+         * shows bytes rather than a percentage. */
+        DWORD clen = 0, clen_n = sizeof clen;
+        unsigned long long total = 0, done_n = 0;
+        char sbuf[65536];
+        if (w.QueryHeaders(hr, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                           WINHTTP_HEADER_NAME_BY_INDEX, &clen, &clen_n,
+                           WINHTTP_NO_HEADER_INDEX))
+            total = clen;
+        for (;;) {
+            DWORD avail = 0, got = 0;
+            if (!w.QueryDataAvailable(hr, &avail)) goto done;
+            if (avail == 0) break;
+            if (avail > sizeof sbuf) avail = sizeof sbuf;
+            if (!w.ReadData(hr, sbuf, avail, &got)) goto done;
+            if (got == 0) break;
+            if (fwrite(sbuf, 1, got, sink) != got) goto done;
+            done_n += got;
+            if (on_progress && on_progress(pctx, done_n, total) != 0) goto done;
+        }
+        rc = 0;
+        goto done;
+    }
 
     for (;;) {
         DWORD avail = 0, got = 0;
@@ -326,7 +360,98 @@ static int fetch_unix(const char *url, int timeout_s, char **out, size_t *out_n)
     return run_capture(wget_argv, out, out_n);
 }
 
+/* Straight to a file. curl and wget both write one themselves, so there is
+ * no pipe to drain and no body cap to hit -- the whole reason the buffered
+ * path cannot be reused for a 92 MB voice.
+ *
+ * No progress callback on this path: parsing curl's progress meter back out
+ * of a pipe would be guesswork, and `-#` is not machine-readable. The caller
+ * prints "downloading..." and the tool prints nothing. */
+static int fetch_unix_file(const char *url, int timeout_s, const char *dest)
+{
+    char tmo[32];
+    char agent[64];
+    char *argv[12];
+    char *out = NULL;
+    size_t n = 0;
+    int i, rc;
+
+    snprintf(tmo, sizeof tmo, "%d", timeout_s > 0 ? timeout_s : 600);
+    snprintf(agent, sizeof agent, "spfy-update/%s", SPFY_VERSION);
+
+    i = 0;
+    argv[i++] = (char *)"curl";
+    argv[i++] = (char *)"-fsSL";
+    argv[i++] = (char *)"--max-time";
+    argv[i++] = tmo;
+    argv[i++] = (char *)"-A";
+    argv[i++] = agent;
+    argv[i++] = (char *)"-o";
+    argv[i++] = (char *)dest;
+    argv[i++] = (char *)"--";
+    argv[i++] = (char *)url;
+    argv[i]   = NULL;
+    rc = run_capture(argv, &out, &n);
+    free(out); out = NULL;
+    if (rc == 0) return 0;
+
+    i = 0;
+    argv[i++] = (char *)"wget";
+    argv[i++] = (char *)"-q";
+    argv[i++] = (char *)"--timeout";
+    argv[i++] = tmo;
+    argv[i++] = (char *)"-U";
+    argv[i++] = agent;
+    argv[i++] = (char *)"-O";
+    argv[i++] = (char *)dest;
+    argv[i++] = (char *)"--";
+    argv[i++] = (char *)url;
+    argv[i]   = NULL;
+    rc = run_capture(argv, &out, &n);
+    free(out);
+    return rc;
+}
+
 #endif /* _WIN32 */
+
+int spfy_upd_fetch_file(const char *url, int timeout_s, const char *dest,
+                        spfy_upd_progress_fn on_progress, void *pctx)
+{
+    if (!url || !*url || !dest || !*dest) return -1;
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0)
+        return -1;
+#ifdef _WIN32
+    {
+        /* Write to a .part and rename on success. A half-written file left
+         * under the real name is one an interrupted run would happily hand
+         * to the unzipper next time. */
+        char part[1024];
+        FILE *fp;
+        int rc;
+        snprintf(part, sizeof part, "%s.part", dest);
+        fp = fopen(part, "wb");
+        if (!fp) return -1;
+        rc = fetch_win(url, timeout_s, NULL, NULL, fp, on_progress, pctx);
+        if (fclose(fp) != 0) rc = -1;
+        if (rc != 0) { remove(part); return -1; }
+        remove(dest);
+        if (rename(part, dest) != 0) { remove(part); return -1; }
+        return 0;
+    }
+#else
+    (void)on_progress; (void)pctx;
+    {
+        char part[1024];
+        int rc;
+        snprintf(part, sizeof part, "%s.part", dest);
+        rc = fetch_unix_file(url, timeout_s, part);
+        if (rc != 0) { remove(part); return -1; }
+        remove(dest);
+        if (rename(part, dest) != 0) { remove(part); return -1; }
+        return 0;
+    }
+#endif
+}
 
 int spfy_upd_fetch(const char *url, int timeout_s, char **out, size_t *out_n)
 {
@@ -339,7 +464,7 @@ int spfy_upd_fetch(const char *url, int timeout_s, char **out, size_t *out_n)
         return -1;
 
 #ifdef _WIN32
-    return fetch_win(url, timeout_s, out, out_n);
+    return fetch_win(url, timeout_s, out, out_n, NULL, NULL, NULL);
 #else
     return fetch_unix(url, timeout_s, out, out_n);
 #endif

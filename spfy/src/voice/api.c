@@ -112,5 +112,5 @@ const char *spfy_strerror(int code)
 
 const char *spfy_version(void)
 {
-    return "spfy 0.0.1";
+    return "spfy 2026.08.26";
 }

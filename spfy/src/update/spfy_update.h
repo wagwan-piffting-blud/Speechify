@@ -161,6 +161,50 @@ int spfy_upd_compare(const spfy_upd_manifest *m, const char *argv0,
  * transfer. Returns 0 on success, negative otherwise. Caller frees. */
 int spfy_upd_fetch(const char *url, int timeout_s, char **out, size_t *out_n);
 
+/* Progress during a large download. `total` is 0 when the server did not say.
+ * Return non-zero to abort the transfer. */
+typedef int (*spfy_upd_progress_fn)(void *ctx, unsigned long long done,
+                                    unsigned long long total);
+
+/* Fetch straight to `dest`, for payloads far past spfy_upd_fetch's 4 MB
+ * in-memory cap. Writes `<dest>.part` and renames on success, so an
+ * interrupted run never leaves a truncated file under the real name.
+ *
+ * ⚠ on_progress fires on the Windows path only. curl and wget write the file
+ * themselves, and their progress meters are not machine-readable. */
+int spfy_upd_fetch_file(const char *url, int timeout_s, const char *dest,
+                        spfy_upd_progress_fn on_progress, void *pctx);
+
+/* ---- voice catalog ------------------------------------------------------
+ *
+ * The same voices.json installer/updates/pack_voices.py publishes and the
+ * Android app reads. Not a second catalog: a hand-kept list of voices is one
+ * that goes stale the first time somebody publishes without remembering it. */
+
+typedef struct {
+    char id[64];
+    char display[96];
+    char lang[16];
+    char version[32];
+    char zip[128];
+    char zip_sha256[80];
+    unsigned long long zip_bytes;
+    int  installed;              /* a complete trio already on disk */
+} spfy_voice_avail;
+
+/* Fill `out` with what the catalog offers, marking those already installed.
+ * Returns the count written (capped at `max`), or -1 when the catalog cannot
+ * be fetched or parsed. */
+int spfy_voice_catalog(spfy_voice_avail *out, size_t max);
+
+/* Download, verify and unpack one voice into the user's voice directory.
+ * `id` matches spfy_voice_avail.id. Returns 0 on success; on failure writes a
+ * human-readable reason into `err` (which may be NULL). */
+int spfy_voice_install(const char *id, char *err, size_t err_n);
+
+/* Where voices are installed to, and where --list-voices already looks. */
+const char *spfy_voice_install_root(char *buf, size_t n);
+
 /* The URL actually used: $SPFY_UPDATE_URL when set, else the baked-in one. */
 const char *spfy_upd_url(void);
 

@@ -145,8 +145,13 @@ jobs:
         include:
           # 64-bit Windows. Ships spfy_sapi64.dll alongside the 32-bit COM
           # DLL and registers through SysWOW64\regsvr32.
+          #
+          # `guiTarget` empty means "build for the host triple", which on any
+          # Windows runner is x86_64 and lands in target\release.
           - arch: x64
             build64: true
+            guiTarget: ""
+            guiArch: "i386:x86-64"
           # 32-bit Windows, down to Windows 7 SP1 (Inno's own default
           # MinVersion floor, which this script does not override).
           #
@@ -157,8 +162,15 @@ jobs:
           # spfy_synth.exe are already i686, min OS 4.0, msvcrt (not UCRT)
           # and import nothing newer than NT 6.1. Only the installer's
           # ArchitecturesAllowed was refusing to run.
+          # ⭐ The GUI is i686 here, not x86_64. `cargo build` with no --target
+          # would produce an x86_64 exe that compiles into this installer
+          # perfectly happily and then refuses to start for every 32-bit user,
+          # so the target is explicit and the arch is ASSERTED after linking.
+          # Measured 2m20s and the self-check passes, same as x64.
           - arch: x86
             build64: false
+            guiTarget: "i686-pc-windows-msvc"
+            guiArch: "i386"
 
     steps:
       - name: Checkout
@@ -246,6 +258,38 @@ jobs:
             -Wl,--kill-at \
             -Wl,--out-implib,"$OUTDIR/libspfy_sapi64.dll.a"
 
+      # --------------------------------------------------------------
+      # Build the GUI (Tauri) - x64 leg only
+      # --------------------------------------------------------------
+
+      # ⚠ PLAIN `cargo build`, NOT `tauri build`. There is no bundler and no
+      # beforeBuildCommand: tauri.conf.json sets `frontendDist: "../web"`
+      # (static files, already in the repo) and `bundle.active: false`, so the
+      # whole job is compiling one Rust binary. Going through the Tauri CLI
+      # would drag in Node and npm to produce the identical spfy_gui.exe.
+      #
+      # windows-latest ships a stable rustup toolchain, so there is nothing to
+      # install beyond the extra std for the 32-bit target. WebView2 is a
+      # RUNTIME dependency only - not linked here - and its runtime carries
+      # both an x86 and an x64 loader, which is why an i686 GUI works on the
+      # same machines the x64 one does.
+      - name: Build the GUI (Tauri)
+        env:
+          GUI_TARGET: ${{ matrix.guiTarget }}
+        run: |
+          $manifest = "${{ github.workspace }}\spfy\gui\src-tauri\Cargo.toml"
+          $targetArgs = @()
+          if ($env:GUI_TARGET) {
+            rustup target add $env:GUI_TARGET
+            if ($LASTEXITCODE -ne 0) { Write-Error "rustup target add failed"; exit 1 }
+            $targetArgs = @("--target", $env:GUI_TARGET)
+          }
+          cargo build --release --locked @targetArgs --manifest-path $manifest
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "cargo build failed for the GUI"
+            exit 1
+          }
+
       # The architecture is ASSERTED, not just printed: a silently 64-bit
       # spfy_sapi.dll would still install and still regsvr32 "successfully"
       # under the wrong loader.
@@ -297,6 +341,58 @@ jobs:
               || { echo "::error::unexpected spfy_sapi64.dll on the x86 leg"; exit 1; }
             echo "  spfy_sapi64.dll    (absent, as expected on the x86 leg)"
           fi
+          # ⛔ THE GUI'S ARCH IS THE ONE MOST LIKELY TO BE SILENTLY WRONG. An
+          # x86_64 spfy_gui.exe compiles into the x86 installer without a
+          # murmur from Inno and then fails to start for every 32-bit user, so
+          # matrix.guiArch is asserted rather than assumed. The two arches also
+          # come from DIFFERENT cargo directories - target\release for the host
+          # build, target\<triple>\release when --target was passed - and
+          # checking the wrong path would silently pass on a stale binary.
+          GUIROOT="$(cygpath -u '${{ github.workspace }}')/spfy/gui/src-tauri/target"
+          if [ -n "${{ matrix.guiTarget }}" ]; then
+            GUI="$GUIROOT/${{ matrix.guiTarget }}/release/spfy_gui.exe"
+          else
+            GUI="$GUIROOT/release/spfy_gui.exe"
+          fi
+          ls -la "$GUI"
+          check "$GUI" "${{ matrix.guiArch }}"
+
+      # ⚠ "IT COMPILED" IS NOT A PASSING GUI. This runs the real plumbing the
+      # IPC commands call - resolve the engine, `--list-voices --json`, synth,
+      # then the same sentence under SSML - and asserts the tagged arm is at
+      # least 1.5x longer. That last one is the load-bearing check: before the
+      # SSML pass existed the tagged arm was longer too, because the engine
+      # READ THE TAGS OUT LOUD, so a length comparison alone could pass on a
+      # broken build. It is a ratio against a measured plain-text baseline
+      # from the same voice and the same binary.
+      #
+      # The two env vars stand in for what the installed layout gives for
+      # free: spfy_synth.exe beside spfy_gui.exe in {app}, and voices under
+      # {userdocs}\Speechify. Here the engine is in the build tree and the
+      # voices are the repo's own en-US/ es-MX/ fr-CA/ folders.
+      #
+      # ⚠ spfy_gui.exe is `windows_subsystem = "windows"` and has no console
+      # of its own; its --self-check calls AttachConsole to get one. That
+      # fails under a CI shell, which is fine and NOT what is being tested -
+      # pwsh hands the child inherited stdout/stderr HANDLES either way, so
+      # the output below is real. The exit code is the gate regardless.
+      - name: Self-check the GUI
+        env:
+          SPFY_SYNTH: C:\tmp\spfy_build32\src\cli\spfy_synth.exe
+          SPFY_VOICE_DIR: ${{ github.workspace }}
+          GUI_TARGET: ${{ matrix.guiTarget }}
+        run: |
+          $root = "${{ github.workspace }}\spfy\gui\src-tauri\target"
+          $gui = if ($env:GUI_TARGET) {
+            "$root\$env:GUI_TARGET\release\spfy_gui.exe"
+          } else {
+            "$root\release\spfy_gui.exe"
+          }
+          & $gui --self-check 2>&1 | ForEach-Object { "  $_" }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "spfy_gui --self-check failed (exit $LASTEXITCODE)"
+            exit 1
+          }
 
       # --------------------------------------------------------------
       # Inno Setup - package the installer
@@ -311,13 +407,24 @@ jobs:
           if (-not (Test-Path $iscc)) {
             $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
           }
-          & $iscc `
-            /DTargetArch="${{ matrix.arch }}" `
-            /DBuildDir="C:\tmp\spfy_build32" `
-            /DSourceRoot="${{ github.workspace }}" `
-            /DSpfyVersion="${{ needs.setup.outputs.version }}" `
-            /DSpfyVersionInfo="${{ needs.setup.outputs.versioninfo }}" `
-            "${{ github.workspace }}\installer\spfy_setup.iss"
+          $isccArgs = @(
+            "/DTargetArch=${{ matrix.arch }}"
+            "/DBuildDir=C:\tmp\spfy_build32"
+            "/DSourceRoot=${{ github.workspace }}"
+            "/DSpfyVersion=${{ needs.setup.outputs.version }}"
+            "/DSpfyVersionInfo=${{ needs.setup.outputs.versioninfo }}"
+          )
+          # /DWithGui adds spfy_gui.exe, the Start Menu entry, the App Paths
+          # registration, the optional desktop icon and the finish-page launch
+          # box. BOTH arches ship it now. GuiDir defaults per arch inside the
+          # ISS to the cargo directory the build step above actually wrote to,
+          # so there is nothing else to pass. The [Files] entry has NO
+          # skipifsourcedoesntexist: if the cargo build silently produced
+          # nothing, this must fail the compile rather than ship a Start Menu
+          # shortcut pointing at a missing file.
+          $isccArgs += "/DWithGui"
+          Write-Host "  iscc $($isccArgs -join ' ')"
+          & $iscc @isccArgs "${{ github.workspace }}\installer\spfy_setup.iss"
           if ($LASTEXITCODE -ne 0) {
             Write-Error "Inno Setup compile failed"
             exit 1
@@ -405,6 +512,14 @@ jobs:
           # needs emulating. amd64 on ubuntu-latest and arm64 on the arm
           # runner are both native, so they pay nothing for the container
           # beyond one apt-get.
+          # ⚠ THE GUI USES A DIFFERENT CONTAINER FROM THE ENGINE ON THIS LEG,
+          # and it is the only leg where they diverge. The C build is -m32
+          # multilib on an amd64 root, which is fine for a compiler. It is not
+          # fine for webkit: `libwebkit2gtk-4.1-dev:i386` pulls
+          # gobject-introspection:i386 -> python3:i386, which Debian cannot
+          # install multi-arch, so there is no i386 webkit on an amd64 root at
+          # all. A real i386 userland has it natively, and costs nothing on an
+          # x86_64 host -- i386 runs on the metal, no emulation.
           - id: linux-x86
             runner: ubuntu-latest
             cflags: "-m32 -D_GNU_SOURCE=1"
@@ -414,7 +529,12 @@ jobs:
             image: "debian:bookworm"
             platform: "linux/amd64"
             osx_target: ""
-            timeout: 20
+            gui: true
+            guiImage: "i386/debian:bookworm"
+            guiPlatform: "linux/386"
+            timeout: 35
+          # GUI measured 1m54s in this exact image, highest glibc reference
+          # 2.34 -- inside the 2.36 ceiling with room to spare.
           - id: linux-x86_64
             runner: ubuntu-latest
             cflags: "-D_GNU_SOURCE=1"
@@ -424,7 +544,12 @@ jobs:
             image: "debian:bookworm"
             platform: "linux/amd64"
             osx_target: ""
-            timeout: 20
+            gui: true
+            guiImage: "debian:bookworm"
+            guiPlatform: "linux/amd64"
+            timeout: 30
+          # Native arm64 runner, so the GUI container is native too - this leg
+          # pays nothing for emulation the way armv7 would.
           - id: linux-arm64
             runner: ubuntu-24.04-arm
             cflags: "-D_GNU_SOURCE=1"
@@ -434,7 +559,10 @@ jobs:
             image: "debian:bookworm"
             platform: "linux/arm64"
             osx_target: ""
-            timeout: 20
+            gui: true
+            guiImage: "debian:bookworm"
+            guiPlatform: "linux/arm64"
+            timeout: 30
           # 32-bit ARM. There is NO hosted armv7 runner (ubuntu-24.04-arm
           # is aarch64), so this one builds in a qemu-emulated container on
           # an x86_64 runner. Cross-compiling would be far faster but the
@@ -444,6 +572,20 @@ jobs:
           #
           # Emulation makes this the slowest leg by a wide margin; the
           # timeout below is set from a measured local run, not a guess.
+          #
+          # ⭐ THE GUI ON THIS LEG IS CROSS-COMPILED, NOT EMULATED, and that is
+          # the difference between a leg that finishes and one that does not.
+          # The C engine is small enough to build under qemu; a ~400-crate
+          # Rust build is not. Measured here: `apt-get install` of the webkit
+          # dev packages inside an emulated armhf container ran past THIRTY
+          # MINUTES before rustup had even started. The straightforward
+          # alternative -- Debian multi-arch :armhf dev packages on an amd64
+          # root -- is blocked outright by gobject-introspection:armhf.
+          #
+          # So guiPlatform is linux/amd64 while platform stays linux/arm/v7:
+          # the GUI container is NATIVE and builds against an armhf sysroot
+          # unpacked by mmdebstrap in ~30s. Same bookworm packages either way,
+          # so the glibc 2.36 ceiling is unchanged.
           - id: linux-armv7
             runner: ubuntu-latest
             cflags: "-D_GNU_SOURCE=1"
@@ -453,7 +595,11 @@ jobs:
             image: "debian:bookworm"
             platform: "linux/arm/v7"
             osx_target: ""
-            timeout: 30
+            gui: true
+            guiImage: "debian:bookworm"
+            guiPlatform: "linux/amd64"
+            guiCross: "armhf"
+            timeout: 40
           # ⭐ musl, STATICALLY linked -- the "runs anywhere" build.
           #
           # The glibc tarballs above cannot run on Alpine at all: their
@@ -467,6 +613,19 @@ jobs:
           # for a distro older than anything CI can build on, and for a
           # container FROM scratch. Verified byte-exact against the reference
           # WAV -- musl's libm does not move a single output sample.
+          #
+          # ⛔ NO GUI ON THE musl LEGS, AND THIS IS NOT AN OVERSIGHT. The whole
+          # value of these two tarballs is in the paragraph above: one static
+          # binary, no interpreter, no libc floor, works in a container FROM
+          # scratch. A Tauri GUI cannot have that property. Alpine ships
+          # webkit2gtk-4.1-dev but no static archives for it (checked), and
+          # WebKitGTK is not practically statically linkable anywhere - so the
+          # GUI here could only be a dynamically linked binary needing GTK,
+          # WebKit and ~40 other shared objects present on the target. That is
+          # the exact opposite of what someone reaches for a musl-static
+          # tarball to get, and a FROM-scratch container has no display anyway.
+          # Alpine desktop users build it from source; every other Linux user
+          # has a glibc leg above with the GUI in it.
           - id: linux-x86_64-musl
             runner: ubuntu-latest
             cflags: "-D_GNU_SOURCE=1"
@@ -476,6 +635,9 @@ jobs:
             image: "alpine:3.20"
             platform: "linux/amd64"
             osx_target: ""
+            gui: false
+            guiImage: ""
+            guiPlatform: ""
             timeout: 20
           - id: linux-arm64-musl
             runner: ubuntu-24.04-arm
@@ -486,6 +648,9 @@ jobs:
             image: "alpine:3.20"
             platform: "linux/arm64"
             osx_target: ""
+            gui: false
+            guiImage: ""
+            guiPlatform: ""
             timeout: 20
           # ⭐ osx_target, because an unset deployment target means "whatever
           # this runner is". That is how the Intel tarball came to declare
@@ -493,6 +658,11 @@ jobs:
           # 2018, i.e. most of the machines an Intel build is FOR. 11.0 is
           # Apple Silicon's own floor, so one number covers both arches, and
           # build_unix.sh reads the linked binary back to prove it took.
+          #
+          # macOS is the ONE platform where the GUI needs no extra dependency
+          # at all: Tauri uses the system WKWebView, so `cargo build` on the
+          # runner is the whole story - no container, no apt, no webkit to
+          # install. The runners ship rustup already.
           - id: macos-arm64
             runner: macos-14
             cflags: ""
@@ -502,7 +672,10 @@ jobs:
             image: ""
             platform: ""
             osx_target: "11.0"
-            timeout: 15
+            gui: true
+            guiImage: ""
+            guiPlatform: ""
+            timeout: 25
           # Intel macOS. NOT macos-13 - that image was retired 2025-12-04
           # (deprecation began 2025-09-22), and requesting a dead label
           # doesn't error, it just queues until the job times out.
@@ -521,7 +694,10 @@ jobs:
             image: ""
             platform: ""
             osx_target: "11.0"
-            timeout: 30
+            gui: true
+            guiImage: ""
+            guiPlatform: ""
+            timeout: 45
 
     runs-on: ${{ matrix.runner }}
 
@@ -608,6 +784,50 @@ jobs:
           # or the packaging steps below can't stage into it.
           sudo chown -R "$(id -u):$(id -g)" build-out
 
+      # --------------------------------------------------------------
+      # The GUI - separate toolchain, separate container, not every leg
+      # --------------------------------------------------------------
+
+      # ⚠ A SECOND CONTAINER, NOT THE ENGINE'S. matrix.guiImage is usually the
+      # same image as matrix.image, but on linux-x86 it is deliberately
+      # i386/debian:bookworm against the engine's amd64 -- see that leg's own
+      # note. Reusing `image` there would silently build an x86_64 GUI for a
+      # 32-bit tarball.
+      - name: Build the GUI (${{ matrix.guiImage }} on ${{ matrix.guiPlatform }})
+        if: matrix.gui && matrix.guiImage != ''
+        run: |
+          docker run --rm --platform "${{ matrix.guiPlatform }}" \
+            -v "${GITHUB_WORKSPACE}:/w" -w /w \
+            -e SPFY_GUI_OUT=/w/gui-out \
+            -e SPFY_MAX_GLIBC=2.36 \
+            -e SPFY_GUI_CROSS="${{ matrix.guiCross }}" \
+            "${{ matrix.guiImage }}" \
+            bash spfy/ci/build_gui_linux.sh
+          sudo chown -R "$(id -u):$(id -g)" gui-out
+
+      # No container and no dependency install: Tauri uses the system
+      # WKWebView on macOS, so this is one cargo invocation.
+      #
+      # ⚠ MACOSX_DEPLOYMENT_TARGET is passed for the SAME reason build_unix.sh
+      # takes SPFY_OSX_DEPLOYMENT_TARGET: unset, the binary silently demands
+      # whatever macOS the runner happens to be, which is how the Intel CLI
+      # once came to declare a 15.0 floor and exclude most Intel Macs. The
+      # value is read back off the linked binary below rather than trusted.
+      - name: Build the GUI (macOS)
+        if: matrix.gui && runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.osx_target }}
+        run: |
+          set -eu
+          cargo build --release --locked \
+            --manifest-path spfy/gui/src-tauri/Cargo.toml
+          mkdir -p gui-out
+          cp spfy/gui/src-tauri/target/release/spfy_gui gui-out/spfy_gui
+          file gui-out/spfy_gui
+          echo "--- deployment target actually linked in ---"
+          otool -l gui-out/spfy_gui |
+            awk '/LC_BUILD_VERSION/,/sdk/' | grep -E 'minos|sdk' | head -2
+
       - name: Package tarball
         run: |
           set -eu
@@ -639,6 +859,84 @@ jobs:
           # whose --s4 silently does nothing is worse than a failed leg.
           cp en-US/tom/tom8.pmindex                "${STAGE}/en-US/tom/"
           cp en-US/tom/tom8.pmdata                 "${STAGE}/en-US/tom/"
+          # --- Tom himself: the starter voice ---
+          #
+          # The sentence above used to end "the user drops tom's trio in
+          # beside them". They no longer have to: the trio ships here, so an
+          # extracted tarball speaks immediately with nothing downloaded and
+          # no network at all.
+          #
+          # ~89.5 MB, and it is by far the largest thing in the package. Every
+          # OTHER voice is still a download -- `spfy_synth --list-available`
+          # and `--install-voice <name>`, which land in
+          # ~/Documents/Speechify/<lang>/<voice>/ where --list-voices already
+          # looks. Tom is bundled because it is the baseline the project is
+          # built and gated against, not because it is anyone's favourite.
+          #
+          # No `|| true`, same as the pitch marks: `set -eu` is in force and a
+          # tarball that quietly contains no voice is worse than a failed leg.
+          # en-US/tom IS committed, so a runner has it from the checkout with
+          # nothing to fetch.
+          cp en-US/tom/tom.vin                     "${STAGE}/en-US/tom/"
+          cp en-US/tom/tom8.vdb                    "${STAGE}/en-US/tom/"
+          cp en-US/tom/tom.vcf                     "${STAGE}/en-US/tom/"
+
+          # --- The GUI, and the bit that makes it an APPLICATION ---
+          #
+          # ⚠ A BARE BINARY IN bin/ IS NOT A PORTED GUI. It runs from a
+          # terminal and is invisible to every applications menu, which is the
+          # one place a non-command-line user would look. Windows gets a Start
+          # Menu shortcut from the Inno script; the two platforms here need
+          # their own native equivalent, so each gets one.
+          if [ "${{ matrix.gui }}" = "true" ]; then
+            test -f gui-out/spfy_gui \
+              || { echo "::error::gui=true but no gui-out/spfy_gui"; exit 1; }
+            cp gui-out/spfy_gui                    "${STAGE}/bin/"
+            chmod +x "${STAGE}/bin/spfy_gui"
+            case "${{ matrix.id }}" in
+              macos-*)
+                # A .app is just a directory with Info.plist in it, so it is
+                # built here rather than by Tauri's bundler -- which stays off
+                # (bundle.active=false) so the Windows path is unaffected.
+                #
+                # ⚠ SELF-CONTAINED ON PURPOSE: spfy_synth is copied IN, not
+                # symlinked out to bin/. The GUI finds the engine "next to
+                # itself", and a macOS user drags the .app to /Applications --
+                # at which point any relative link back into the extracted
+                # tarball is dangling and the app opens to "engine not found".
+                APP="${STAGE}/Speechify.app"
+                mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+                cp gui-out/spfy_gui                "${APP}/Contents/MacOS/"
+                cp build-out/src/cli/spfy_synth    "${APP}/Contents/MacOS/"
+                chmod +x "${APP}/Contents/MacOS/spfy_gui" \
+                         "${APP}/Contents/MacOS/spfy_synth"
+                cp spfy/gui/src-tauri/icons/icon.icns \
+                                                   "${APP}/Contents/Resources/icon.icns"
+                sed "s/@VERSION@/${VERSION}/g" spfy/gui/macos/Info.plist.in \
+                    > "${APP}/Contents/Info.plist"
+                echo "  built Speechify.app"
+                ;;
+              *)
+                # Linux: the .desktop file cannot be shipped ready-made
+                # because Exec= must be absolute and the tarball is
+                # relocatable, so install-desktop.sh writes it at run time
+                # from wherever the user extracted to.
+                mkdir -p "${STAGE}/share"
+                cp spfy/gui/src-tauri/icons/128x128@2x.png \
+                                                   "${STAGE}/share/speechify.png"
+                cp spfy/gui/linux/install-desktop.sh "${STAGE}/"
+                chmod +x "${STAGE}/install-desktop.sh"
+                echo "  staged install-desktop.sh + icon"
+                ;;
+            esac
+          else
+            # musl legs. Asserted rather than assumed: a stray gui-out here
+            # would mean the static-only contract had quietly been broken.
+            test ! -e gui-out \
+              || { echo "::error::gui=false but gui-out exists on ${{ matrix.id }}"; exit 1; }
+            echo "  no GUI on this leg (static musl; see the matrix note)"
+          fi
+
           # Path layout inside the tarball mirrors the args spfy_synth
           # expects, so users can extract and run from the package root.
           mkdir -p installer/dist

@@ -955,20 +955,41 @@ static int cmp_strptr(const void *a, const void *b)
  * the selector preferred them over the real recordings. The phrase came out
  * audibly wrong in a build that verified 46/0.
  *
- * A REAL recording is named <office>_<timestamp>_<product>: three lowercase
- * letters, underscore, then at least eight digits (akq_20041105142049_WBCEFPSBY,
- * psr_20041101200020_pil=PHXHWRNW1). Anything that does not match that shape did
- * not come off a broadcast feed, so it is synthetic -- INCLUDING a source nobody
- * has invented yet, which is the point of inverting the test.
+ * TWO shapes are real, because the speaker's audio reached this project by two
+ * routes:
+ *
+ *   <office>_<timestamp>_<product>   three lowercase letters, underscore, then
+ *       at least eight digits -- the direct Wayback pulls
+ *       (akq_20041105142049_WBCEFPSBY, psr_20041101200020_pil=PHXHWRNW1).
+ *
+ *   <offset>_<CALLSIGN>_<product>    five digits, underscore, then an UPPERCASE
+ *       letter -- an utterance cut out of an off-air archive recording
+ *       (00000_KEC49_cycle_2016_0001, 00144_WXJ45_SVA(#170)+TOR_2014_0011).
+ *       ⭐ This is REAL audio. It reads as noise-reduced rather than clean, but
+ *       it came off a broadcast feed, and calling it synthetic is what
+ *       --rvc-policy prefer-real would use to demote the whole batch beneath
+ *       299 direct recordings.
+ *
+ * Anything matching neither did not come off a broadcast feed, so it is
+ * synthetic -- INCLUDING a source nobody has invented yet, which is the point
+ * of inverting the test. No synthetic stem in this project carries an uppercase
+ * letter or a leading digit, so the two rules cannot collide.
  */
 int spfy_vb_stem_is_synth(const char *stem)
 {
     if (!stem) return 1;
-    size_t i;
+    size_t i, digits = 0;
+
+    if (stem[0] >= '0' && stem[0] <= '9') {
+        for (i = 0; i < 5u; ++i)
+            if (stem[i] < '0' || stem[i] > '9') return 1;
+        if (stem[5] != '_') return 1;
+        return !(stem[6] >= 'A' && stem[6] <= 'Z');
+    }
+
     for (i = 0; i < 3u; ++i)
         if (stem[i] < 'a' || stem[i] > 'z') return 1;
     if (stem[3] != '_') return 1;
-    size_t digits = 0;
     for (i = 4u; stem[i] >= '0' && stem[i] <= '9'; ++i) ++digits;
     return digits < 8u;
 }

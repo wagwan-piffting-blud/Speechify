@@ -1,6 +1,7 @@
 #include "wav.h"
 #include "../../include/spfy/spfy.h"
 #include "../dsp/time_stretch.h"
+#include "../dsp/pitch_shift.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,77 @@ void spfy_wav_set_stretch(spfy_wav_writer_t *w, float factor)
     w->stretch = (factor > 0.0f) ? factor : 0.0f;
 }
 
+void spfy_wav_hold(spfy_wav_writer_t *w)
+{
+    if (w) w->hold = 1;
+}
+
+int spfy_wav_set_spans(spfy_wav_writer_t *w,
+                       const spfy_wav_span_t *spans, size_t n)
+{
+    if (!w) return SPFY_E_INVAL;
+    free(w->spans);
+    w->spans = NULL;
+    w->n_spans = 0;
+    if (!spans || n == 0) return SPFY_OK;
+    w->spans = (spfy_wav_span_t *)malloc(n * sizeof *w->spans);
+    if (!w->spans) return SPFY_E_NOMEM;
+    memcpy(w->spans, spans, n * sizeof *w->spans);
+    w->n_spans = n;
+    return SPFY_OK;
+}
+
+/* Pitch-shift then time-scale one span, appending to *acc.
+ *
+ * Order matters and matches sapi_psola_flush(): PSOLA first, WSOLA second.
+ * The other way round, the time-scale changes the period spacing the pitch
+ * shifter is about to measure, and the shift comes out wrong in proportion
+ * to the stretch. */
+static int span_process(const int16_t *in, size_t n, float psola_st, float rate,
+                        int sr, int16_t **acc, size_t *acc_n, size_t *acc_cap)
+{
+    const int16_t *cur = in;
+    size_t cur_n = n;
+    int16_t *owned = NULL;
+
+    if (psola_st != 0.0f && n) {
+        int16_t *sh = (int16_t *)malloc(n * sizeof *sh);
+        if (!sh) return SPFY_E_NOMEM;
+        if (spfy_pitch_shift_block(cur, cur_n, sh, psola_st, sr) != 0) {
+            /* A span the shifter cannot handle (too short to find a period)
+             * is passed through unshifted rather than dropped -- a gap in
+             * the audio is a far worse failure than a flat span. */
+            free(sh);
+        } else {
+            cur = sh; owned = sh;
+        }
+    }
+    if (rate > 0.0f && rate != 1.0f && cur_n) {
+        int16_t *st = NULL;
+        size_t   st_n = 0;
+        if (spfy_time_stretch_block(cur, cur_n, &st, &st_n, rate, sr) == 0
+            && st && st_n) {
+            free(owned);
+            cur = st; owned = st; cur_n = st_n;
+        } else {
+            free(st);
+        }
+    }
+
+    if (*acc_n + cur_n > *acc_cap) {
+        size_t cap = *acc_cap ? *acc_cap : 65536u;
+        while (cap < *acc_n + cur_n) cap *= 2u;
+        int16_t *nb = (int16_t *)realloc(*acc, cap * sizeof *nb);
+        if (!nb) { free(owned); return SPFY_E_NOMEM; }
+        *acc = nb;
+        *acc_cap = cap;
+    }
+    memcpy(*acc + *acc_n, cur, cur_n * sizeof *cur);
+    *acc_n += cur_n;
+    free(owned);
+    return SPFY_OK;
+}
+
 static int wav_emit(spfy_wav_writer_t *w, const int16_t *samples, size_t n)
 {
     if (w->fp) {
@@ -88,7 +160,7 @@ int spfy_wav_write(spfy_wav_writer_t *w, const int16_t *samples, size_t n)
 {
     if (!w) return SPFY_E_INVAL;
     if (n == 0) return SPFY_OK;
-    if (w->stretch > 0.0f && w->stretch != 1.0f) {
+    if (w->hold || (w->stretch > 0.0f && w->stretch != 1.0f)) {
         /* Hold the whole utterance; WSOLA needs contiguous input to find
          * its correlation peaks, so stretching per burst would seam. */
         if (w->sbuf_n + n > w->sbuf_cap) {
@@ -123,22 +195,59 @@ int spfy_wav_close(spfy_wav_writer_t *w)
 {
     if (!w) return SPFY_E_INVAL;
     if (w->sbuf && w->sbuf_n) {
-        int16_t *out = NULL;
-        size_t out_n = 0;
-        int rc = spfy_time_stretch_block(w->sbuf, w->sbuf_n, &out, &out_n,
-                                         w->stretch, (int)w->sample_rate);
+        int rc = SPFY_OK;
+
+        /* Per-span pitch/rate first, so `stretch` (the whole-utterance
+         * SPFY_RATE knob) still means what it always meant: a scale on the
+         * finished utterance, spans included. */
+        if (w->n_spans) {
+            int16_t *acc = NULL;
+            size_t   acc_n = 0, acc_cap = 0;
+            for (size_t i = 0; i < w->n_spans && rc == SPFY_OK; ++i) {
+                size_t a = w->spans[i].start;
+                size_t b = (i + 1 < w->n_spans) ? w->spans[i + 1].start
+                                                : w->sbuf_n;
+                if (a > w->sbuf_n) a = w->sbuf_n;
+                if (b > w->sbuf_n) b = w->sbuf_n;
+                if (b <= a) continue;
+                rc = span_process(w->sbuf + a, b - a,
+                                  w->spans[i].psola_st, w->spans[i].rate,
+                                  (int)w->sample_rate,
+                                  &acc, &acc_n, &acc_cap);
+            }
+            if (rc == SPFY_OK && acc) {
+                free(w->sbuf);
+                w->sbuf = acc;
+                w->sbuf_n = acc_n;
+                w->sbuf_cap = acc_cap;
+            } else {
+                free(acc);
+            }
+        }
+
         w->n_samples_written = 0;
-        if (rc == 0 && out && out_n) {
-            rc = wav_emit(w, out, out_n);
-        } else {
+        if (rc == SPFY_OK && w->stretch > 0.0f && w->stretch != 1.0f) {
+            int16_t *out = NULL;
+            size_t out_n = 0;
+            int trc = spfy_time_stretch_block(w->sbuf, w->sbuf_n, &out, &out_n,
+                                              w->stretch, (int)w->sample_rate);
+            if (trc == 0 && out && out_n) rc = wav_emit(w, out, out_n);
+            else                          rc = wav_emit(w, w->sbuf, w->sbuf_n);
+            free(out);
+        } else if (rc == SPFY_OK) {
             rc = wav_emit(w, w->sbuf, w->sbuf_n);
         }
-        free(out);
         free(w->sbuf);
         w->sbuf = NULL;
         w->sbuf_n = w->sbuf_cap = 0;
+        free(w->spans);
+        w->spans = NULL;
+        w->n_spans = 0;
         if (rc != SPFY_OK && w->fp) { fclose(w->fp); w->fp = NULL; return rc; }
     }
+    free(w->spans);
+    w->spans = NULL;
+    w->n_spans = 0;
     if (w->fp) {
         int rc = write_header(w, w->n_samples_written);
         if (fclose(w->fp) != 0 && rc == SPFY_OK) rc = SPFY_E_IO;

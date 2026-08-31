@@ -31,7 +31,18 @@ add_library(spfy_update_core STATIC
     upd_check.c
     upd_notify.c
     upd_run.c
+    upd_voice.c
+    # Vendored miniz: the ONLY thing in this tree that can inflate a DEFLATE
+    # stream, which a voice zip needs. See third_party/miniz/README.md for
+    # why it is a dependency at all and what was rejected instead.
+    ${CMAKE_SOURCE_DIR}/third_party/miniz/miniz.c
 )
+# Third-party code, held to its own standard rather than ours: miniz is
+# pristine upstream and warns under this project's flags. Scoped to the file's
+# own target so nothing of OURS gets a free pass.
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/third_party/miniz/miniz.c
+    PROPERTIES COMPILE_OPTIONS "-w")
 target_link_libraries(spfy_update_core PUBLIC spfy_update_trigger spfy_common)
 if(WIN32)
     # shell32: Shell_NotifyIcon (the tray balloon) + ShellExecute (open the

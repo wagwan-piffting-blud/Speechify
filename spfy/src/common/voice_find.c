@@ -197,7 +197,12 @@ static int win_documents_dir(char *buf, size_t buf_n)
     {
         FARPROC p = GetProcAddress(h, "SHGetFolderPathA");
         if (p) {
-            *(FARPROC *)&fn = p;
+            /* memcpy, not *(FARPROC *)&fn: writing through a pointer of a
+             * different function type breaks strict aliasing and gcc warns at
+             * -Wstrict-aliasing in the x64 build. memcpy is the portable way
+             * to convert a GetProcAddress result and compiles to the same
+             * register move. */
+            memcpy(&fn, &p, sizeof fn);
             /* 0x0005 = CSIDL_PERSONAL, 0 = SHGFP_TYPE_CURRENT: the path in
              * effect now, not the default one. */
             if (fn(NULL, 0x0005, NULL, 0, path) == S_OK && path[0]) {

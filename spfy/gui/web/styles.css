@@ -1,0 +1,537 @@
+/* spfy GUI - visual system.
+ *
+ * DIRECTION: an instrument panel for a speech machine, not a web page. The
+ * subject is a reproduction of a 2003 SpeechWorks concatenative engine, and
+ * its vernacular is notation - `\![.1hE.0lo]`, ARPAbet, ToBI accents, sample
+ * counts. So the personality lives in TYPOGRAPHIC TREATMENT (monospace for
+ * everything the engine reads or writes, wide-tracked micro-labels the way a
+ * hardware panel legends its controls) rather than in an exotic display face.
+ *
+ * ⚠ That is a constraint, not only a preference: tauri.conf.json sets
+ * `default-src 'self'`, this is an offline desktop app, and there is no web
+ * font to load. System stacks are all there is, so the type has to earn its
+ * character some other way.
+ *
+ * COLOUR: cool blue-graphite structure with exactly ONE accent - a broadcast
+ * amber that means sound. It appears on the Speak button, on the tally dot
+ * while audio plays, and in the level-meter mark beside the wordmark. Nowhere
+ * else. Focus is a separate cool blue on purpose: "focused" and "playing" must
+ * never look like the same state.
+ *
+ * RULES THIS SHEET HOLDS ITSELF TO, all accessibility rather than taste:
+ *   * Never remove a focus ring without putting a louder one back.
+ *   * Never signal state with colour alone - the tally dot is aria-hidden and
+ *     duplicates text that already says it.
+ *   * Respect prefers-color-scheme, prefers-reduced-motion, prefers-contrast.
+ *   * Body text stays at the user's font size; no rem-shrinking the UI.
+ *   * Selectors stay single-class where possible. Mixing `.panel` with
+ *     `section.panel` is how paddings start cancelling each other out.
+ */
+
+:root {
+    --paper:   #eef1f5;   /* cool paper, faintly blue - deliberately not cream */
+    --panel:   #ffffff;
+    --sunk:    #e2e7ee;   /* inset tracks, the tab strip */
+    --ink:     #16202b;   /* deep blue-graphite */
+    --muted:   #51637a;
+    --rule:    #c3ccd8;
+    /* ⚠ TWO ambers on light, and it is not indecision. A single value cannot
+     * do both jobs: an amber dark enough for an 8px tally dot to be visible
+     * on near-white paper is a muddy brown when a button is filled with it,
+     * and an amber bright enough to read as SIGNAL fails contrast as a small
+     * mark. So --signal is the dark mark, and the button is the bright fill
+     * with dark text on it - which is also how a real tally lamp looks.
+     * Dark mode needs only one, because a bright amber works for both there. */
+    --signal:  #a05e00;   /* tally dot, level meter, chip hover border */
+    --signal-bg: #e0900f; /* button fill  */
+    --signal-fg: #201509; /* on that fill - 6.0:1, not white-on-brown */
+    --focus:   #1c5fa8;
+    --notice-bg:  #fdf4e0;
+    --notice-rule:#c99a3d;
+    --alert-bg:   #fdeceb;
+    --alert-rule: #b3261e;
+    --alert-fg:   #8c1d18;
+
+    --ui: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI",
+          sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas,
+            "SF Mono", "Liberation Mono", monospace;
+
+    --r: 7px;
+
+    /* Tells the platform to render NATIVE widgets to match - the <select>
+     * dropdown list, both scrollbars, the textarea caret and the spellcheck
+     * underline. Without it a dark UI still drops a white dropdown and white
+     * scrollbars on top of itself, which no amount of CSS can reach. */
+    color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        color-scheme: dark;
+        --paper:   #0e141b;
+        --panel:   #161f29;
+        --sunk:    #0a0f15;
+        --ink:     #e4ebf2;
+        --muted:   #93a6b9;
+        --rule:    #2c3a49;
+        --signal:  #f0a832;
+        --signal-bg: #f0a832;
+        --signal-fg: #1a1206;
+        --focus:   #6aa9f0;
+        --notice-bg:  #2c2412;
+        --notice-rule:#a8802c;
+        --alert-bg:   #381d1b;
+        --alert-rule: #d9695f;
+        --alert-fg:   #ffb4ab;
+    }
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--ui);
+    font-size: 15px;
+    line-height: 1.5;
+}
+
+/* Off-screen until focused: the first Tab of a keyboard user lands here. */
+.skip {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 20;
+    background: var(--focus);
+    color: #fff;
+    padding: 0.6rem 1rem;
+    border-radius: 0 0 var(--r) 0;
+}
+.skip:focus { left: 0; }
+
+/* Wide-tracked panel legends. Used on exactly three things - the voice
+ * label, the palette heading, and the group legends inside it - so it stays a
+ * device and does not become the house style. */
+.micro {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Top bar                                                             */
+/* ------------------------------------------------------------------ */
+
+.topbar {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    padding: 0.7rem 1.1rem;
+    background: var(--panel);
+    border-bottom: 1px solid var(--rule);
+}
+
+.wordmark {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    white-space: nowrap;
+}
+
+.voicebar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1 1 20rem;
+}
+.voicebar .micro { flex: 0 0 auto; }
+
+/* ------------------------------------------------------------------ */
+/* Controls                                                            */
+/* ------------------------------------------------------------------ */
+
+select, textarea, button {
+    font: inherit;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 0.4rem 0.6rem;
+}
+
+select { flex: 1 1 auto; min-width: 10rem; }
+
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:active:not(:disabled) { transform: translateY(1px); }
+
+.primary {
+    background: var(--signal-bg);
+    color: var(--signal-fg);
+    border-color: var(--signal-bg);
+    font-weight: 600;
+    padding-inline: 1.1rem;
+}
+.primary:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--signal-bg); }
+
+.ghost { background: transparent; }
+
+/* Disabled is carried by opacity AND cursor AND the disabled attribute
+ * itself - which is what a screen reader actually reports. Colour alone would
+ * leave a low-vision user guessing. */
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* Never `outline: none`. This is louder than the default, not quieter. */
+:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Main                                                                */
+/* ------------------------------------------------------------------ */
+
+main {
+    flex: 1 1 auto;
+    min-height: 0;              /* lets the editor actually shrink */
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    padding: 0.9rem 1.1rem 0;
+    overflow: auto;
+}
+
+.notice, .alert {
+    border-radius: var(--r);
+    padding: 0.7rem 0.95rem;
+    margin: 0;
+}
+.notice { background: var(--notice-bg); border: 1px solid var(--notice-rule); }
+.notice p { margin: 0.35rem 0; }
+.alert {
+    background: var(--alert-bg);
+    border: 1px solid var(--alert-rule);
+    color: var(--alert-fg);
+    white-space: pre-wrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* The insert palette                                                  */
+/* ------------------------------------------------------------------ */
+
+.palette {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    flex: 0 0 auto;
+}
+
+.palette-h { margin: 0; }
+
+.disclosure {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.1rem 0.2rem 0.1rem 0;
+    background: none;
+    border: 0;
+    border-radius: 4px;
+    color: var(--muted);
+}
+.disclosure:hover { color: var(--ink); border-color: transparent; }
+
+/* A CSS triangle, so the indicator needs no glyph, no icon font and no SVG -
+ * all three of which would be extra bytes for six pixels of chevron. */
+.disclosure::before {
+    content: "";
+    width: 0;
+    height: 0;
+    border-left: 5px solid currentColor;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    transform: rotate(90deg);
+    transition: transform 120ms ease;
+}
+.disclosure[aria-expanded="false"]::before { transform: rotate(0deg); }
+
+#palette-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+/* Same trap as .panel[hidden] - an author `display` outranks the UA sheet's
+ * `[hidden] { display: none }`, so without this the collapse does nothing. */
+#palette-body[hidden] { display: none; }
+
+/* A segmented control on an inset track, not the usual underlined tab row.
+ * Reads as a piece of hardware, and it makes the selected segment look
+ * physically continuous with the panel it opens. */
+/* align-self keeps the track shrink-wrapped to its segments. Stretched to the
+ * full window it stops reading as a segmented control and starts reading as a
+ * site nav bar. */
+.tabs {
+    display: flex;
+    align-self: flex-start;
+    max-width: 100%;
+    gap: 2px;
+    padding: 3px;
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    overflow-x: auto;
+}
+
+.tab {
+    flex: 0 0 auto;
+    border: 1px solid transparent;
+    background: transparent;
+    border-radius: calc(var(--r) - 2px);
+    padding: 0.3rem 0.7rem;
+    font-size: 13px;
+    color: var(--muted);
+    white-space: nowrap;
+}
+.tab:hover:not([aria-selected="true"]) { color: var(--ink); border-color: transparent; }
+.tab[aria-selected="true"] {
+    background: var(--panel);
+    border-color: var(--rule);
+    color: var(--ink);
+    font-weight: 600;
+}
+/* ⚠ SPECIFICITY, not decoration. `button:hover:not(:disabled)` above scores
+ * 0-2-1 and `.tab[aria-selected="true"]` only 0-2-0, so hovering the SELECTED
+ * tab would repaint its border with the generic hover colour and the segment
+ * would flicker out of the track. Same reason `.primary:hover:not(:disabled)`
+ * and `.chip:hover:not(:disabled)` exist rather than plain `.primary:hover`. */
+.tab[aria-selected="true"]:hover { border-color: var(--rule); }
+
+/* ⚠ MUST COME BEFORE `.panel`, and must exist at all. The `hidden` attribute
+ * only works because the UA sheet says `[hidden] { display: none }` -- and any
+ * `display` declared in an author rule OUTRANKS it. Without this line every
+ * tab panel renders simultaneously, the tab strip does nothing, and the editor
+ * is pushed off the bottom of the window. */
+.panel[hidden] { display: none; }
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 0.75rem 0.9rem;
+    max-height: 16.5rem;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+}
+
+.group { display: flex; flex-direction: column; gap: 0.4rem; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+
+.chip {
+    padding: 0.25rem 0.6rem;
+    font-size: 13px;
+    background: var(--paper);
+    border-radius: calc(var(--r) - 2px);
+}
+.chip:hover:not(:disabled) { border-color: var(--signal); }
+
+/* --- THE SIGNATURE ------------------------------------------------- *
+ * The phone grid shows the SPR character large and its ARPAbet name small
+ * underneath. That is the inversion: every other TTS front end labels a
+ * phoneme by its ARPAbet name. Here the SPR char is primary because it is
+ * what you actually TYPE inside `\![...]`, and this alphabet is specific
+ * enough to this engine that showing it is the whole point.
+ *
+ * ⚠ CASE IS SEMANTIC. `a` is aa (father) and `A` is ae (cat); `i` is iy and
+ * `I` is ih. Nothing in this block may text-transform, small-caps, or
+ * otherwise normalise the character, and the face has to be the monospace
+ * one so the two cases stay visually distinct.                         */
+/* 3rem, not 3.4: at a typical window that is the difference between the 43
+ * phones taking four rows and taking six, and six does not fit the panel
+ * without clipping a row of chips in half - which reads as broken rather than
+ * as scrollable. */
+.chips-phones {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(3rem, 1fr));
+    gap: 0.3rem;
+}
+
+.phone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1px;
+    padding: 0.3rem 0.2rem;
+    line-height: 1.15;
+}
+
+.phone-spr {
+    font-family: var(--mono);
+    font-size: 16px;
+    font-weight: 600;
+    text-transform: none;
+}
+
+/* Chips whose LABEL is itself notation - the `.0` / `.1` / `.2` stress
+ * markers. Same face as the phone characters, because they are typed into the
+ * same bracket. */
+.chip-mono {
+    font-family: var(--mono);
+    font-weight: 600;
+}
+
+.phone-arpa {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    text-transform: none;
+}
+
+.phone:hover .phone-arpa { color: var(--ink); }
+
+/* ------------------------------------------------------------------ */
+/* Editor                                                              */
+/* ------------------------------------------------------------------ */
+
+.editor {
+    flex: 1 1 auto;
+    min-height: 8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding-bottom: 0.9rem;
+}
+
+#text-input {
+    flex: 1 1 auto;
+    width: 100%;
+    resize: none;
+    padding: 0.7rem 0.85rem;
+    /* SSML and `\![...]` escapes are markup. A monospace face is what makes
+     * an unbalanced bracket findable by eye. */
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.65;
+    tab-size: 4;
+}
+
+.help { color: var(--muted); font-size: 12px; margin: 0; }
+
+/* ------------------------------------------------------------------ */
+/* Transport                                                           */
+/* ------------------------------------------------------------------ */
+
+.transport {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+    padding: 0.65rem 1.1rem;
+    background: var(--panel);
+    border-top: 1px solid var(--rule);
+}
+
+.status {
+    flex: 1 1 12rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    color: var(--muted);
+    font-size: 13px;
+    /* Reserve the line so an announcement cannot reflow the buttons out from
+     * under a pointer already on its way to one. */
+    min-height: 1.4rem;
+}
+
+/* Lit only while audio is playing. aria-hidden in the markup: it is a second,
+ * redundant channel for something the status text already states. */
+.tally {
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--rule);
+}
+.tally.on {
+    background: var(--signal);
+    animation: pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+}
+
+.controls { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+/* ------------------------------------------------------------------ */
+
+code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    background: color-mix(in srgb, var(--ink) 8%, transparent);
+    padding: 0.05em 0.3em;
+    border-radius: 4px;
+    /* A voice directory is a long absolute path; wrap it rather than push the
+     * window into a horizontal scrollbar. */
+    overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ */
+/* Get-voices dialog                                                   */
+/* ------------------------------------------------------------------ */
+
+dialog {
+    background: var(--panel);
+    color: var(--ink);
+    border: 1px solid var(--rule);
+    border-radius: var(--r);
+    padding: 1.1rem 1.25rem;
+    min-width: min(30rem, 90vw);
+    max-height: 80vh;
+}
+dialog::backdrop { background: rgb(0 0 0 / 0.45); }
+dialog h2 { margin: 0 0 0.35rem; font-size: 1.05rem; }
+
+.getrow {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.55rem 0;
+    border-top: 1px solid var(--rule);
+}
+.getrow > div:first-child { flex: 1 1 auto; min-width: 0; }
+.getrow .help { margin-top: 0.1rem; overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    button:active:not(:disabled) { transform: none; }
+}
+
+@media (prefers-contrast: more) {
+    :root { --muted: var(--ink); --rule: var(--ink); }
+    .chip, .tab { border-color: var(--ink); }
+}
+
+/* Narrow window: the palette is the first thing that should give up room. */
+@media (max-height: 620px) {
+    .panel { max-height: 9rem; }
+}

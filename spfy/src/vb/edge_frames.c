@@ -508,7 +508,11 @@ int spfy_vb_frames_build_ex(const spfy_vin_t *vin, const spfy_vdb_t *vdb,
         free(tctx); free(tpcm); free(tctxpcm);
     }   /* omp parallel */
     if (!par_ok) { rc = SPFY_E_NOMEM; goto fail; }
-    out->n_missing += n_miss_par;
+    /* n_miss_par is a size_t reduction counter but is bounded by the unit
+     * count, so it cannot approach 2^32; n_missing is diagnostic only and
+     * never reaches a container. The cast is explicit because size_t widens
+     * to 64 bits in the x64 container-tool build (build64_vb.bat). */
+    out->n_missing += (uint32_t)n_miss_par;
 
     /* Normalise the spectral block to zero mean / unit variance.
      *

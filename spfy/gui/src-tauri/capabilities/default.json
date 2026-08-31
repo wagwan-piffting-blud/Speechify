@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the spfy GUI window is allowed to do. Deliberately small: the three engine commands are plain #[tauri::command]s and need no capability, so the only plugin permission here is the Save-as dialog.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-save"
+  ]
+}

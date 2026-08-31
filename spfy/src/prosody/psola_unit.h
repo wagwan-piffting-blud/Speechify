@@ -1,4 +1,4 @@
-/* Per-unit, pre-join TD-PSOLA pitch warp driven by supplied pitch marks. */
+/* Per-unit, pre-join TD and LP-PSOLA pitch warp driven by supplied pitch marks. LP is the preferred method. */
 
 #ifndef SPFY_PROSODY_PSOLA_UNIT_H
 #define SPFY_PROSODY_PSOLA_UNIT_H

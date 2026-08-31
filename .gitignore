@@ -33,7 +33,8 @@ diagnostics/
 !reveng/voice_cloning/rvc_input_flashsr/
 !reveng/voice_cloning/rvc_input_flashsr/*.wav
 CMakeCache.txt
-**/RESUME*.md
+**/*RESUME*.md
+**/*HANDOFF*.md
 !.github
 installer/dist/
 !spfy/data/
@@ -54,3 +55,26 @@ generate_*archive.bat
 !spfy/test/oracle/engine_ref/.engine_key
 !spfy/test/oracle/engine_ref/**/*.wav
 !spfy/test/oracle/engine_ref/**/.engine_key
+
+# --- spfy GUI (Tauri) ---
+# Build output only. The sources -- src-tauri/{Cargo.toml,Cargo.lock,build.rs,
+# src,capabilities,tauri.conf.json}, web/ and package{,-lock}.json -- ARE
+# tracked.
+#
+# Cargo.lock IS tracked, deliberately: this is a BINARY crate, not a library,
+# and the Rust convention for an application is to commit the lock so a build
+# six months from now resolves the same ~400 crates. gen/ is not -- tauri-build
+# regenerates it from capabilities/ on every build.
+spfy/gui/node_modules/
+spfy/gui/src-tauri/target/
+spfy/gui/src-tauri/gen/
+
+# ⚠ The root `*.json*` rule on line 14 swallows tauri.conf.json,
+# capabilities/default.json and package.json -- every one of which is a SOURCE
+# file this app does not build without. Caught by `git status` showing the .rs
+# and .html but silently not the .json. Re-include them explicitly.
+!spfy/gui/package.json
+!spfy/gui/package-lock.json
+!spfy/gui/src-tauri/tauri.conf.json
+!spfy/gui/src-tauri/capabilities/
+!spfy/gui/src-tauri/capabilities/*.json

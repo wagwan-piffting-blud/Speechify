@@ -1,4 +1,4 @@
-/* Per-unit TD-PSOLA pitch warp. */
+/* Per-unit TD and LP-PSOLA pitch warp. LP is the preferred method. */
 
 #include "psola_unit.h"
 #include "env.h"
