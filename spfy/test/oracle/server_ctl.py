@@ -29,7 +29,13 @@ import sys
 import time
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# ⚠ parents[3], not parents[1]. This file is spfy/test/oracle/server_ctl.py,
+# so parents[1] is spfy/test -- which has no config/ and no en-US/, making
+# find_voice_language() return None for every voice and use() raise
+# "no voice 'tom'". It stayed latent because render_engine() only repoints
+# the server when a render is actually NEEDED, and the committed engine_ref
+# cache means that never happened until a NEW corpus was added.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CONFIG       = PROJECT_ROOT / "config" / "SWIttsConfig.xml"
 SERVER_EXE   = PROJECT_ROOT / "bin" / "Speechify.exe"
 SERVER_CWD   = PROJECT_ROOT / "bin"

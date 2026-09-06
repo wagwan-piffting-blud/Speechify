@@ -58,6 +58,15 @@ void spfy_dll_emu_write(uint32_t guest_va, const void *host_src, uint32_t n) {
     mem_write(guest_va, host_src, n);
 }
 
+int spfy_dll_emu_region(int i, uint32_t *va, uint32_t *size,
+                        const char **name) {
+    if (i < 0 || i >= MEM.nreg) return 0;
+    if (va)   *va   = MEM.regions[i].va;
+    if (size) *size = MEM.regions[i].size;
+    if (name) *name = MEM.regions[i].name;
+    return 1;
+}
+
 int spfy_dll_emu_boot(const uint8_t *dll_bytes, uint32_t dll_len) {
     if (g_booted && dll_bytes == g_booted_img) return 0;
     if (!dll_bytes || dll_len < 0x40) {

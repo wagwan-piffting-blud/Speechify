@@ -1,5 +1,11 @@
 # Speechify/spfy Changelog
 
+## 2026-09-06
+
+- **spfy is now BYTE-IDENTICAL with \!r[p|d]N rate tags.** spfy had a "missing feature", where the `\!r` rate tags were not being applied to the synthesized speech correctly, leading to the output being different from the original Speechify engine. This has been fixed, and spfy now produces byte-identical output with the original engine when using `\!r` rate tags. This means that using the rate tags like `\!rp120 Tom will say this sentence twenty percent faster than normal.` or `\!rd33 Tom will say this really slowly.` will now produce the same hashed output as the original Speechify engine when either `\!rpN` or `\!rdN` is used with the integer N specified (a percentage greater than zero for rp, and between 33-300 for rd, per the 2003 Speechify User's Guide).
+
+---
+
 ## 2026-08-31
 
 - **spfy now has a GUI!** The GUI is a simple wrapper around the CLI, and is intended to make it easier for users to synthesize speech without having to use the command line. It is built using [Tauri](https://tauri.app/) and is available for Windows, macOS, and Linux. The GUI can be launched by running `spfy_gui` from the command line, or by double-clicking the executable in the installation directory.

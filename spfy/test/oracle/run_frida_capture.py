@@ -72,6 +72,17 @@ TARGET = "Speechify.exe"
 # KEEP (function entries, low-frequency or per-utterance):
 #   prsl_lookup, wsola_buffer (v2), fe_token (v2), ulaw_lut
 HOOK_JS = {
+    # 2026-09-04 \!rp byte-parity: the engine's per-span output cursor
+    # (this+0x35f4) on the TIME-SCALED path, which no outside model can
+    # infer -- three different fitted per-span constants each produced a
+    # plausible but wrong duration curve.
+    # 2026-09-04 `?d`: the FE-supplied per-halfphone duration as USel reads
+    # it, out of the target-slice feature vectors. The tagged text only ever
+    # prints `?d`, and the fraction behind it is what the trailing pad
+    # target is built from.
+    "slice_dur":    HOOK_DIR / "slice_dur_hook.js",
+    "wsola_cursor": HOOK_DIR / "wsola_cursor_hook.js",
+    "wsola_frame":  HOOK_DIR / "wsola_frame_hook.js",
     "prsl_lookup":  HOOK_DIR / "prsl_lookup_hook.js",
     "prsl_slot":    HOOK_DIR / "prsl_slot_hook.js",      # M3.4c per-slot preselect
     "inner_scorer": HOOK_DIR / "inner_scorer_hook.js",   # M3.4e per-slot SP target
@@ -149,6 +160,10 @@ HOOK_JS["master"] = MASTER_CHILDREN  # type: ignore[assignment]
 # splits batches into per-line records; events arriving at the message
 # handler still carry the batch type. ready events are silently dropped.
 MASTER_TYPE_TO_HOOK: dict[str, str] = {
+    "wsola_frame_batch":        "wsola_frame",
+    "wsola_frame":              "wsola_frame",
+    "wsola_cursor_batch":       "wsola_cursor",
+    "wsola_cursor":             "wsola_cursor",
     "wsola_in_batch":           "wsola_buffer",
     "wsola_in":                 "wsola_buffer",
     "prsl_slot_batch":          "prsl_slot",
@@ -399,7 +414,20 @@ class HookSession:
         self.events: list[dict] = []
         self._lock = threading.Lock()
         self._ready = threading.Event()
-        self.session = frida.attach(TARGET)
+        # ⚠ Attach by NAME can fail on a process frida can still attach to by
+        # PID: enumerate_processes() returned 294 entries with no
+        # "Speechify.exe" among them while attach(pid) worked immediately.
+        # Fall back rather than telling the caller the server is not running
+        # when netstat and tasklist both say it is.
+        try:
+            self.session = frida.attach(TARGET)
+        except frida.ProcessNotFoundError:
+            import server_ctl
+            pids = server_ctl.server_pids()
+            if not pids:
+                raise
+            print(f"  (attach by name failed; using pid {pids[0]})")
+            self.session = frida.attach(pids[0])
         spec = HOOK_JS[hook_name]
         if isinstance(spec, list):
             js = build_master_script(spec)

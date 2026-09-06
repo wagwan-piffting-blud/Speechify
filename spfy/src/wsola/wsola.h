@@ -185,7 +185,68 @@ typedef struct {
     float    win_in [SPFY_WSOLA_OLA_SAMPLES_MAX];
     float    win_out[SPFY_WSOLA_OLA_SAMPLES_MAX];
     int      engine_mode;
+
+    /* ---- Time-scaling (\!rp / \!rd), SWIttsWsola this+0x2c / +0x35e4 ----
+     *
+     * `tscale_on` mirrors this+0x2c, and OFF IS THE ENGINE'S DEFAULT: with
+     * no rate control in the utterance the engine plays every selected unit
+     * at its NATURAL length and never looks at the duration targets at all.
+     * SWIttsWsolaConcat arms it as
+     *
+     *     this+0x2c = voiceCfg_flag && any_rate_event
+     *
+     * where `any_rate_event` is set in FUN_08ee5ef0 by ANY "rate" event on
+     * the Control stream. A "volume" event on the same stream does not arm
+     * it. That asymmetry is observable: \!vp100 renders byte-identical to no
+     * tag at all, while \!rp100 -- and \!rpr, which the User's Guide p.82
+     * documents as a pure no-op reset -- do not.
+     *
+     * `unit_scale` is this+0x35e4, set per unit by spfy_wsola_set_unit_scale
+     * before that unit's push. */
+    int      tscale_on;
+    float    unit_scale;
+    int      frame_trace;   /* SPFY_WSOLA_FRAME_TRACE */
+    size_t   span_limit;    /* this+0x35c4 for the next push; 0 = buf_n */
+
+    /* Per-unit plan for the NEXT push: the 0x30-stride unit array WSOLA
+     * builds for one span. Caller-owned, valid for that push only. When
+     * present it supersedes `unit_scale`, because the engine switches scale
+     * at every internal unit boundary rather than applying one ratio to the
+     * whole span. */
+    const struct spfy_wsola_unit *plan;
+    size_t   plan_n;
 } spfy_wsola_streamer_t;
+
+/* One unit of a span's plan. Both in MILLISECONDS, because that is the
+ * domain the engine accumulates in: FUN_08ee1640 keeps a float ms total in
+ * this+0x35e0 and derives the unit's output end as
+ *
+ *     out_end = (int)(this+0x1c * acc_ms)      0x1c = samples per ms
+ *
+ * Carrying samples instead loses that truncation, and out_end is compared
+ * against the output cursor every frame -- an off-by-one there changes the
+ * frame COUNT, not just a rounding.
+ *
+ *   nat_ms  natural duration as decoded
+ *   tgt_ms  what it must come out as -- already carrying the rate factor and
+ *           the plosive pass-through (see spfy_wsola_unit_scale)
+ *
+ * scale for the unit is nat_ms / tgt_ms, which is FUN_08ee1640's ratio. */
+typedef struct spfy_wsola_unit {
+    uint32_t nat_ms;
+    float    tgt_ms;
+    /* Eligible for FUN_08ee1640's pass-through guard: a stop or affricate
+     * that is not "pau" (spfy_wsola_label_is_plosive).
+     *
+     * ⚠ The GUARD ITSELF is applied in the walk, not here, because it needs
+     * the length the engine actually passes FUN_08ee1640 -- which for unit 0
+     * of a joined span is REDUCED by the input the join consumed. Both the
+     * `target >= natural` test and the `out_acc += natural` accumulation use
+     * that reduced value. Baking the guard in against the full natural made
+     * a passed-through unit's out_end too large and emitted an extra frame
+     * (num_rp50 spans 9 and 12: engine 160/80 samples, ours 240/160). */
+    uint8_t  plosive;
+} spfy_wsola_unit_t;
 
 void spfy_wsola_init (spfy_wsola_streamer_t *s, spfy_wav_writer_t *wav);
 
@@ -262,6 +323,66 @@ int  spfy_wsola_push_unit_psola(spfy_wsola_streamer_t *s,
 int  spfy_wsola_push_engine(spfy_wsola_streamer_t *s,
                             const int16_t *buf, size_t buf_n,
                             size_t pre, size_t content_n);
+
+/* this+0x35c4 for the NEXT push: the span's input LIMIT, which is the
+ * decoded length CLAMPED to what the source recording holds -- not the
+ * buffer length, which stays full and zero-padded past it. FUN_08ee36e0's
+ * bail-out `0x35c4 < W + hop + ideal` tests this, so a span near the end of
+ * a recording stops crossfading earlier than the buffer alone would say.
+ * 0 = fall back to the buffer length. Consumed by the next push. */
+void spfy_wsola_set_span_limit(spfy_wsola_streamer_t *s, size_t limit);
+
+/* Arm or disarm time-scaling for the whole utterance (this+0x2c). Call once,
+ * before the first push, with nonzero iff the utterance carries any \!rp or
+ * \!rd. Leaving it off reproduces the engine's default-rate rendering
+ * exactly, which is why every existing trace and parity capture is
+ * unaffected by this feature. */
+void spfy_wsola_set_time_scale(spfy_wsola_streamer_t *s, int on);
+
+/* Set the scale for the NEXT push (this+0x35e4). >1 consumes input faster
+ * than it emits, so the unit comes out SHORTER. 1.0f passes through.
+ *
+ * This is the SPAN-AGGREGATE fallback, used when no plan is set. Prefer
+ * spfy_wsola_set_unit_plan: one ratio for a whole span drags a unit that
+ * should not move at all (scale 1.0) off its natural length whenever it
+ * shares a run with one that does -- which is exactly what \!rp100 exposes,
+ * since there only the pauses are meant to change. */
+void spfy_wsola_set_unit_scale(spfy_wsola_streamer_t *s, float scale);
+
+/* Per-unit plan for the NEXT push. `units` stays caller-owned and must
+ * outlive the push. Pass NULL (or n == 0) to fall back to unit_scale.
+ *
+ * The engine's frame loop walks these itself: FUN_08ee33f0 advances
+ * `this+0x35bc` as soon as the output cursor reaches the current unit's
+ * out_end (`this+0x35dc`), re-runs FUN_08ee1640 for the new unit, and
+ * carries a fresh in_base/out_base pair. Both bases are per-SPAN --
+ * FUN_08ee2960 zeroes 0x35b4 / 0x35e0 / 0x35d8 on every span load -- which
+ * is why one push can carry the whole walk. */
+void spfy_wsola_set_unit_plan(spfy_wsola_streamer_t *s,
+                              const spfy_wsola_unit_t *units, size_t n);
+
+/* FUN_08ee15a0: true for a stop or affricate. The engine tests the phone
+ * label's FIRST CHARACTER against `p d g b t k c j` and then excludes the
+ * three that start with one of those letters but are not plosives: "pau",
+ * "dh", "th". */
+int spfy_wsola_label_is_plosive(const char *label);
+
+/* FUN_08ee1640's guard, verbatim: the scale that takes a unit of
+ * `natural_ms` to `target_ms`.
+ *
+ *   - Returns 1.0f (pass through at natural length) when the unit would be
+ *     STRETCHED (target >= natural) and it is a plosive that is not "pau".
+ *     Lengthening a stop burst is what makes a time-scaled voice sound
+ *     smeared, and the engine simply refuses to do it. Compressing one is
+ *     allowed, so the guard is one-sided.
+ *   - "pau" is excluded from the guard twice over (once inside
+ *     spfy_wsola_label_is_plosive, once here), so pauses ALWAYS scale --
+ *     the User's Guide p.82 "rate changes affect the duration of any pauses
+ *     in the output, including pauses specified explicitly with a \!p tag".
+ *
+ * `label` may be NULL, which is treated as "not a plosive". */
+float spfy_wsola_unit_scale(const char *label,
+                            uint32_t natural_ms, float target_ms);
 
 /* Emit any held tail samples and finalise. Required before WAV close.
  * After this call the streamer state is reset to "no tail".

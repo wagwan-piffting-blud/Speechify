@@ -501,6 +501,18 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     long site_base_rate = 0;
     ISpTTSEngineSite_GetRate(pOutputSite, &site_base_rate);
 
+    /* ...and the baseline volume set via ISpVoice::SetVolume(). SAPI does NOT
+     * apply this downstream of the engine -- measured: the host volume at 100
+     * and at 30 produced byte-identical output, while `<volume level="30">`
+     * through SPVSTATE.Volume on the same harness gave exactly 0.30x. So the
+     * volume slider in every SAPI host was inert until this call existed.
+     * Multiplied with the per-fragment state below, per the DDK: the two are
+     * independent controls, not alternatives. */
+    USHORT site_base_vol = 100;
+    if (FAILED(ISpTTSEngineSite_GetVolume(pOutputSite, &site_base_vol)))
+        site_base_vol = 100;
+    if (site_base_vol > 100) site_base_vol = 100;
+
     /* Diagnostic: when SPFY_SAPI_DEBUG is set, log Speak entry context +
      * GetEventInterest bitmask + each fragment we receive to
      * _sapi_dbg.log in the TEMP directory. */
@@ -581,7 +593,8 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
 
         ULONG vol = f->State.Volume;
         if (vol > 100u) vol = 100u;
-        sink_ctx.volume_gain = (float)vol / 100.0f;
+        sink_ctx.volume_gain = (float)vol / 100.0f
+                             * (float)site_base_vol / 100.0f;
 
         /* Per-fragment pitch - SPVSTATE.PitchAdj.MiddleAdj is the SAPI
          * convention "approximately one semitone per unit", range [-10,

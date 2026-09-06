@@ -41,6 +41,14 @@ function safeReadU32(addr_u32) {
     try { return ptr(addr_u32).readU32(); } catch (e) { return null; }
 }
 
+/* Same validation, float32. FUN_08ee6010 copies unit+0x10 straight into the
+ * WSOLA unit's +0x18 as a FLOAT (`puVar6[6] = piVar8[4]`), so reading it as
+ * a u32 gives the bit pattern, not the duration. */
+function safeReadF32(addr_u32) {
+    if (!isReadable(addr_u32, 4)) return null;
+    try { return ptr(addr_u32).readFloat(); } catch (e) { return null; }
+}
+
 var BATCH_N = 32;
 var TOTAL_CAP = 4096;
 var stats = { utts: 0, sent: 0, dropped: 0 };
@@ -76,10 +84,27 @@ Interceptor.attach(ADDR_WSOLA_CONCAT, {
         var units = [];
         for (var i = 0; i < count; ++i) {
             var b = aptr.add(i * 0x18);
+            /* +0x0c / +0x10 / +0x14 are DURATION ground truth, read off
+             * FUN_08ee6010's own copies into the 0x30-stride unit it builds:
+             *
+             *     puVar6[2] = piVar8[3]    unit+0x08 <- src+0x0c  natural ms
+             *     puVar6[6] = piVar8[4]    unit+0x18 <- src+0x10  target (f32)
+             *     piVar8[5] = 1            src+0x14  set when label has "pau"
+             *
+             * This hook sits at SWIttsWsolaConcat ENTRY, which is before
+             * FUN_08ee2960 rewrites unit+0x18 by the rate factor -- so `tgt`
+             * here is the duration model's PRE-RATE target, which is exactly
+             * the number the \!rp port needs for pauses.
+             *
+             * All three are inside the count*0x18 span already validated
+             * above, so they add no new reach. */
             units.push({
                 uid: safeReadU32(b.toUInt32()),
                 lp : safeReadU32(b.add(0x04).toUInt32()),
                 dl : safeReadU32(b.add(0x08).toUInt32()),
+                nat: safeReadU32(b.add(0x0c).toUInt32()),
+                tgt: safeReadF32(b.add(0x10).toUInt32()),
+                pau: safeReadU32(b.add(0x14).toUInt32()),
             });
         }
         batch.push({ utt: stats.utts, n_units: count, units: units });

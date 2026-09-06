@@ -162,8 +162,14 @@ static int parse_pau(parser_t *p, fe_parsed_t *out, int post_word,
          * `?d` -- i.e. `?d` behaves as p50. */
         if (phrase_id >= 0 && phrase_id < FE_PARSE_MAX_PHRASES) {
             int pv = is_default ? FE_PAU_DEFAULT_P : dur;
-            if (post_in_utt) out->phrase_pau_p_after [phrase_id] = (int16_t)pv;
-            else             out->phrase_pau_p_before[phrase_id] = (int16_t)pv;
+            float pms = is_default ? FE_PAU_DEFAULT_MS : (float)dur / 2.0f;
+            if (post_in_utt) {
+                out->phrase_pau_p_after [phrase_id] = (int16_t)pv;
+                out->phrase_pau_ms_after[phrase_id] = pms;
+            } else {
+                out->phrase_pau_p_before [phrase_id] = (int16_t)pv;
+                out->phrase_pau_ms_before[phrase_id] = pms;
+            }
         }
     }
     return 1;
@@ -361,6 +367,138 @@ static int parse_word(parser_t *p, fe_parsed_t *out) {
     return 1;
 }
 
+/* ⭐⭐⭐ THE FE'S OWN DURATION CLOCK, REPRODUCED EXACTLY.
+ *
+ * SWIttsUSel's duration extractor (FUN_08e8fb20 @ 0x08E8FB20, named by the
+ * static feature-name table at PTR_DAT_08e999e8) does NOT read a "duration"
+ * feature. It reads this Segment's `end` and the PREVIOUS Segment's `end` --
+ * absolute float32 seconds on the FE utterance -- splits at the midpoint,
+ * and hands USel the two halfphone lengths:
+ *
+ *     prev = prev_segment ? feat(prev, "end") : 0.0f
+ *     end  = feat(seg, "end")
+ *     mid  = (end + prev) * 0.5f
+ *     hp1  = mid - prev
+ *     hp2  = end - mid
+ *
+ * and the FE builds those end times by keeping the running time in whole
+ * MILLISECONDS and converting with a MULTIPLY:
+ *
+ *     ms  += nominal_ms                 (exact integer, per utterance)
+ *     end  = (float)(ms * 0.001f)       rounded once
+ *
+ * ⛔ `ms / 1000.0f` IS NOT THE SAME and is wrong. 825/1000 is exact in real
+ * arithmetic and rounds to 0.82499998807907104; the engine has
+ * 0.82500004768371582, which only the multiply by 0.001f produces. That one
+ * segment is what separates the two models.
+ *
+ * ⚠ `mid` and the two differences MUST stay in double. The engine computes
+ * them on the x87 stack in 80-bit and rounds once on the store; the operands
+ * are float32 so their sum, its half, and both differences are all EXACT in
+ * double -- which makes double bit-identical to 80-bit here, but a float
+ * intermediate is not.
+ *
+ * This is where the FE's "25 ms" pause acquires up to 50 float32 ULPs of
+ * error, and why the value tracks neither the phone nor the text family:
+ * it is a difference of absolute times, so it depends only on how much time
+ * has already accumulated. Six distinct values across the 221-text corpus.
+ *
+ * Verified bit-exact against the engine: 219/219 captured `end` features
+ * (traces/fe_tree) and 10168/10168 halfphone durations over all 221 master
+ * texts (traces/slice_dur, via viz/frida_hooks/slice_dur_hook.js). */
+typedef struct {
+    int   ms;        /* running whole milliseconds, per utterance */
+    float prev_end;  /* previous segment's stored `end`, seconds */
+} fe_dur_clock_t;
+
+/* 0.001f as a double, by BIT PATTERN.
+ *
+ * ⛔ `(double)0.001f` does NOT do this. Under -fexcess-precision=standard on
+ * x87 the literal keeps extended precision, so the cast hands back double
+ * 0.001 (0.0010000000000000000208) instead of the float32 value
+ * 0.001000000047497451. Measured: end(2875 ms) then comes out 2.875 where
+ * the engine has 2.8750002384185791, and the trailing pause lands 12 ULPs
+ * BELOW 25 ms instead of 50 above -- the entire defect, from one cast. */
+static double fe_ms_to_sec_k(void) {
+    union { uint32_t u; float f; } v;
+    v.u = 0x3A83126Fu;                      /* 0.001f */
+    return (double)v.f;
+}
+
+static void fe_dur_step(fe_dur_clock_t *c, int nominal_ms,
+                        float *out_h1, float *out_h2) {
+    c->ms += nominal_ms;
+    float end = (float)((double)c->ms * fe_ms_to_sec_k());
+    double mid = ((double)end + (double)c->prev_end) * 0.5;
+    if (out_h1) *out_h1 = (float)(mid - (double)c->prev_end);
+    if (out_h2) *out_h2 = (float)((double)end - mid);
+    c->prev_end = end;
+}
+
+/* Target ms for a pau NODE from its two halfphone lengths -- the mean USel
+ * writes to wsola unit+0x10 (FUN_08e8de20: f32-rounded running add, divided
+ * by the halfphone count, times 1000.0f). */
+static float fe_pau_target_ms(float h1, float h2) {
+    float acc = (float)(0.0f + h1);
+    acc = (float)(acc + h2);
+    return (float)(acc / 2.0f) * 1000.0f;
+}
+
+/* Walk every phrase's segments in emission order and record the exact pau
+ * targets. Non-pau segments only advance the clock: under rate the engine
+ * scales them by their own natural length and never consults the duration
+ * model (see build_unit_plan in spfy_synth.c), so only pauses need a value. */
+static void fe_compute_pau_targets(fe_parsed_t *out) {
+    if (!out) return;
+    int max_pid = 0;
+    for (int i = 0; i < out->n_words; ++i) {
+        if (out->words[i].phrase_id > max_pid) max_pid = out->words[i].phrase_id;
+    }
+    if (max_pid >= FE_PARSE_MAX_PHRASES) max_pid = FE_PARSE_MAX_PHRASES - 1;
+
+    for (int pid = 0; pid <= max_pid; ++pid) {
+        fe_dur_clock_t c = { 0, 0.0f };
+        float h1 = 0.0f, h2 = 0.0f;
+
+        int pb = out->phrase_pau_p_before[pid];
+        if (pb <= 0) pb = FE_PAU_DEFAULT_P;
+        fe_dur_step(&c, pb, &h1, &h2);
+        out->phrase_pau_ms_before[pid] = fe_pau_target_ms(h1, h2);
+
+        /* A leading `\!pN` is a pau unit pair right after the pad. */
+        if (out->phrase_head_pau_ms[pid] > 0) {
+            fe_dur_step(&c, out->phrase_head_pau_ms[pid], &h1, &h2);
+            out->phrase_head_pau_target_ms[pid] = fe_pau_target_ms(h1, h2);
+        }
+
+        for (int wi = 0; wi < out->n_words; ++wi) {
+            fe_parsed_word_t *w = &out->words[wi];
+            if (w->phrase_id != pid) continue;
+            for (int ph = 0; ph < w->n_phonemes; ++ph)
+                fe_dur_step(&c, w->phonemes[ph].duration, NULL, NULL);
+            if (w->pause_after_ms != 0 && wi + 1 < out->n_words
+                && out->words[wi + 1].phrase_id == pid) {
+                fe_dur_step(&c, w->pause_after_ms, &h1, &h2);
+                w->pause_after_target_ms = fe_pau_target_ms(h1, h2);
+            }
+        }
+
+        int pa = out->phrase_pau_p_after[pid];
+        if (pa <= 0) pa = FE_PAU_DEFAULT_P;
+        fe_dur_step(&c, pa, &h1, &h2);
+        out->phrase_pau_ms_after[pid] = fe_pau_target_ms(h1, h2);
+
+        if (spfy_env("SPFY_FE_DUR_MODEL")) {
+            fprintf(stderr, "[dur_model] phrase %d: total_ms=%d "
+                    "lead=%.9g trail=%.9g (nominal p %d/%d) "
+                    "h1=%.9g h2=%.9g prev_end=%.9g\n",
+                    pid, c.ms, (double)out->phrase_pau_ms_before[pid],
+                    (double)out->phrase_pau_ms_after[pid], pb, pa,
+                    (double)h1, (double)h2, (double)c.prev_end);
+        }
+    }
+}
+
 int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
     if (!tagged || !out) return -1;
     memset(out, 0, sizeof(*out));
@@ -439,9 +577,32 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
                     int dur = 0;
                     if (!p_parse_int(p, &dur)) { p->err = 1; p->err_msg = "user pause"; goto fail; }
                     if (!p_expect_lit(p, ")")) goto fail;
-                    if (phrase_id_for_this_utt >= 0
-                        && phrase_id_for_this_utt < FE_PARSE_MAX_PHRASES)
-                        out->phrase_lead_pause_ms[phrase_id_for_this_utt] += dur;
+                    /* An INLINE pau unit hanging off the preceding word, not
+                     * injected silence and not a phrase break -- the engine
+                     * keeps `\!p` inside one utterance as a single unit pair.
+                     * With no `\!pN` in the text nothing emits `pau(u...)`,
+                     * so `pause_after_ms` stays 0 everywhere and the untagged
+                     * path is untouched. */
+                    int in_utt = (out->n_words > words_at_utt_start);
+                    if (!spfy_env("SPFY_INLINE_PAU_LEGACY") && in_utt) {
+                        out->words[out->n_words - 1].pause_after_ms = dur;
+                    } else if (phrase_id_for_this_utt >= 0
+                               && phrase_id_for_this_utt
+                                  < FE_PARSE_MAX_PHRASES) {
+                        /* Before this utterance's first word. The engine
+                         * keeps it INSIDE the utterance as a pau pair after
+                         * the leading pad, so it is head_pau, not the
+                         * inject-silence-between-phrases lead_pause. ⚠ The
+                         * test is per-UTTERANCE: keying it off the global
+                         * n_words made phrase 1's leading `\!p` look like a
+                         * trailing one on phrase 0's last word. */
+                        if (spfy_env("SPFY_INLINE_PAU_LEGACY"))
+                            out->phrase_lead_pause_ms
+                                [phrase_id_for_this_utt] += dur;
+                        else
+                            out->phrase_head_pau_ms
+                                [phrase_id_for_this_utt] += dur;
+                    }
                     continue;
                 }
                 int post = (out->n_words > 0);
@@ -464,9 +625,20 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
             }
             p->p++;
         }
+        /* A `{X pau(pN) }` block with no words at all -- what a TRAILING
+         * `\!pN` becomes. The engine renders it as its own 2-unit utterance,
+         * so it must survive into the phrase loop, which otherwise skips any
+         * phrase holding no words. */
+        if (out->n_words == words_at_utt_start
+            && phrase_id_for_this_utt >= 0
+            && phrase_id_for_this_utt < FE_PARSE_MAX_PHRASES
+            && out->phrase_pau_ms_before[phrase_id_for_this_utt] > 0.0f) {
+            out->phrase_pau_only[phrase_id_for_this_utt] = 1u;
+        }
         p_skip_ws(p);
     }
     apply_phoneme_refinement(out);
+    fe_compute_pau_targets(out);
     return 0;
 
 fail:
@@ -883,7 +1055,20 @@ int fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
     uint32_t n_phons = (uint32_t)fe_parsed_count_phonemes(parsed);
     if (n_phons == 0) return 0;
 
-    uint32_t n_slots = (n_phons + 2u) * 2u;
+    /* Each `\!pN` becomes one extra pau PHONE (two halfphone slots) inside
+     * the utterance, matching the engine's 66->68 units / 19->20 spans on the
+     * wx sentence. A pause after the LAST word is the phrase's trailing pad,
+     * which already exists below, so it is not counted here. Nothing sets
+     * pause_after_ms unless a `\!pN` was present, so untagged input keeps
+     * n_inline_pau == 0 and every index below is unchanged. */
+    uint32_t n_inline_pau = 0;
+    for (int wi = 0; wi + 1 < parsed->n_words; wi++)
+        if (parsed->words[wi].pause_after_ms != 0) n_inline_pau++;
+
+    uint32_t n_slots = (n_phons + n_inline_pau + 2u) * 2u;
+    if (spfy_env("SPFY_FE_HOST_DEBUG"))
+        fprintf(stderr, "[fe_parse] slots: phons=%u inline_pau=%u n_slots=%u\n",
+                n_phons, n_inline_pau, n_slots);
     spfy_fe_slot_t *slots = (spfy_fe_slot_t *)calloc(n_slots, sizeof *slots);
     if (!slots) return -1;
 
@@ -1003,9 +1188,19 @@ int fe_parsed_to_full_slots(const fe_parsed_t       *parsed,
 
             global_pi++;
         }
+
+        /* Inline pau unit for a `\!pN` that sat between two words. Only
+         * ctx[2] is set, exactly like the leading and trailing pads -- the
+         * sp[]/emphasis fields stay zero so it selects as a plain pause. */
+        if (w->pause_after_ms != 0 && wi + 1 < parsed->n_words) {
+            uint32_t pbase = (global_pi + 1u) * 2u;
+            slots[pbase + 0].ctx[2] = pau_side0;
+            slots[pbase + 1].ctx[2] = pau_side1;
+            global_pi++;
+        }
     }
 
-    uint32_t tail = (n_phons + 1u) * 2u;
+    uint32_t tail = (n_phons + n_inline_pau + 1u) * 2u;
     slots[tail + 0].ctx[2] = pau_side0;
     slots[tail + 1].ctx[2] = pau_side1;
 

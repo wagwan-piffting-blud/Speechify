@@ -39,19 +39,19 @@ CASES = [
 
     ("prosody-rate-named",
      '<speak>Hello <prosody rate="x-slow">slow world</prosody>. Done.</speak>',
-     "Hello \\!wp50 slow world\\!wp100 . Done."),
+     "Hello \\!rp50 slow world\\!rp100 . Done."),
 
     ("prosody-rate-percent",
      '<prosody rate="150%">fast</prosody>',
-     "\\!wp150 fast\\!wp100 "),
+     "\\!rp150 fast\\!rp100 "),
 
     ("prosody-rate-relative",
      '<prosody rate="+20%">a</prosody>',
-     "\\!wp120 a\\!wp100 "),
+     "\\!rp120 a\\!rp100 "),
 
     ("prosody-rate-multiplier",
      '<prosody rate="1.5">a</prosody>',
-     "\\!wp150 a\\!wp100 "),
+     "\\!rp150 a\\!rp100 "),
 
     ("prosody-volume-named",
      '<prosody volume="loud">shout</prosody>',
@@ -75,11 +75,11 @@ CASES = [
 
     ("prosody-nested-composes",
      '<prosody rate="200%">a<prosody rate="50%">b</prosody>c</prosody>',
-     "\\!wp200 a\\!wp50 b\\!wp200 c\\!wp100 "),
+     "\\!rp200 a\\!rp50 b\\!rp200 c\\!rp100 "),
 
     ("prosody-multi-attr",
      '<prosody rate="slow" pitch="low" volume="soft">x</prosody>',
-     "\\!vp50 \\!wp70 \\!pp79 x\\!vp100 \\!wp100 \\!pp100 "),
+     "\\!vp50 \\!rp70 \\!pp79 x\\!vp100 \\!rp100 \\!pp100 "),
 
     ("break-time-ms",
      "a<break time=\"800ms\"/>b",
@@ -175,7 +175,7 @@ CASES = [
 
     ("unclosed-prosody-still-terminates",
      '<speak><prosody rate="fast">a',
-     "\\!wp130 a"),
+     "\\!rp130 a"),
 
     ("voice-content-kept",
      '<speak><voice name="other">hello</voice></speak>',

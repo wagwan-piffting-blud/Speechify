@@ -633,6 +633,14 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
     long site_base_rate = 0;
     ISpTTSEngineSite_GetRate(pOutputSite, &site_base_rate);
 
+    /* Same story for ISpVoice::SetVolume, and measured the same way: without
+     * this call the host volume slider does nothing at all. See
+     * spfy_sapi.c::tts_Speak. */
+    USHORT site_base_vol = 100;
+    if (FAILED(ISpTTSEngineSite_GetVolume(pOutputSite, &site_base_vol)))
+        site_base_vol = 100;
+    if (site_base_vol > 100) site_base_vol = 100;
+
     /* SPFY_SAPI_DEBUG diagnostic - see spfy_sapi.c::tts_Speak for the full
      * description. */
     FILE *dbg = NULL;
@@ -701,7 +709,7 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
 
         ULONG vol = f->State.Volume;
         if (vol > 100u) vol = 100u;
-        float gain = (float)vol / 100.0f;
+        float gain = (float)vol / 100.0f * (float)site_base_vol / 100.0f;
 
         /* Pitch split - see spfy_synth_split_pitch in
          * spfy/src/synth/spfy_synth_lib.c. */

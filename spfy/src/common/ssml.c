@@ -192,14 +192,16 @@ static int volume_pct(const char *v, int cur)
 
 /* <prosody rate>. 100 = unchanged, larger is faster.
  *
- * ⚠ EMITTED AS `\!wp`, NOT `\!rp`, AND THAT IS DELIBERATE. SPFY_README.md
- * documents `\!rp` as a bias on the CART *duration target* -- it changes
- * which units get selected and "saturates around +9% in the slow direction",
- * which measurement confirms: `\!rp50` on a test sentence stretches it by
- * 1.08x, not 2x. That is a real, documented, useful behaviour and this must
- * not redefine it. `\!wp` is the other thing a user asking for "rate" means:
- * a WSOLA time-scale on the rendered audio, per span, which is exactly what
- * spfy_sapi.c has always done with SPVSTATE.RateAdj. */
+ * Emitted as `\!rp`, which is now what the vendor engine's own rate control
+ * does: scale the duration targets and time-scale each selected unit onto
+ * them, plosives passed through untouched and pauses scaled with the speech.
+ *
+ * ⚠ This used to emit `\!wp` on the reasoning that `\!rp` "biases selection
+ * and saturates around +9% in the slow direction". That was true of spfy's
+ * OLD `\!rp` and it was never true of the engine's: measured on the vendor
+ * binary, `\!rp50` gives 1.969x and `\!rp33` gives 2.991x. The saturation
+ * was spfy's bug, not the tag's meaning, so the workaround goes with it.
+ * `\!wp` remains available as a literal time-scale at any factor. */
 static int rate_pct(const char *v, int cur)
 {
     if (!v || !*v) return cur;
@@ -706,7 +708,7 @@ char *spfy_ssml_to_etags(const char *ssml)
                 }
                 if (f->restores_prosody) {
                     if (vol != f->vol)   { vol = f->vol;     sb_str(&out, "\\!vp"); sb_int(&out, vol);   sb_ch(&out, ' '); }
-                    if (rate != f->rate) { rate = f->rate;   sb_str(&out, "\\!wp"); sb_int(&out, rate);  sb_ch(&out, ' '); }
+                    if (rate != f->rate) { rate = f->rate;   sb_str(&out, "\\!rp"); sb_int(&out, rate);  sb_ch(&out, ' '); }
                     if (pitch != f->pitch){ pitch = f->pitch; sb_str(&out, "\\!pp"); sb_int(&out, pitch); sb_ch(&out, ' '); }
                 }
                 if (name_is(ns, nl, "p") || name_is(ns, nl, "s")) {
@@ -884,7 +886,7 @@ char *spfy_ssml_to_etags(const char *ssml)
                 if (nv > 300) nv = 300;
                 if (nv != rate) {
                     rate = nv;
-                    sb_str(&out, "\\!wp"); sb_int(&out, rate); sb_ch(&out, ' ');
+                    sb_str(&out, "\\!rp"); sb_int(&out, rate); sb_ch(&out, ' ');
                     f.restores_prosody = 1;
                 }
             }

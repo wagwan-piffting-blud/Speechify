@@ -89,6 +89,11 @@ CASES = [
      "rms", "down", 3.0),
     ("volume loud  -> louder",  '<prosody volume="loud">%s</prosody>' % BASE,
      "rms", "up", 2.0),
+    # `silent` is the one volume setting whose failure is unmistakable, and it
+    # was the one nothing covered: it maps to \!vp0, and 0 was the volume
+    # map's own "no tag here" value, so silence rendered at FULL volume.
+    ("volume silent-> silence", '<prosody volume="silent">%s</prosody>' % BASE,
+     "rms", "down", 60.0),
     ("pitch +6st   -> higher",  '<prosody pitch="+6st">%s</prosody>' % BASE,
      "f0", "up", 1.5),
     ("pitch -6st   -> lower",   '<prosody pitch="-6st">%s</prosody>' % BASE,

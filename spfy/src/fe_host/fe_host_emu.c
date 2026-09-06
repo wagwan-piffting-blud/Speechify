@@ -251,6 +251,8 @@ static int parse_fe_output_into_slots(hosted_fe_t *fe,
 
 /* Drive the FE over plain text; return the cleaned tagged stream (malloc'd;
  * caller frees). */
+static void dur_scan(void);
+
 static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     if (iobj_err_flag(fe)) {
         fprintf(stderr, "[fe_host_emu] err_flag latched before synth - bailing\n");
@@ -279,6 +281,19 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     char *tagged = drain_tagged(fe);
     if (!tagged) return NULL;
     fe_clean_stream_inplace(tagged);
+
+    /* Scan here too: RUN_OR_ABORT below is what releases the utterance, so
+     * this is the last moment the FE's own per-segment state is live. */
+    if (getenv("SPFY_FE_DUR_SCAN")) {
+        fprintf(stderr, "[dur_scan] == BEFORE run_or_abort ==\n");
+        dur_scan();
+    }
+    /* ⛔ Slot 44 (delegateB_call2) is NOT a second output stream. It shares
+     * delegate-B's pointer through state[+0x2e0] instead of [+0x2dc]
+     * ("same delegate, different method", vtable_inventory.md), and drained
+     * the same way as slot 42 it returns out_len 1 -- an empty string -- on
+     * the first call. Probed 2026-09-04 while hunting the numeric segment
+     * duration; the tagged text is the only stream the FE hands back. */
 
     uint32_t roa_args[1] = { 0 };
     call_vfn(fe, SLOT_RUN_OR_ABORT, roa_args, 1);
@@ -405,6 +420,169 @@ int spfy_fe_text_to_tagged(spfy_fe_t  *opaque,
     return (int)n;
 }
 
+/* SPFY_FE_DUR_SCAN=1: sweep the guest heap for duration-shaped floats after
+ * the FE has run.
+ *
+ * The question this answers is whether the FE alone holds the FRACTIONAL
+ * per-segment durations the engine's WSOLA targets are built from, or whether
+ * it only holds the round values the tagged text shows (`p100`, `pau(p25)`).
+ * spfy bundles the FE and nothing else, so if the fractions are not here they
+ * are not reachable at all. Diagnostic only; no effect unless the env var is
+ * set. Constants mirror emu.h, which is not on this target's include path. */
+static void dur_scan_region(uint32_t base, uint32_t size, const char *name);
+
+static void dur_scan(void) {
+    /* Walk the real region list. ⚠ Never guess bases here: reading an
+     * unmapped VA faults the CPU and halts it, and the image is mapped at the
+     * PE's own ImageBase, not emu.h's IMAGE_BASE. */
+    uint32_t va, size;
+    const char *name;
+    for (int i = 0; spfy_dll_emu_region(i, &va, &size, &name); ++i)
+        dur_scan_region(va, size, name ? name : "?");
+}
+
+static void dur_scan_region(uint32_t heap_base, uint32_t heap_size,
+                            const char *rname) {
+    /* Exact float32 patterns the oracle produced, in SECONDS. */
+    const struct { uint32_t bits; const char *what; } want[] = {
+        { 0x3C4CCCCDu, "0.0125      leading pau(p25), exact"      },
+        { 0x3CCCCCCDu, "0.025       f32(0.025), the round value"  },
+        { 0x3CCCCCC1u, "0.024999976 ?d wx/pan/pau  (-12 ULP)"     },
+        { 0x3CCCCD00u, "0.025000095 ?d num/plos    (+51 ULP)"     },
+        { 0x3D4CCCCDu, "0.05        f32(0.05), p100 round"        },
+        { 0x3E800000u, "0.25        f32(0.25), round"             },
+        { 0x3E800002u, "0.250000060 \\!p500        (+2 ULP)"       },
+    };
+    uint32_t hits[sizeof want / sizeof *want];
+    memset(hits, 0, sizeof hits);
+    double   find_ms = 0.0;
+    uint32_t find_hit[6];
+    memset(find_hit, 0, sizeof find_hit);
+    {
+        const char *fe = spfy_env("SPFY_FE_DUR_FIND");
+        if (fe && *fe) find_ms = atof(fe);
+    }
+    const int list_on = (spfy_env("SPFY_FE_DUR_LIST") != NULL);
+
+    uint32_t near_05 = 0, near_0125 = 0, frac = 0, roundish = 0;
+    /* Millisecond domain -- what the tagged text actually shows. A cell is
+     * {int16 type; payload}, type -5 double / -4 short / -3 int32, so count
+     * each width separately: whichever holds 100 tells us the storage, and
+     * whether any near-100 value is NOT exactly 100 tells us if the FE has a
+     * fraction to give at all. */
+    uint32_t f32_100 = 0, f32_100_frac = 0, f64_100 = 0, f64_100_frac = 0;
+    uint32_t i32_100 = 0, i16_100 = 0, i16_25 = 0, i16_100_after_m4 = 0;
+    static uint8_t buf[1u << 16];
+    for (uint32_t off = 0; off < heap_size; off += sizeof buf) {
+        uint32_t n = (heap_size - off < sizeof buf) ? heap_size - off
+                                                    : (uint32_t)sizeof buf;
+        spfy_dll_emu_read(heap_base + off, buf, n);
+        for (uint32_t i = 0; i + 8 <= n; i += 2) {
+            uint32_t b;
+            float    f;
+            double   d;
+            int16_t  s;
+            int32_t  l;
+            memcpy(&s, buf + i, 2);
+            if (s == 100) {
+                i16_100++;
+                if (i >= 2) {
+                    int16_t t;
+                    memcpy(&t, buf + i - 2, 2);
+                    if (t == -4) i16_100_after_m4++;
+                }
+            }
+            if (s == 25) i16_25++;
+            if (i & 3) continue;                 /* 4-aligned below */
+            memcpy(&b, buf + i, 4);
+            memcpy(&f, buf + i, 4);
+            memcpy(&l, buf + i, 4);
+            memcpy(&d, buf + i, 8);
+            if (l == 100) i32_100++;
+            for (uint32_t k = 0; k < sizeof want / sizeof *want; ++k)
+                if (b == want[k].bits) hits[k]++;
+            /* SPFY_FE_DUR_LIST=1: every duration-shaped NUMBER in the
+             * RUNTIME regions (the image holds ~45k and is skipped), so the
+             * pau target -- (d1 + d2) / 2 * 1000 over the segment's two
+             * halfphones -- can be searched over all PAIRS offline.
+             *
+             * ⚠ f32-in-seconds ALONE is not enough, and an earlier pass that
+             * listed only that reported a false "no pair reproduces it".
+             * FE value cells are {int16 type; payload} with type -5 =
+             * DOUBLE, so a duration can be an f64; and it can be held in
+             * milliseconds rather than seconds. All four combinations are
+             * listed, tagged, and the reader converts. */
+            if (list_on && strcmp(rname, "image") != 0) {
+                if (f > 0.002f && f < 1.0f)
+                    fprintf(stderr, "[dur_list] %-7s %08x f32s %.9g\n",
+                            rname, heap_base + off + i, (double)f);
+                if (f > 2.0f && f < 1000.0f)
+                    fprintf(stderr, "[dur_list] %-7s %08x f32m %.9g\n",
+                            rname, heap_base + off + i, (double)f);
+                if (d > 0.002 && d < 1.0)
+                    fprintf(stderr, "[dur_list] %-7s %08x f64s %.17g\n",
+                            rname, heap_base + off + i, d);
+                if (d > 2.0 && d < 1000.0)
+                    fprintf(stderr, "[dur_list] %-7s %08x f64m %.17g\n",
+                            rname, heap_base + off + i, d);
+            }
+            /* SPFY_FE_DUR_FIND=<ms>: hunt for ONE value the engine was
+             * actually observed to use for THIS text, rather than for the
+             * guessed constants above. The earlier sweep asked "is 25.0 or
+             * 0.025 in here" and answered no; the question that matters is
+             * whether the per-text `?d` -- 25.0000057, 25.000036, 24.999977,
+             * ... six distinct values over the 221-text corpus -- is present,
+             * as ms, as seconds, in f32 or f64. */
+            if (find_ms != 0.0) {
+                float  fms = (float)find_ms,  fs = (float)(find_ms / 1000.0);
+                double dms = find_ms,         ds = find_ms / 1000.0;
+                if (f == fms) find_hit[0]++;
+                if (f == fs)  find_hit[1]++;
+                if (d == dms) find_hit[2]++;
+                if (d == ds)  find_hit[3]++;
+                /* Within a few ULPs, so a value one rounding step away is
+                 * still reported rather than silently missed. */
+                if (f > fms * 0.9999995f && f < fms * 1.0000005f
+                    && f != fms) find_hit[4]++;
+                if (f > fs * 0.9999995f && f < fs * 1.0000005f
+                    && f != fs) find_hit[5]++;
+            }
+            if (f > 99.9f && f < 100.1f) {
+                f32_100++;
+                if (f != 100.0f) f32_100_frac++;
+            }
+            if (d > 99.9 && d < 100.1) {
+                f64_100++;
+                if (d != 100.0) f64_100_frac++;
+            }
+            if (f > 0.004f && f < 0.6f) {
+                if (f > 0.049f && f < 0.051f) near_05++;
+                if (f > 0.0124f && f < 0.0126f) near_0125++;
+                float ms = f * 1000.0f;
+                if (ms == (float)(int)(ms + 0.5f)) roundish++; else frac++;
+                (void)0;
+            }
+        }
+    }
+    fprintf(stderr, "[dur_scan] %-7s %3u MB | ms100 f32=%u/%ufrac f64=%u/%ufrac"
+                    " i32=%u i16=%u(-4:%u) | ms25 i16=%u | sec f32 .05=%u"
+                    " .0125=%u rnd=%u frac=%u\n",
+            rname, heap_size >> 20,
+            f32_100, f32_100_frac, f64_100, f64_100_frac,
+            i32_100, i16_100, i16_100_after_m4, i16_25,
+            near_05, near_0125, roundish, frac);
+    for (uint32_t k = 0; k < sizeof want / sizeof *want; ++k)
+        if (hits[k])
+            fprintf(stderr, "[dur_scan]   %-7s FOUND x%-6u %s\n",
+                    rname, hits[k], want[k].what);
+    if (find_ms != 0.0 && (find_hit[0] || find_hit[1] || find_hit[2]
+                           || find_hit[3] || find_hit[4] || find_hit[5]))
+        fprintf(stderr, "[dur_find] %-7s %.9g ms: f32ms=%u f32sec=%u "
+                        "f64ms=%u f64sec=%u  near(f32ms)=%u near(f32sec)=%u\n",
+                rname, find_ms, find_hit[0], find_hit[1], find_hit[2],
+                find_hit[3], find_hit[4], find_hit[5]);
+}
+
 int spfy_fe_synth_text(spfy_fe_t                  *opaque,
                        const char                 *text,
                        const spfy_prosody_hints_t *hints,
@@ -415,6 +593,7 @@ int spfy_fe_synth_text(spfy_fe_t                  *opaque,
 
     char *tagged = hosted_fe_drain_tagged(fe, text);
     if (!tagged) return iobj_err_flag(fe) ? -2 : -3;
+    if (getenv("SPFY_FE_DUR_SCAN")) dur_scan();
 
     spfy_fe_utterance_t *u = (spfy_fe_utterance_t *)calloc(1, sizeof(*u));
     if (!u) { free(tagged); return -3; }

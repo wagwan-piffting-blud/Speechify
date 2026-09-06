@@ -103,7 +103,4 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         OUTPUT_NAME "spfy_sapi64"
         SUFFIX ".dll"
     )
-else()
-    message(STATUS
-        "sapi: skipping spfy_sapi64 (needs a 64-bit toolchain; use build.bat)")
 endif()

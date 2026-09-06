@@ -35,6 +35,10 @@ typedef struct {
      * to the /ma/... */
     int                  first_syl_implicit;
     int                  pause_after_ms;
+    /* The inline `\!pN` pause's TARGET, in engine milliseconds, from the
+     * FE's own duration clock rather than the nominal p/2. See
+     * fe_compute_pau_targets(). 0 = no inline pause here. */
+    float                pause_after_target_ms;
     int                  phrase_id;
     /* SSML / Balabolka prosody overrides (extension fields). */
     int8_t               pitch_st;
@@ -53,6 +57,29 @@ typedef struct {
  * p/2 ms wherever it emitted a concrete p. So `?d` == p50. */
 #define FE_PAU_DEFAULT_P 50
 
+/* ⚠ ...except it is NOT exactly 25.0, and it is NOT a constant.
+ *
+ * Read off the engine's wsola_in unit+0x10 (wsola_buffer_hook.js,
+ * 2026-09-04) the TRAILING default pause takes one of two values across the
+ * 37-entry rate corpus, both a whole number of float32 ULPs from 25.0:
+ *
+ *     24.999977111816406   (-12 ULP)   wx, pan, pau texts
+ *     25.000095367431640   (+50 ULP)   num, plos texts
+ *
+ * Neither unit count nor span count nor total duration separates them, so
+ * the selector is UNKNOWN and lives somewhere in SWIttsFe-en-US.dll's own
+ * pause computation. The LEADING default is exactly 12.5 in every case.
+ *
+ * The -12 value is used here because it is right for 3 of the 5 measured
+ * text families; the other two are wrong by 4e-6 relative, which is
+ * inaudible but not byte-exact. ⛔ Do not "simplify" this back to 25.0: the
+ * target divides into the scale, the scale multiplies the output cursor,
+ * and the product is TRUNCATED, so on \!rp50 a trailing pause scaled
+ * 113/49.99995 instead of 113/50 moves one frame's source by a sample and
+ * changes the last ~110 samples. A concrete `pau(pN)` is exactly N/2 and
+ * needs none of this. */
+#define FE_PAU_DEFAULT_MS 24.999977111816406f
+
 typedef struct {
     int               pause_before_ms;
     int               pause_after_ms;
@@ -68,6 +95,22 @@ typedef struct {
      * USER pause, distinct from the FE's structural `pau(pN)` which is not
      * rendered as... */
     int               phrase_lead_pause_ms[FE_PARSE_MAX_PHRASES];
+    /* An inline `\!pN` sitting BEFORE the first word of its own utterance.
+     *
+     * ⚠ NOT the same thing as phrase_lead_pause_ms above. The engine keeps a
+     * leading `\!p` INSIDE the utterance as a pau unit pair placed after the
+     * leading pad -- captured on the wx sentence, `\!p500 The national ...`
+     * is 68 units in ONE wsola_in call, units [2] and [3] carrying
+     * tgt 250.00003 -- where phrase_lead_pause_ms is silence injected
+     * BETWEEN two utterances. 0 = none. */
+    int               phrase_head_pau_ms[FE_PARSE_MAX_PHRASES];
+    /* Its target in engine ms, from the FE's duration clock. */
+    float             phrase_head_pau_target_ms[FE_PARSE_MAX_PHRASES];
+    /* This utterance holds a structural pau and NO words -- which is what a
+     * TRAILING `\!pN` becomes. The engine renders `... warning. \!p500` as a
+     * second wsola_in call of exactly 2 units, one pau phone at tgt p/2 per
+     * halfphone. Its duration is in phrase_pau_ms_before. */
+    uint8_t           phrase_pau_only[FE_PARSE_MAX_PHRASES];
     /* Structural `pau(pN)` values, per phrase, as the FE emitted them.
      *
      * Every phrase opens and closes with a structural pau, which the slot
@@ -85,6 +128,12 @@ typedef struct {
      * pau is recorded as a trailing one. */
     int16_t           phrase_pau_p_before[FE_PARSE_MAX_PHRASES];
     int16_t           phrase_pau_p_after [FE_PARSE_MAX_PHRASES];
+    /* The same two pauses as TARGET MILLISECONDS, exactly as the engine
+     * holds them: N/2 for a concrete pau(pN), FE_PAU_DEFAULT_MS for the
+     * default form. The int fields above cannot express that value, which
+     * is not a whole number of half-milliseconds. 0 = no pause. */
+    float             phrase_pau_ms_before[FE_PARSE_MAX_PHRASES];
+    float             phrase_pau_ms_after [FE_PARSE_MAX_PHRASES];
 } fe_parsed_t;
 
 /* Parse the FE's tagged-text output (see host/PROTOCOL.md). */

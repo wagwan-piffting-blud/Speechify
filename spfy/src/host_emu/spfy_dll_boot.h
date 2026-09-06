@@ -41,6 +41,13 @@ uint32_t spfy_dll_emu_alloc(uint32_t n, int zero);
 void     spfy_dll_emu_read(uint32_t guest_va, void *host_dst, uint32_t n);
 void     spfy_dll_emu_write(uint32_t guest_va, const void *host_src, uint32_t n);
 
+/* Enumerate mapped guest regions; returns 0 once `i` is past the last.
+ * ⚠ Reading an UNMAPPED VA faults the CPU and halts it, so anything that
+ * sweeps guest memory must walk this list rather than assume the constants
+ * in emu.h -- the image is mapped at the PE's own ImageBase, not IMAGE_BASE. */
+int      spfy_dll_emu_region(int i, uint32_t *va, uint32_t *size,
+                             const char **name);
+
 #ifdef __cplusplus
 }
 #endif

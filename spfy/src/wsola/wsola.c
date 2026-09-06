@@ -228,10 +228,19 @@ void spfy_wsola_set_next_pre(spfy_wsola_streamer_t *s, uint32_t n)
     s->next_pre = n;
 }
 
+void spfy_wsola_set_span_limit(spfy_wsola_streamer_t *s, size_t limit)
+{
+    if (s) s->span_limit = limit;
+}
+
 void spfy_wsola_init(spfy_wsola_streamer_t *s, spfy_wav_writer_t *wav)
 {
     memset(s, 0, sizeof *s);
     s->wav         = wav;
+    /* Time-scaling starts DISARMED and at unity, which is the engine's
+     * default-rate state (this+0x2c == 0). */
+    s->unit_scale  = 1.0f;
+    s->frame_trace = (spfy_env("SPFY_WSOLA_FRAME_TRACE") != NULL);
     /* W is the ONE rate-dependent constant; hop/corr/frame/stride all
      * derive from it (see the geometry block in wsola.h). */
     s->ola_samples = parse_env_u32("SPFY_WSOLA_OLA",
@@ -370,6 +379,391 @@ static int32_t find_lag_engine(const int16_t *hist, size_t hist_n,
     return best_lag;
 }
 
+void spfy_wsola_set_time_scale(spfy_wsola_streamer_t *s, int on)
+{
+    if (s) s->tscale_on = on ? 1 : 0;
+}
+
+void spfy_wsola_set_unit_scale(spfy_wsola_streamer_t *s, float scale)
+{
+    if (!s) return;
+    /* ⚠ This is NOT the [1/3, 3] rate clamp. The Guide's 33..300 limit
+     * applies to the REQUESTED RATE, which is already enforced when the tag
+     * is parsed; the per-unit scale is natural/target, and its baseline is
+     * only near 1.0 on average -- a unit whose natural length happens to sit
+     * well off its target starts from 1.4 or 0.7, so \!rp33 legitimately
+     * asks for less than 1/3 on some units. Clamping at 1/3 here quietly
+     * capped \!rp33 at 2.72x when it should reach ~3x. These bounds exist
+     * only to keep a corrupt target from producing an absurd stretch. */
+    if (!(scale > 0.0f)) scale = 1.0f;
+    if (scale < 0.1f) scale = 0.1f;
+    if (scale > 10.0f) scale = 10.0f;
+    s->unit_scale = scale;
+}
+
+void spfy_wsola_set_unit_plan(spfy_wsola_streamer_t *s,
+                              const spfy_wsola_unit_t *units, size_t n)
+{
+    if (!s) return;
+    s->plan   = (n && units) ? units : NULL;
+    s->plan_n = s->plan ? n : 0u;
+}
+
+int spfy_wsola_label_is_plosive(const char *label)
+{
+    if (!label || !*label) return 0;
+    char c = label[0];
+    if (c != 'p' && c != 'd' && c != 'g' && c != 'b'
+        && c != 't' && c != 'k' && c != 'c' && c != 'j') return 0;
+    if (strncmp(label, "pau", 3) == 0) return 0;
+    if (strncmp(label, "dh",  2) == 0) return 0;
+    if (strncmp(label, "th",  2) == 0) return 0;
+    return 1;
+}
+
+float spfy_wsola_unit_scale(const char *label,
+                            uint32_t natural_ms, float target_ms)
+{
+    if (!(target_ms > 0.0f) || natural_ms == 0u) return 1.0f;
+    /* FUN_08ee1640 compares the TRUNCATED target against the natural length,
+     * and only takes the pass-through branch when the unit would grow. */
+    if ((int32_t)target_ms >= (int32_t)natural_ms
+        && spfy_wsola_label_is_plosive(label)
+        && strncmp(label, "pau", 3) != 0)
+        return 1.0f;
+    return (float)natural_ms / target_ms;
+}
+
+/* The time-scaled body, FUN_08ee36e0's `this+0x2c != 0` branch.
+ *
+ * Emits `out_n` samples starting from input position `*io_pos`, walking in
+ * W-sample frames. Per frame the engine compares the position it WANTS
+ *
+ *     ideal = body_in0 + (int)((float)out_rel * scale)      [0x08ee3512]
+ *
+ * against where it actually is. While the two agree to within a hop the
+ * frame is copied verbatim; once they diverge it runs the ordinary NCC lag
+ * search around `ideal - W - hop` and crossfades into the frame it finds,
+ * which is how material gets inserted (scale < 1) or dropped (scale > 1)
+ * without a pitch discontinuity.
+ *
+ * SCOPE: the engine's frame loop is bounded by `this+0x35bc < this+0x35c0`,
+ * which are a unit index and count WITHIN THE CURRENT SPAN -- FUN_08ee2960
+ * sets `this+0x44 = span`, `0x35c0 = span[+0x24]`, and zeroes 0x35bc / 0x35a8
+ * / 0x35b4 / 0x35e0 on every span load. The engine's outer array is
+ * 0x2c-stride spans; the 0x30-stride units sit inside one. spfy's
+ * append_recording_span IS that span, so this loop's scope already matches
+ * the engine's and no restructuring is owed.
+ *
+ * ⚠ What is NOT yet ported is the engine's per-unit scale STEP inside a
+ * span: FUN_08ee33f0 advances `0x35bc` mid-frame and re-runs FUN_08ee1640
+ * for the new unit, emitting that straddling frame as two hops
+ * (`this+0x3600`). spfy passes one aggregate scale per span instead, so the
+ * stretch is spread evenly across a run rather than stepping at each
+ * internal unit edge. Totals land in the same place; individual unit
+ * boundaries inside a recording do not. Reaching byte-parity on the rate
+ * path means porting that step -- and capturing a rate-tagged oracle to
+ * check it against, since every trace in traces_master is default-rate. */
+static int tscale_frame(spfy_wsola_streamer_t *s,
+                        const int16_t *buf, size_t buf_n, size_t content_end,
+                        size_t *io_rp, size_t ideal, size_t fr);
+
+static int emit_body_tscale(spfy_wsola_streamer_t *s,
+                            const int16_t *buf, size_t buf_n,
+                            size_t content_end,
+                            size_t *io_pos, size_t out_n, float scale)
+{
+    const size_t W = s->W;
+    const size_t body_in0 = *io_pos;
+    size_t rp = body_in0;
+    size_t out_rel = 0;
+
+    while (out_rel < out_n) {
+        size_t fr = W;
+        if (fr > out_n - out_rel) fr = out_n - out_rel;
+
+        /* Same float32 -> truncate shape as the engine's FILD/FMUL/__ftol. */
+        long adv = (long)((float)out_rel * scale);
+        long ideal_l = (long)body_in0 + adv;
+        if (ideal_l < 0) ideal_l = 0;
+
+        int rc = tscale_frame(s, buf, buf_n, content_end, &rp, (size_t)ideal_l, fr);
+        if (rc == -1) break;
+        if (rc == -2) return SPFY_E_IO;
+        out_rel += fr;
+    }
+
+    *io_pos = rp;
+    return SPFY_OK;
+}
+
+/* One time-scaled frame. Shared by both walks so they cannot drift apart.
+ * Returns the input position the frame was taken from; `*io_rp` is the
+ * current input cursor and is left at src + W. */
+static int tscale_frame(spfy_wsola_streamer_t *s,
+                        const int16_t *buf, size_t buf_n, size_t content_end,
+                        size_t *io_rp, size_t ideal, size_t fr)
+{
+    const size_t W = s->W, hop = s->hop, corr = s->corr;
+    size_t rp = *io_rp;
+    int16_t mix[SPFY_WSOLA_OLA_SAMPLES_MAX];
+    const int16_t *frame;
+
+    /* ⚠ The engine compares `ideal` against this+0x35ac, and FUN_08ee33f0
+     * sets that to `W + read_pos` -- not read_pos. Comparing against the
+     * bare cursor shifts every sync/resync decision by a whole window. */
+    long delta = (long)ideal - (long)(rp + W);
+    /* FUN_08ee36e0: `(iVar5 < iVar1) && (-iVar1 <= iVar5)`. The upper bound
+     * is exclusive and the lower is INCLUSIVE -- an exclusive lower bound
+     * forces a resync on the exact -hop boundary, which changes that frame's
+     * source and every frame after it. */
+    int in_sync = (delta < (long)hop && delta >= -(long)hop);
+    /* The engine's ONLY bail-out: `this[0x35c4] < this[4] + iVar1 + iVar4`,
+     * i.e. not enough input left to reach the frame it wants.
+     *
+     * ⚠ There was a second clause here, `rp + corr > buf_n`, guarding the
+     * lag search's own reach. It has no counterpart in the engine and it
+     * forced the sync branch exactly where the stretch direction spends its
+     * last frames -- which is where \!rp33/50/75 diverged. The reach is
+     * handled by zero-padding below instead, matching the zero-filled slack
+     * FUN_08ee2960 allocates past this+0x35c4. */
+    /* ⛔ NOT against content_end. Tried 2026-09-04 on the theory that
+     * this+0x35c4 is the content end: the rate gate collapsed 34 -> 11/37,
+     * with rp50/rp100/rp150 and both span entries losing byte-identity at
+     * NCC 0.04-0.9. content_end runs 2W short of buf_n, and bailing that
+     * early takes the copy branch all over the stretch direction. The
+     * over-allocated, zero-filled buffer end is the right bound. */
+    /* FUN_08ee36e0: `this[0x35c4] < this[4] + iVar1 + iVar4`, i.e.
+     * `limit < W + hop + ideal` -- the engine's ONLY bail-out.
+     *
+     * ⚠ The bound is this+0x35c4, the span's INPUT LIMIT, which FUN_08ee2960
+     * clamps to what the source recording holds; the BUFFER stays longer
+     * than that and zero-filled. Using the buffer length made a span at the
+     * end of a recording keep crossfading past the real audio.
+     * ⛔ It is not content_end either: 0x35c4 is content_end + corr, and
+     * bailing at content_end took the gate from 34 to 11/37. */
+    size_t lim = content_end ? content_end : buf_n;
+    int short_input = ((long)lim < (long)ideal + (long)W + (long)hop);
+
+    if (in_sync || short_input) {
+        if (rp + fr > buf_n) {
+            /* ⚠ Do NOT bail. FUN_08ee2960 over-allocates the span buffer by
+             * `iVar9 + 100` samples and zero-fills past the content, so the
+             * engine simply reads into that slack. Stopping the walk here
+             * instead dropped whole frames in the STRETCH direction, where
+             * the walk legitimately outruns the decoded span -- measured as
+             * \!rp50 landing exactly 80 samples (one frame) short and
+             * \!rp33 three frames short. */
+            size_t have = (rp < buf_n) ? buf_n - rp : 0u;
+            if (have > fr) have = fr;
+            if (have) memcpy(mix, buf + rp, have * sizeof *buf);
+            if (have < fr) memset(mix + have, 0, (fr - have) * sizeof *mix);
+            frame = mix;
+        } else {
+            frame = buf + rp;
+        }
+    } else {
+        long base_l = (long)ideal - (long)W - (long)hop;
+        size_t base = (base_l < 0) ? 0u : (size_t)base_l;
+        /* Zero-pad both correlation inputs so the search always spans the
+         * full [0, W]. FUN_08ee2960 zero-fills past this+0x35c4, so the
+         * engine correlates against zeros out there; find_lag_engine instead
+         * clamps lag_hi to head_n - corr and silently searches a shorter
+         * range, which picks a different lag on the last frames of a
+         * stretched span. */
+        static int16_t hpad[SPFY_WSOLA_CORR_MAX
+                            + SPFY_WSOLA_OLA_SAMPLES_MAX];
+        static int16_t tpad[SPFY_WSOLA_CORR_MAX];
+        const int16_t *hist_p = buf + rp;
+        if (rp + corr > buf_n) {
+            size_t have = (rp < buf_n) ? buf_n - rp : 0u;
+            if (have > corr) have = corr;
+            if (have) memcpy(tpad, buf + rp, have * sizeof *buf);
+            memset(tpad + have, 0, (corr - have) * sizeof *tpad);
+            hist_p = tpad;
+        }
+        const int16_t *head_p = buf + base;
+        size_t head_n = (base < buf_n) ? buf_n - base : 0u;
+        const size_t need = corr + W;
+        if (head_n < need) {
+            if (head_n) memcpy(hpad, buf + base, head_n * sizeof *buf);
+            memset(hpad + head_n, 0, (need - head_n) * sizeof *hpad);
+            head_p = hpad;
+            head_n = need;
+        }
+        int32_t lag = find_lag_engine(hist_p, corr, head_p, head_n,
+                                      (uint32_t)W, (uint32_t)corr, s->stride);
+        size_t np = base + (size_t)((lag > 0) ? lag : 0);
+        if (np + W > buf_n || rp + W > buf_n) {
+            size_t have = (rp < buf_n) ? buf_n - rp : 0u;
+            if (have > fr) have = fr;
+            if (have) memcpy(mix, buf + rp, have * sizeof *buf);
+            if (have < fr) memset(mix + have, 0, (fr - have) * sizeof *mix);
+            frame = mix;
+        } else {
+            for (size_t j = 0; j < W; ++j) {
+                long double t = (long double)buf[rp + j];
+                long double h = (long double)buf[np + j];
+                long double acc = h * (long double)s->win_in[j]
+                                + t * (long double)s->win_out[j];
+                mix[j] = clip_s16_engine((float)acc);
+            }
+            /* SPFY_WSOLA_FRAME_TRACE: one line per RESYNC frame, matching
+             * viz/frida_hooks/wsola_frame_hook.js field for field so the two
+             * can be diffed directly. */
+            if (s->frame_trace)
+                fprintf(stderr, "[wsolaf] rp=%zu np=%zu ideal=%zu lag=%d\n",
+                        rp, np, ideal, (int)lag);
+            frame = mix;
+            rp = np;
+            s->n_aligned++;
+        }
+    }
+    if (spfy_wav_write(s->wav, frame, fr) != SPFY_OK) return -2;
+    *io_rp = rp + W;
+    return 0;
+}
+
+/* The per-unit walk: FUN_08ee36e0's time-scaled body with FUN_08ee33f0's
+ * unit stepping, which is what the span-aggregate version could not express.
+ *
+ * Bases are per-span, matching FUN_08ee2960's reset of 0x35b4 / 0x35e0 /
+ * 0x35d8. For unit i:
+ *
+ *     in_base_i  = pre + sum_{j<i} nat_j        (0x35d0, running 0x35d4)
+ *     out_base_i =       sum_{j<i} tgt_j        (0x35d8)
+ *     out_end_i  = out_base_i + tgt_i           (0x35dc)
+ *     scale_i    = nat_i / tgt_i                (0x35e4, via FUN_08ee1640)
+ *
+ * and the frame's wanted input position is FUN_08ee33f0 @ 0x08ee3512:
+ *
+ *     ideal = in_base_i + (int)((float)(out_pos - out_base_i) * scale_i)
+ *
+ * ⚠ The engine ALSO splits the frame that straddles a unit boundary into two
+ * hops with the advance between them (`this+0x3600`). That is not reproduced
+ * and does not need to be: both halves come from the same frame buffer, so
+ * the SAMPLES are identical either way -- the split exists so FUN_08ee2e70
+ * can fire its boundary notification at the right output offset. */
+static int emit_body_tscale_plan(spfy_wsola_streamer_t *s,
+                                 const int16_t *buf, size_t buf_n,
+                                 size_t content_end,
+                                 size_t *io_pos, size_t pre, size_t in_base0,
+                                 uint32_t sps)
+{
+    const size_t W = s->W, hop = s->hop;
+    const spfy_wsola_unit_t *pl = s->plan;
+    const size_t n = s->plan_n;
+    if (n == 0 || sps == 0) return SPFY_OK;
+
+    /* Read straight off FUN_08ee3560's tail, which is the ONLY place the
+     * join's contribution to the span budget is written down:
+     *
+     *     this+0x35d0 = hop + lag                   in_base for unit 0
+     *     FUN_08ee1640(this, (0x35d4 - 0x35d0) >> shift)
+     *     FUN_08ee33f0(this, 0x35d0 + hop, hop)     read_pos, OUT_POS = hop
+     *
+     * Two things fall out and both were wrong here before:
+     *
+     *  1. The join emits W samples but advances the output cursor by only
+     *     `hop`. Counting W against the span's target over-deducts; counting
+     *     zero under-deducts. The first cost ~3% duration at every rate; the
+     *     second left ~9% of the output unscaled, which read as a slope
+     *     (long when fast, short when slow) pivoting near \!rp90.
+     *
+     *  2. Unit 0's natural length is REDUCED to (0x35d4 - 0x35d0), i.e. by
+     *     however much input the join already consumed. Its TARGET is not
+     *     reduced, so unit 0 legitimately scales harder than its neighbours.
+     *
+     * Units after the first keep their true buffer positions: 0x35d4 is the
+     * running base FUN_08ee2960 seeded at `pre`, and the join does not move
+     * it. */
+    /* Unit 0's natural is the span's own, less whatever input the join
+     * already consumed -- FUN_08ee3560 passes (0x35d4 - 0x35d0) >> shift.
+     * Its TARGET is not reduced, so unit 0 legitimately scales harder. */
+    size_t in_base = in_base0;
+    size_t next_base = pre + (size_t)pl[0].nat_ms * sps;      /* 0x35d4 */
+    size_t nat_smp = (next_base > in_base) ? next_base - in_base : 1u;
+    uint32_t nat_ms = (uint32_t)(nat_smp / sps);
+    if (nat_ms == 0u) nat_ms = 1u;
+
+    size_t rp = *io_pos;
+    size_t out_pos = hop;          /* FUN_08ee33f0(this, ..., hop) */
+    size_t ui = 0;
+    size_t out_base = 0;
+    float acc_ms = 0.0f;
+
+    /* FUN_08ee1640, with the length the engine actually passes it. */
+#define SPFY_UNIT_STEP(idx, neff)                                              do {                                                                           float _t = pl[idx].tgt_ms;                                                 if ((int32_t)_t >= (int32_t)(neff) && pl[idx].plosive) {                       cur_scale = 1.0f;  acc_ms += (float)(neff);                            } else {                                                                       cur_scale = (_t > 0.0f) ? (float)(neff) / _t : 1.0f;                       acc_ms += _t;                                                          }                                                                          out_end = (size_t)((float)sps * acc_ms);                               } while (0)
+
+    float cur_scale = 1.0f;
+    size_t out_end = 0;
+    SPFY_UNIT_STEP(0, nat_ms);
+
+    for (;;) {
+        /* ⚠ ADVANCE BEFORE EMIT. FUN_08ee33f0 runs its unit-advance at the
+         * end of the join/prologue, i.e. BEFORE the body loop, and
+         * FUN_08ee36e0 guards its do-while with `if (0x35bc < 0x35c0)`. A
+         * span whose first unit already satisfies the test therefore emits
+         * ZERO body frames. Emitting first and checking after gets every
+         * multi-frame span right and every zero-frame span wrong by exactly
+         * one W -- measured as +80 on each of the two leading pau spans. */
+        while (out_end <= out_pos + W) {
+            if (++ui >= n) goto done;
+            out_base   = out_end;
+            in_base    = next_base;
+            next_base += (size_t)pl[ui].nat_ms * sps;
+            nat_ms     = pl[ui].nat_ms ? pl[ui].nat_ms : 1u;
+            SPFY_UNIT_STEP(ui, nat_ms);
+        }
+        /* ⚠ WHOLE frames only, and the advance test is
+         * `out_end <= out_pos + W` -- FUN_08ee33f0's
+         * `if (this[0x35dc] <= iVar2)` with iVar2 = W + out_pos. Together
+         * they stop the body ONE FRAME SHORT of out_end, which is why the
+         * engine's per-span emission is always hop + k*W for integer k.
+         * Emitting a partial final frame to "reach" out_end instead adds a
+         * few samples per span and no amount of target tuning recovers it.
+         *
+         * Verified against the engine's own cursor (this+0x35f4, captured
+         * per span via FUN_08ee1700) on all 19 spans of
+         * "The national weather service has issued a warning." at \!rp100. */
+        /* FUN_08ee33f0 @ 0x08ee3512, operand for operand:
+         *
+         *     ideal = in_base + (int)((float)(0x35b8 - out_base) * scale)
+         *
+         * and 0x35b8 is `W + out_pos`, NOT out_pos. Dropping that W leaves
+         * every span the right LENGTH -- the frame count is set by out_end,
+         * which does not involve it -- while sourcing each frame a window
+         * early, so the samples differ with the durations exact. */
+        /* FUN_08ee1640 stores the scale as a FLOAT32 (FILD / FDIV dword /
+         * FSTP dword), then FUN_08ee33f0 multiplies by it on the x87 stack
+         * in 80-bit and truncates once at the __ftol. Reproduce both halves:
+         * scale narrowed to float, the product widened to long double.
+         * Under -fexcess-precision=standard a plain float multiply rounds
+         * the product too, which is one rounding more than the engine does. */
+        long adv = (long)((long double)(out_pos + W - out_base)
+                          * (long double)cur_scale);
+        long ideal_l = (long)in_base + adv;
+        if (ideal_l < 0) ideal_l = 0;
+        /* The inputs to `ideal`, so a one-sample miss can be attributed to
+         * the scale, the bases or the truncation rather than guessed at.
+         * wsola_frame_hook.js reports scale and out_pos for the same frame. */
+        if (s->frame_trace)
+            fprintf(stderr, "[wsolab] out_pos=%zu out_base=%zu in_base=%zu "
+                    "unit=%zu scale=%.9g adv=%ld ideal=%ld\n",
+                    out_pos, out_base, in_base, ui, (double)cur_scale,
+                    adv, ideal_l);
+
+        int rc = tscale_frame(s, buf, buf_n, content_end, &rp, (size_t)ideal_l, W);
+        if (rc == -1) break;                   /* ran out of input */
+        if (rc == -2) return SPFY_E_IO;
+        out_pos += W;
+    }
+done:
+#undef SPFY_UNIT_STEP
+    *io_pos = rp;
+    return SPFY_OK;
+}
+
 int spfy_wsola_push_engine(spfy_wsola_streamer_t *s,
                            const int16_t *buf, size_t buf_n,
                            size_t pre, size_t content_n)
@@ -487,9 +881,57 @@ int spfy_wsola_push_engine(spfy_wsola_streamer_t *s,
     size_t stop = (content_end > hop) ? (content_end - hop) : 0;
     size_t end_pos = read_pos;
     if (stop > read_pos) {
-        int rc = spfy_wav_write(s->wav, buf + read_pos, stop - read_pos);
-        if (rc != SPFY_OK) return rc;
-        end_pos = stop;
+        if (s->tscale_on && s->plan && s->plan_n) {
+            /* FUN_08ee3560 sets 0x35d0 = hop + lag on a join; the first span
+             * of a phrase keeps FUN_08ee2960's `pre`. */
+            size_t in_base0 = (s->hist_n == 0)
+                            ? pre
+                            : hop + (size_t)((s->last_lag > 0)
+                                             ? s->last_lag : 0);
+            uint32_t sps = s->wav ? (s->wav->sample_rate / 1000u) : 8u;
+            if (sps == 0u) sps = 1u;
+            end_pos = read_pos;
+            /* this+0x35c4 -- the recording-clamped input limit, not the
+             * zero-padded buffer length. */
+            size_t span_lim = s->span_limit ? s->span_limit : buf_n;
+            int rc = emit_body_tscale_plan(s, buf, buf_n, span_lim,
+                                           &end_pos, pre, in_base0, sps);
+            if (rc != SPFY_OK) return rc;
+            /* ⚠ NOT forced to `stop`. FUN_08ee1700 takes the next join's
+             * history from wherever the walk actually left the read cursor
+             * (buf + 0x35a8), and a time-scaled walk does not end at the
+             * straight-copy stop point. */
+        } else if (s->tscale_on && s->unit_scale != 1.0f) {
+            /* The span's WHOLE output budget is content_n / scale, and the
+             * samples already emitted by the join (W) or the first-unit
+             * prologue (hop) come OUT of that budget -- FUN_08ee33f0 sets
+             * out_base right after the join, so the engine's frame loop runs
+             * until out_pos reaches an out_end that counts those samples.
+             *
+             * ⚠ Budgeting the body from the remaining INPUT instead left the
+             * join's W samples outside the stretch, so every span leaked an
+             * un-stretched W. On a ~30-join utterance that is ~13% of the
+             * output refusing to scale, which showed up as \!rp50 reaching
+             * 1.902x instead of ~1.97x. */
+            size_t pre_emit = (s->hist_n == 0) ? hop : W;
+            size_t budget = (size_t)((float)content_n / s->unit_scale + 0.5f);
+            size_t out_span = 0;
+            if (budget > pre_emit + hop) out_span = budget - pre_emit - hop;
+            end_pos = read_pos;
+            size_t span_lim2 = s->span_limit ? s->span_limit : buf_n;
+            int rc = emit_body_tscale(s, buf, buf_n, span_lim2, &end_pos,
+                                      out_span, s->unit_scale);
+            if (rc != SPFY_OK) return rc;
+            /* The frame walk stops wherever the last whole frame landed;
+             * the next join's history must still be taken from the end of
+             * this unit's content, or a compressed unit would hand the join
+             * material it never emitted. */
+            if (end_pos < stop) end_pos = stop;
+        } else {
+            int rc = spfy_wav_write(s->wav, buf + read_pos, stop - read_pos);
+            if (rc != SPFY_OK) return rc;
+            end_pos = stop;
+        }
     }
 
     /* History for the next join: FUN_08ee2d60 copies `corr` samples from

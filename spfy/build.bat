@@ -20,19 +20,10 @@ REM    build_emu.bat      x64, emulator-backed FE
 REM    build_hosted.bat   x64 viz tracer -> bin\spfy_synth_trace.exe
 REM
 REM  Usage:
-REM    build.bat              configure + build
+REM    build.bat              configure + build + ctest (default)
 REM    build.bat clean        remove build dir
 REM    build.bat rebuild      clean then configure+build
 REM    build.bat configure    configure only
-REM    build.bat test         configure + build + ctest (may be blocked by AV)
-REM
-REM  Why no tests by default: Windows Defender heuristic-flags small mingw
-REM  test exes containing crypto-like byte patterns (the 0xCE constant
-REM  used by the SWIttsRiffEncryption module). ctest reports them as
-REM  BAD_COMMAND because Defender silently kills the launch. The
-REM  canonical 1:1 test target is Linux x86_64; on this Windows host,
-REM  use 'build.bat test' if you have a Defender exclusion configured,
-REM  otherwise rely on the Linux build for test verification.
 REM
 REM  Override the toolchain location:
 REM    set MSYS_ROOT=D:\msys2 && build.bat
@@ -72,10 +63,9 @@ pushd "%SCRIPT_DIR%" >nul
 if /I "%ACTION%"=="clean"     goto :clean
 if /I "%ACTION%"=="rebuild"   goto :rebuild
 if /I "%ACTION%"=="configure" goto :configure
-if /I "%ACTION%"=="test"      goto :test
 if /I "%ACTION%"=="all"       goto :all
 echo unknown action: %ACTION%
-echo usage: build.bat [clean^|rebuild^|configure^|test]
+echo usage: build.bat [clean^|rebuild^|configure^|all]
 popd >nul
 exit /b 2
 
@@ -95,7 +85,7 @@ set "RC=%ERRORLEVEL%"
 popd >nul
 exit /b %RC%
 
-:test
+:all
 call :do_configure
 if errorlevel 1 ( popd >nul & exit /b 1 )
 call :do_build
@@ -104,15 +94,6 @@ call :do_test
 set "RC=%ERRORLEVEL%"
 popd >nul
 exit /b %RC%
-
-:all
-call :do_configure
-if errorlevel 1 ( popd >nul & exit /b 1 )
-call :do_build
-if errorlevel 1 ( popd >nul & exit /b 1 )
-echo [done] build OK. tests skipped on Windows; run 'build.bat test' to attempt.
-popd >nul
-exit /b 0
 
 :do_configure
 echo [configure] cmake -^> "%BUILD_DIR%"

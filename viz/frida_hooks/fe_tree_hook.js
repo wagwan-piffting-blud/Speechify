@@ -171,7 +171,14 @@ var FEATURES_FOR_REL = {
      * (the accent value the FE computes), plus break-index. */
     "Syllable":     ["stress", "stress_level", "acc_valu",
                      "bk_index", "annot", "str_acc"],
-    "Segment":      ["name", "stress", "duration"],
+    /* `end` / `closure` added 2026-09-04: SWIttsUSel's duration extractor
+     * FUN_08e8fb20 does not read a "duration" feature at all -- it reads
+     * this segment's `end` and the PREVIOUS segment's `end`, splits at the
+     * midpoint (or at `closure` for a stop) and hands USel the two
+     * halfphone lengths. The absolute clock is what carries the float32
+     * noise behind the `?d` pause, so it has to be captured directly. */
+    "Segment":      ["name", "stress", "duration", "end", "closure",
+                     "start"],
     "Phrase":       ["name", "phr_tone", "bound_tone", "nuc_tone",
                      "brk_priority"],
     /* IntEvent.name is the accent string ("H*", "L*", "L+H*", "H+L*",

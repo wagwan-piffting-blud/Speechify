@@ -376,6 +376,18 @@ path. It used to live only inside `spfy_sapi.c`, where SAPI does the XML parsing
 itself; on a plain `spfy_synth` run the tags were not ignored, they were read
 out loud.
 
+WASM is the same code, not a reimplementation: `wasm/CMakeLists.txt` compiles
+`src/cli/spfy_synth.c` into `spfy_synth_lib` with `SPFY_SYNTH_NO_MAIN`, and
+`spfy_wasm_synth()` calls the same `spfy_synth_to_sink()` the CLI and the SAPI
+shim do. The web demo passes the textarea through verbatim and plays the PCM
+into `AudioContext.destination` with no gain stage, so nothing is masked
+between the engine and the speaker. Verify with
+`node wasm/tools/prosody_wasm_check.mjs` — it drives the shipped
+`dist/spfy_wasm.wasm` and asserts **amplitude**, which the older
+`ssml_wasm_check.mjs` never did: every assertion in that file is a sample
+count, and volume does not change length, so a completely dead volume control
+passed it.
+
 | Element | Mapped to | Notes |
 |---|---|---|
 | `<speak>` | - | stripped; `xml:lang` and other attributes ignored |
@@ -408,7 +420,7 @@ Accepted in plain text on the `spfy_synth` path, alongside the FE's own escapes:
 |---|---|
 | `\![SPR ...]` | inline phoneme escape, passed to the FE untouched |
 | `\!pN` | pause, passed through |
-| `\!vpN` / `\!vdN` | volume, percent or delta, from the tagged word onward |
+| `\!vpN` / `\!vdN` | volume, percent of the port value / of the server default, from the tagged word onward. `\!vp0` is silence. Both bases are 100 here — there is no API to set either — so the two spellings are currently equivalent |
 | `\!rpN` / `\!rdN` | rate as a **selection** bias, from the tagged word onward |
 | `\!wpN` / `\!wdN` | rate as a **time-scale on the rendered audio** |
 | `\!ppN` / `\!pdN` | pitch, percent of base F0 (100 = unchanged); selection bias plus TD-PSOLA residual |
@@ -419,23 +431,103 @@ Accepted in plain text on the `spfy_synth` path, alongside the FE's own escapes:
 they appear to the end of the utterance. Use `\!vpr`, `\!rpr`, `\!wpr` and
 `\!ppr` to reset.
 
-### `\!rp` versus `\!wp`, two different things called "rate"
+A space between the tag and its value (`\!vp 50`) and a value fused to the
+next word (`\!vp50Hello`) are both accepted. Neither is the intended spelling,
+but rejecting them was worse than either reading: the tag fell through to the
+generic `\!`-swallow, which speaks the number in the first case and deletes the
+word in the second — both of which look like "the tag does nothing".
 
-They are not alternatives and both are worth having.
+⚠ Volume is applied as a per-unit gain **before** the WSOLA push, not at the
+sink, and that has one measurable consequence. For any gain at or below 1.0 it
+is invisible: scaling both arms of an unnormalised correlation cannot move its
+argmax, and `\!vp50` is sample-for-sample the untagged render halved. Two cases
+escape that. Above 1.0 the scaled buffer clips, and clipping *does* move the lag
+search — `<prosody volume="x-loud">` comes out 64 samples longer than the same
+text untagged. At exactly 0 the search runs on silence and ties, which is why
+`volume="silent"` is 686 samples longer. The audio is right in both; only the
+length moves.
 
-| | `\!rp50` | `\!wp50` |
-|---|---|---|
-| what it changes | the CART duration target, so a different unit gets picked | a WSOLA time-scale on the audio that came out |
-| measured on "The national weather service has issued a warning." (tom) | 2.133 s to 2.303 s (x1.08) | 2.133 s to 4.123 s (x1.93) |
-| alters unit selection | yes | no |
-| saturates | around +9% in the slow direction | no |
+It does **not** affect selection. USel runs to completion before a single
+sample is decoded, and the gain touches decoded PCM only; the chosen path is
+bit-identical at `\!vp0`, `\!vp10`, `\!vp50`, `\!vp200` and `\!vp400`, on a
+dump that moves when one character of the text changes.
 
-`\!rp` is the natural one: the voice genuinely says it slower, using slower
-recordings, as far as the corpus can go. `\!wp` is the literal one and will take
-any factor you ask for, at the usual cost of a time-scale. SSML
-`<prosody rate>` maps to `\!wp`, because that is what a user writing SSML
-expects "rate" to mean. `SPFY_RATE` is still there and is `\!wp` applied to the
-whole utterance at once.
+Pre-WSOLA is also what makes a *mid-utterance* volume change work. Every unit
+boundary is a Hann crossfade that sums the previous chunk's windowed tail with
+the new chunk's windowed head, so the samples at a join belong to **both**
+units. Scaling each unit before the push means the join blends `g1*prev` with
+`g2*next` and the gain ramps across the same ~5.6 ms window the audio does —
+measured on `Hello world \!vp50 this is a test.`. A gain applied after the
+push has no per-unit samples left to work on at a join: it has to pick one
+value for the blended region and step at its edge.
+
+So the placement is right for everything except the two shape-breaking cases
+above. The fix for those is not to move the gain wholesale but to **split it**:
+push at `min(g, 1)` — shape-preserving, exact boundaries, byte-identical to
+today for every attenuation — and hand the remainder (the >1 excess, or the
+mute at 0) to a sink-side span. Not done.
+
+### `\!rp` and `\!rd`, speaking rate
+
+`\!rpN` sets the rate to N percent of the port value, `\!rdN` to N percent of
+the server default, and `\!rpr` / `\!rdr` reset to those values. Legal range is
+33 to 300, per the User's Guide p.82. Duration comes out at about **100/N**:
+
+| | `\!rp33` | `\!rp50` | `\!rp75` | `\!rp150` | `\!rp200` | `\!rp300` |
+|---|---|---|---|---|---|---|
+| ideal 100/N | 3.030 | 2.000 | 1.333 | 0.667 | 0.500 | 0.333 |
+| vendor engine | 2.991 | 1.969 | 1.317 | 0.675 | 0.506 | 0.328 |
+| spfy | 2.902 | 1.942 | 1.297 | 0.648 | 0.488 | 0.329 |
+
+Measured on "The national weather service has issued a warning.", vendor on tom
+and spfy on crstom, each relative to its own untagged render.
+
+#### How it works, and why it is not a selection bias
+
+The engine does **not** move the rate by picking different recordings; it
+time-scales each selected unit inside the WSOLA join. `FUN_08ee2960` rewrites
+the target the moment rate is armed, and the two branches differ:
+
+```
+factor = 100.0f / rate_level
+pau:   target = factor * target      (the duration model's target)
+else:  target = natural * factor     (the unit's OWN length)
+```
+
+So for a **non-pause** unit the duration model is not consulted at all — the
+unit is stretched onto its own natural length times 100/N, which makes the
+scale the constant N/100. Only **pauses** go through the duration target. Two
+further details matter and both are reproduced here:
+
+- **Plosives are never stretched.** `FUN_08ee15a0` classifies a label as a stop
+  or affricate (`p b t d k g`, `ch`, `jh` — explicitly *not* `pau`, `dh`, `th`),
+  and a unit that would be *lengthened* passes through at its natural length
+  instead. Compression is still allowed, so the guard is one-sided. This is why
+  the engine's slow speech does not smear the way a flat time-scale does.
+- **Pauses always scale**, including an explicit `\!p`. `pau` is excluded from
+  that guard twice over. A `\!p500` at `\!rp50` comes out 2.00x longer here
+  against the vendor's 2.04x.
+
+`\!rp` also **arms** target-matching for the whole utterance. Without any rate
+tag the engine plays every unit at its natural length and never consults the
+duration targets at all, so a rate tag changes the audio even when it asks for
+no change: `\!rp100` and `\!rpr` both render differently from no tag, while
+`\!vp100` is byte-identical. spfy matches that, which is also why the parity
+gate still reads 221/221 byte-identical — nothing without a rate tag moves.
+
+> ⚠ `\!rp` used to bias the CART duration target and hope selection delivered.
+> It cannot: selection saturates near +9% in the slow direction, so `\!rp50`
+> stretched by 1.08x instead of 2x. That was spfy's bug, not the tag's meaning.
+
+#### `\!wp`, the literal escape hatch
+
+`\!wp` is a flat WSOLA time-scale on the rendered audio, with no plosive guard
+and no target matching. It takes any factor you ask for and is the right tool
+when you want an exact duration rather than a natural-sounding one. It is not
+an engine tag — the engine has no equivalent — so reach for `\!rp` first.
+
+SSML `<prosody rate>` maps to `\!rp`. `SPFY_RATE` is unchanged and is still
+`\!wp` applied to the whole utterance at once.
 
 `\!pp` splits the same way without asking: it biases selection as far as the
 corpus reaches (`spfy_synth_split_pitch`, +1.5 / -2.0 st on tom) and TD-PSOLA
@@ -483,6 +575,7 @@ obvious rather than silently doing nothing.
 | `<pron sym>` (SAPI XML) | Same path as `<phoneme>` |
 | Word / sentence / bookmark boundaries | `SPEI_*` events with byte-accurate `ullAudioStreamOffset` |
 | Host rate slider (`ISpVoice::SetRate`) | `ISpTTSEngineSite::GetRate()`, summed with `SPVSTATE.RateAdj` |
+| Host volume slider (`ISpVoice::SetVolume`) | `ISpTTSEngineSite::GetVolume()`, multiplied with `SPVSTATE.Volume`. SAPI does **not** apply this for you — until the call existed the slider was inert, measured as byte-identical output at host volume 100 and 30 while `<volume level="30">` on the same harness gave exactly 0.30x |
 
 For pitch specifically: when the requested shift fits Tom's recorded F0 range
 (roughly -2 to +1.5 semitones around a 118 Hz median) it is handled entirely by
