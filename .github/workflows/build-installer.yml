@@ -28,6 +28,14 @@
 #                      macos-x86_64. No SAPI (Windows COM only); each leg
 #                      produces spfy-<target>-<version>.tar.gz. fail-fast
 #                      is off so one target can't hide the others' results.
+#   * standalone     - not a job: every unix leg and the Windows x86 leg
+#                      also upload their spfy_synth on its own, as
+#                      spfy_synth-<target>-<version>[.exe], after running it
+#                      alone from an empty dir against the reference WAV.
+#                      The release adds one SHA256SUMS file covering them.
+#   * macos-universal - lipo of the two macOS standalone binaries, both
+#                      slices verified (x86_64 under Rosetta), then signed
+#                      + notarized. Standalone only; not release-blocking.
 #   * release        - publishes on push once setup + build-windows
 #                      succeed. Unix tarballs are attached if they built;
 #                      any that didn't are annotated as warnings, so a
@@ -456,6 +464,57 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # --------------------------------------------------------------
+      # Standalone spfy_synth.exe - x86 leg only
+      # --------------------------------------------------------------
+
+      # spfy_synth.exe is i686 on BOTH legs (same toolchain, same flags), so
+      # one standalone exe serves 32- and 64-bit Windows alike. It is taken
+      # from the x86 leg because that is the leg whose name it carries.
+      #
+      # ⚠ Copied ALONE into an empty dir and run from a second empty dir with
+      # USERPROFILE pointed at a third. The build tree holds libs and data the
+      # installer ships beside it; a binary that silently needed any of them
+      # would pass every other check in this job.
+      - name: Verify standalone spfy_synth.exe
+        if: matrix.arch == 'x86'
+        run: |
+          $ver  = "${{ needs.setup.outputs.version }}"
+          $iso  = Join-Path $env:RUNNER_TEMP "spfy-standalone"
+          New-Item -ItemType Directory -Force "$iso\bin", "$iso\cwd", "$iso\home" | Out-Null
+          $exe  = "$iso\bin\spfy_synth-windows-x86-$ver.exe"
+          Copy-Item "C:\tmp\spfy_build32\src\cli\spfy_synth.exe" $exe
+          $voice = "${{ github.workspace }}\en-US\tom"
+          $wav   = "$iso\cwd\ref_tom.wav"
+          Push-Location "$iso\cwd"
+          $env:USERPROFILE = "$iso\home"
+          Remove-Item Env:SPFY_VOICE_DIR -ErrorAction SilentlyContinue
+          & $exe "$voice\tom.vin" "$voice\tom8.vdb" "$voice\tom.vcf" `
+                 "The quick brown fox jumps over the lazy dog." $wav
+          $rc = $LASTEXITCODE
+          Pop-Location
+          if ($rc -ne 0) { Write-Error "standalone spfy_synth.exe exited $rc"; exit 1 }
+          $got  = (Get-FileHash -Algorithm SHA256 $wav).Hash.ToLower()
+          $want = "86dde7edb10eb9246ae997f70742cc2f1320de30f5fcb87412a052596bae0bdb"
+          "  got:      $got"
+          "  expected: $want"
+          if ($got -ne $want) {
+            Write-Error "standalone spfy_synth.exe does not reproduce the reference WAV"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force "${{ github.workspace }}\standalone" | Out-Null
+          Copy-Item $exe "${{ github.workspace }}\standalone\"
+          "  BYTE-EXACT with nothing beside it"
+
+      - name: Upload standalone artifact
+        if: matrix.arch == 'x86'
+        uses: actions/upload-artifact@v7
+        with:
+          name: spfy-standalone-windows-x86-${{ needs.setup.outputs.version }}
+          path: standalone/spfy_synth-windows-x86-*.exe
+          if-no-files-found: error
+          retention-days: 30
+
   # --------------------------------------------------------------------
   # build-unix - Linux + macOS matrix. No SAPI (Windows COM only); ships
   # the spfy_synth CLI + the runtime data files needed to synthesize
@@ -759,6 +818,51 @@ jobs:
           SPFY_OSX_DEPLOYMENT_TARGET: ${{ matrix.osx_target }}
         run: bash spfy/ci/build_unix.sh
 
+      # ⭐ Developer ID + notarization for the macOS spfy_synth, IN PLACE in
+      # build-out, so the standalone file and the tarball both ship the signed
+      # binary. The GUI and Speechify.app are NOT signed here (not a priority
+      # yet); the .app therefore still hits Gatekeeper when downloaded.
+      #
+      # ⚠ Missing secrets FAIL a push build rather than shipping unsigned:
+      # an unsigned download hangs at launch under quarantine, which is the
+      # exact thing this step exists to prevent. workflow_dispatch only warns,
+      # so a fork or a secrets-less test run still builds.
+      #
+      # Secrets:
+      #   MACOS_DEVID_P12_BASE64    Developer ID Application cert + key, .p12, base64
+      #   MACOS_DEVID_P12_PASSWORD  its export password
+      #   APPLE_NOTARY_KEY_P8_BASE64  App Store Connect API key (.p8), base64
+      #   APPLE_NOTARY_KEY_ID       its key id
+      #   APPLE_NOTARY_ISSUER_ID    its issuer uuid
+      - name: Sign + notarize spfy_synth (macOS)
+        if: runner.os == 'macOS'
+        env:
+          P12_B64: ${{ secrets.MACOS_DEVID_P12_BASE64 }}
+          P12_PW: ${{ secrets.MACOS_DEVID_P12_PASSWORD }}
+          P8_B64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          SPFY_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          SPFY_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -eu
+          if [ -z "$P12_B64" ] || [ -z "$P8_B64" ]; then
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "::error title=Unsigned::signing secrets missing on a release build"
+              exit 1
+            fi
+            echo "::warning title=Unsigned::signing secrets missing - macOS spfy_synth ships UNSIGNED"
+            exit 0
+          fi
+          echo "$P12_B64" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          echo "$P8_B64"  | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          # The script builds and deletes its own throwaway keychain.
+          SPFY_P12="$RUNNER_TEMP/devid.p12" SPFY_P12_PASSWORD="$P12_PW" \
+          SPFY_NOTARY_KEY="$RUNNER_TEMP/notary.p8" \
+            bash spfy/ci/macos_sign.sh build-out/src/cli/spfy_synth
+
+      - name: Remove signing material (macOS)
+        if: always() && runner.os == 'macOS'
+        run: rm -f "$RUNNER_TEMP/devid.p12" "$RUNNER_TEMP/notary.p8"
+
       # Same script, inside the container. The workspace is bind-mounted, so
       # build-out lands on the host and the packaging steps below are shared
       # with the native legs.
@@ -952,6 +1056,109 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # The same build-out/src/cli/spfy_synth the tarball carries, which
+      # build_unix.sh has already run ALONE from an empty dir and matched
+      # against the reference WAV. FE DLL and tables are embedded and voices
+      # come from --install-voice, so the one file is a working engine.
+      #
+      # ⚠ Release assets carry no exec bit; the README says to chmod +x.
+      - name: Stage standalone binary
+        run: |
+          set -eu
+          mkdir -p standalone
+          cp build-out/src/cli/spfy_synth \
+             "standalone/spfy_synth-${{ matrix.id }}-${{ needs.setup.outputs.version }}"
+          ls -la standalone/
+
+      - name: Upload standalone artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: spfy-standalone-${{ matrix.id }}-${{ needs.setup.outputs.version }}
+          path: standalone/spfy_synth-*
+          if-no-files-found: error
+          retention-days: 30
+
+  # --------------------------------------------------------------------
+  # macos-universal - lipo the two per-arch standalone spfy_synth builds
+  # into spfy_synth-macos-universal-<version>, run BOTH slices (x86_64 via
+  # Rosetta) against the reference WAV, then sign + notarize the fat file.
+  # Standalone binary only: the tarballs stay per-arch.
+  # --------------------------------------------------------------------
+
+  macos-universal:
+    needs: [setup, build-unix]
+    # build-unix is a matrix, so its result is failure if ANY leg failed; this
+    # job only needs the two macOS ones, and the download below fails loudly
+    # if either is missing.
+    if: ${{ !cancelled() && needs.setup.result == 'success' }}
+    runs-on: macos-14
+    timeout-minutes: 25
+
+    steps:
+      # Two scripts and the reference voice, not the ~2.6 GB voice tree.
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            spfy/ci
+            en-US/tom
+          sparse-checkout-cone-mode: true
+
+      - name: Download the per-arch binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: spfy-standalone-macos-*-${{ needs.setup.outputs.version }}
+          path: in
+          merge-multiple: true
+
+      - name: Fuse + verify both slices
+        run: |
+          set -eu
+          V="${{ needs.setup.outputs.version }}"
+          ls -la in/
+          mkdir -p standalone
+          bash spfy/ci/macos_universal.sh \
+            "in/spfy_synth-macos-arm64-$V" "in/spfy_synth-macos-x86_64-$V" \
+            "standalone/spfy_synth-macos-universal-$V"
+
+      # Same policy as the per-arch legs: missing secrets fail a push build.
+      - name: Sign + notarize
+        env:
+          P12_B64: ${{ secrets.MACOS_DEVID_P12_BASE64 }}
+          P12_PW: ${{ secrets.MACOS_DEVID_P12_PASSWORD }}
+          P8_B64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          SPFY_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          SPFY_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -eu
+          if [ -z "$P12_B64" ] || [ -z "$P8_B64" ]; then
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "::error title=Unsigned::signing secrets missing on a release build"
+              exit 1
+            fi
+            echo "::warning title=Unsigned::signing secrets missing - universal spfy_synth ships UNSIGNED"
+            exit 0
+          fi
+          echo "$P12_B64" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          echo "$P8_B64"  | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          SPFY_P12="$RUNNER_TEMP/devid.p12" SPFY_P12_PASSWORD="$P12_PW" \
+          SPFY_NOTARY_KEY="$RUNNER_TEMP/notary.p8" \
+            bash spfy/ci/macos_sign.sh \
+              "standalone/spfy_synth-macos-universal-${{ needs.setup.outputs.version }}"
+
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/devid.p12" "$RUNNER_TEMP/notary.p8"
+
+      - name: Upload standalone artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: spfy-standalone-macos-universal-${{ needs.setup.outputs.version }}
+          path: standalone/spfy_synth-macos-universal-*
+          if-no-files-found: error
+          retention-days: 30
+
   # --------------------------------------------------------------------
   # release - dated GitHub Release with both platforms attached. Only
   # fires on push events (main branch or tag); workflow_dispatch stops
@@ -959,7 +1166,7 @@ jobs:
   # --------------------------------------------------------------------
 
   release:
-    needs: [setup, build-windows, build-unix]
+    needs: [setup, build-windows, build-unix, macos-universal]
     # `needs:` defaults to requiring EVERY listed job to succeed, so a single
     # build-unix matrix leg failing (or being cancelled - e.g. a retired
     # runner label that never gets picked up) used to skip the release
@@ -1006,6 +1213,15 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Separate pattern, same dir: `spfy-installer-*` must not widen to catch
+      # these, or a leg whose tarball failed would look present by its binary.
+      - name: Download standalone binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: spfy-standalone-*-${{ needs.setup.outputs.version }}
+          path: dist
+          merge-multiple: true
+
       # A partial release is allowed (see the job's `if:`), so make it
       # loud rather than silently short: annotate every target that didn't
       # produce a tarball.
@@ -1038,7 +1254,25 @@ jobs:
               echo "::warning title=Missing target::no artifact for $t - release is partial"
               missing=$((missing + 1))
             fi
+            if [ ! -f "dist/spfy_synth-$t-${{ needs.setup.outputs.version }}" ]; then
+              echo "::warning title=Missing standalone::no spfy_synth for $t - release is partial"
+              missing=$((missing + 1))
+            fi
           done
+          if [ ! -f "dist/spfy_synth-windows-x86-${{ needs.setup.outputs.version }}.exe" ]; then
+            echo "::warning title=Missing standalone::no spfy_synth for windows-x86 - release is partial"
+            missing=$((missing + 1))
+          fi
+          if [ ! -f "dist/spfy_synth-macos-universal-${{ needs.setup.outputs.version }}" ]; then
+            echo "::warning title=Missing standalone::no spfy_synth for macos-universal - release is partial"
+            missing=$((missing + 1))
+          fi
+
+          # One checksum file for every raw binary. A tarball or installer is
+          # its own container; a bare executable has nothing else to vouch for it.
+          ( cd dist && ls spfy_synth-* >/dev/null 2>&1 \
+              && sha256sum spfy_synth-* > "spfy_synth-SHA256SUMS-${{ needs.setup.outputs.version }}.txt" \
+              && cat "spfy_synth-SHA256SUMS-${{ needs.setup.outputs.version }}.txt" ) || true
           if [ "$missing" -gt 0 ]; then
             echo "::warning title=Partial release::$missing target(s) missing from this release"
           else
@@ -1075,6 +1309,7 @@ jobs:
             dist/spfy-setup-${{ needs.setup.outputs.version }}.exe
             dist/spfy-setup-${{ needs.setup.outputs.version }}-x86.exe
             dist/*.tar.gz
+            dist/spfy_synth-*
 
       # ------------------------------------------------------------------
       # update.json - the one file every installed copy polls.

@@ -215,3 +215,36 @@ if [ "$got" != "$REF_SHA" ]; then
     exit 1
 fi
 echo "  BYTE-EXACT"
+
+# ------------------------------------------------------------------
+# The standalone binary: the same spfy_synth, shipped on its own.
+#
+# The run above cannot prove that. It starts in the repo root with the build
+# tree beside it, so a binary quietly reading spfy/data/ or bin/*.dll from
+# cwd would pass it and then fail for everyone who downloads just the file.
+# This copies the binary ALONE into an empty dir, runs it from a second
+# empty dir under an empty HOME, and demands the same bytes.
+# ------------------------------------------------------------------
+echo "=== verify: standalone binary ==="
+repo="$(pwd)"
+iso="$(mktemp -d)"
+mkdir -p "$iso/bin" "$iso/cwd" "$iso/home"
+cp "$SYNTH" "$iso/bin/spfy_synth"
+(
+    cd "$iso/cwd"
+    env -u SPFY_VOICE_DIR HOME="$iso/home" \
+        "$iso/bin/spfy_synth" "$repo/$REF_VIN" "$repo/$REF_VDB" \
+        "$repo/$REF_VCF" "$REF_TEXT" "$iso/cwd/ref_tom.wav"
+)
+if command -v sha256sum >/dev/null 2>&1; then
+    got="$(sha256sum "$iso/cwd/ref_tom.wav" | cut -d' ' -f1)"
+else
+    got="$(shasum -a 256 "$iso/cwd/ref_tom.wav" | cut -d' ' -f1)"
+fi
+echo "  got:      $got"
+rm -rf "$iso"
+if [ "$got" != "$REF_SHA" ]; then
+    echo "::error title=Standalone regression::spfy_synth alone does not reproduce the reference WAV" >&2
+    exit 1
+fi
+echo "  BYTE-EXACT with nothing beside it"

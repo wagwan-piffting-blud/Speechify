@@ -1,5 +1,11 @@
 # Speechify/spfy Changelog
 
+## 2026-09-25
+
+- **Add macOS Speechify binaries to the release assets.** This is a macOS build of the spfy re-implementation engine that can be used on both types of macOS systems. It is built using the same source code as the Windows and Linux builds, and is intended to provide a native macOS experience for users who prefer to use the command line on macOS. NOTE: Does NOT include the GUI yet. It will soon, however. Builds are available for both Intel and Apple Silicon (M1/M2) Macs, as well as a single universal build.
+
+---
+
 ## 2026-09-06
 
 - **spfy is now BYTE-IDENTICAL with \!r[p|d]N rate tags.** spfy had a "missing feature", where the `\!r` rate tags were not being applied to the synthesized speech correctly, leading to the output being different from the original Speechify engine. This has been fixed, and spfy now produces byte-identical output with the original engine when using `\!r` rate tags. This means that using the rate tags like `\!rp120 Tom will say this sentence twenty percent faster than normal.` or `\!rd33 Tom will say this really slowly.` will now produce the same hashed output as the original Speechify engine when either `\!rpN` or `\!rdN` is used with the integer N specified (a percentage greater than zero for rp, and between 33-300 for rd, per the 2003 Speechify User's Guide).
