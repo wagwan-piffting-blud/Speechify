@@ -187,8 +187,11 @@ if [ "$crc" -eq 0 ]; then
     # The unsigned control ran too, so this host does not enforce quarantine
     # and the pass above says nothing about Gatekeeper. Notarization status
     # is still a hard gate; only this launch test is inconclusive.
+    # GitHub's macOS images are like this (measured 2026-09-25); the Gatekeeper
+    # proof comes from a host that enforces it, e.g. the Mac Mini.
     echo "::warning title=Quarantine gate inert::unsigned control ran quarantined on this host; only notarization status is proven" >&2
+    echo "  SIGNED + NOTARIZED, BYTE-EXACT (quarantine NOT enforced on this host)"
 else
     echo "  control (unsigned) blocked: rc=$crc"
+    echo "  SIGNED + NOTARIZED, runs quarantined, BYTE-EXACT"
 fi
-echo "  SIGNED + NOTARIZED, runs quarantined, BYTE-EXACT"

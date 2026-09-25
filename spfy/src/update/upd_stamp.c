@@ -25,6 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#  define UPD_SEP '\\'
+#else
+#  define UPD_SEP '/'
+#endif
+
 #define UPD_STAMP_MAX 128
 
 typedef struct {
@@ -190,13 +196,8 @@ void spfy_upd_local_voice_read(const char *voice_dir, spfy_upd_local_voice *lv)
     int arr, it;
 
     memset(lv, 0, sizeof *lv);
-    if (snprintf(path, sizeof path, "%s%cvoice.json", voice_dir,
-#ifdef _WIN32
-                 '\\'
-#else
-                 '/'
-#endif
-                 ) >= (int)sizeof path)
+    if (snprintf(path, sizeof path, "%s%cvoice.json", voice_dir, UPD_SEP)
+            >= (int)sizeof path)
         return;
 
     buf = slurp(path, 256L * 1024L);

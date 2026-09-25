@@ -302,7 +302,7 @@ int main(int argc, char **argv)
         free(raws);
 
         /* Calibrate the gauge, so the comparison is about the METRIC. */
-        double v_raw_med = ((double)v_med - jo) / (jw ? jw : 1.0);
+        double v_raw_med = ((double)v_med - jo) / (jw != 0.0f ? jw : 1.0);
         double scale = (o_med > 0.0f) ? v_raw_med / (double)o_med : 1.0;
         printf("mfcc: raw median ours %.4f -> vendor %.4f, scale %.4f\n",
                (double)o_med, v_raw_med, scale);

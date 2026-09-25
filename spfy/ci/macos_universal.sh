@@ -35,6 +35,8 @@ REF_VCF="$(pwd)/en-US/tom/tom.vcf"
 
 echo "=== lipo ==="
 lipo -create "$ARM" "$X86" -output "$OUT"
+# Absolute from here on: the slice runs below cd into a scratch dir.
+OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 # Order-independent: lipo does not promise which slice it lists first.
 got_archs="$(lipo -archs "$OUT" | tr ' ' '\n' | sort | xargs)"
 [ "$got_archs" = "arm64 x86_64" ] \

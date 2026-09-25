@@ -16,6 +16,12 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+#  define UPD_SEP '\\'
+#else
+#  define UPD_SEP '/'
+#endif
+
 void spfy_upd_strlcpy(char *dst, const char *src, size_t dst_n)
 {
     size_t n;
@@ -155,13 +161,8 @@ int spfy_upd_machine_opt_out(void)
     if (cached >= 0) return cached;
     cached = 0;
     if (spfy_upd_self_dir(dir, sizeof dir) == 0 &&
-        snprintf(marker, sizeof marker, "%s%cno_update_check", dir,
-#ifdef _WIN32
-                 '\\'
-#else
-                 '/'
-#endif
-                 ) < (int)sizeof marker &&
+        snprintf(marker, sizeof marker, "%s%cno_update_check", dir, UPD_SEP)
+            < (int)sizeof marker &&
         spfy_upd_file_stat(marker, NULL, NULL) == 0)
         cached = 1;
     return cached;

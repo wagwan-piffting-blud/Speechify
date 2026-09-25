@@ -70,8 +70,8 @@ static void report(const char *tag, uint32_t *v, size_t n, double denom)
     for (size_t i = 0; i < n; ++i) sum += v[i];
     printf("  %-22s n %8zu  mean %10.2f  p50 %7u  p90 %8u  p99 %9u  "
            "max %9u  sum %12.0f  (%.2f%% of pairs)\n",
-           tag, n, sum / (double)n, v[n / 2], v[(size_t)(n * 0.90)],
-           v[(size_t)(n * 0.99)], v[n - 1], sum,
+           tag, n, sum / (double)n, v[n / 2], v[(size_t)((double)n * 0.90)],
+           v[(size_t)((double)n * 0.99)], v[n - 1], sum,
            denom > 0.0 ? 100.0 * sum / denom : 0.0);
 }
 
@@ -452,9 +452,9 @@ int main(int argc, char **argv)
            (unsigned long long)cov_num, (unsigned long long)cov_den,
            cov_den ? 100.0 * (double)cov_num / (double)cov_den : 0.0);
     printf("  right units storing their relation WHOLE  %u / %zu (%.2f%%)\n",
-           n_full, na, na ? 100.0 * n_full / na : 0.0);
+           n_full, na, na ? 100.0 * n_full / (double)na : 0.0);
     printf("  right units TRUNCATED                     %u / %zu (%.2f%%)\n",
-           n_trunc, na, na ? 100.0 * n_trunc / na : 0.0);
+           n_trunc, na, na ? 100.0 * n_trunc / (double)na : 0.0);
 
     if (want_pairs) {
         /* Key components run 0..91, so every delta fits [-91,91] and a flat

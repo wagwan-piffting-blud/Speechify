@@ -78,7 +78,7 @@ int spfy_reselect_build(spfy_reselect_t *r, const void *units_v,
         if (spfy_unit_record_get(ut, uid, &rec) != SPFY_OK) continue;
         float f = spfy_reselect_unit_f0(marks, uid, marks->rate);
         if (f <= 0.0f) continue;
-        uint16_t c = (uint16_t)(((uint16_t)rec.phone_center << 1)
+        uint16_t c = (uint16_t)(((unsigned)(uint16_t)rec.phone_center << 1)
                                 | (rec.is_first_half ? 1u : 0u));
         r->f0[uid]       = f;
         r->cls[uid]      = c;

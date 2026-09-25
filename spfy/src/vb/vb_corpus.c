@@ -89,7 +89,7 @@ static void fit_f0_context(const tmpl_unit_view *v,
     if (m < 2) { *a_out = 0; *b_out = 0; *r2_out = 0; return; }
     double den = (double)m * sxx - sx * sx;
     double a = den != 0.0 ? ((double)m * sxy - sx * sy) / den : 0.0;
-    double b = ((double)m ? (sy - a * sx) / (double)m : 0.0);
+    double b = (m != 0 ? (sy - a * sx) / (double)m : 0.0);
     double ybar = sy / (double)m, ss_res = 0, ss_tot = 0;
     for (size_t i = 0; i < n; ++i) {
         const uint8_t *r = u + i * v->stride;

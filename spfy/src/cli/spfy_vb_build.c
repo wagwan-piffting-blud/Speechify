@@ -87,7 +87,7 @@ static void stage(const char *name)
     if (g_t_stage > 0.0)
         printf("  [%.1fs]\n", t - g_t_stage);
     g_t_stage = t;
-    if (!g_t0) g_t0 = t;
+    if (g_t0 == 0.0) g_t0 = t;
     if (name) printf("\n=== %s ===\n", name);
 }
 

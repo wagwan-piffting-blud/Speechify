@@ -127,16 +127,16 @@ int main(int argc, char **argv)
      * the units differ. */
     if (n > 100) {
         double vm = theirs[n / 2], om = ours[n / 2];
-        double vs = (double)theirs[(n * 99) / 100] / (vm ? vm : 1.0);
-        double os = (double)ours  [(n * 99) / 100] / (om ? om : 1.0);
-        double raw_v = ((double)vm - jo) / (jw ? jw : 1.0);
-        double raw_o = ((double)om - jo) / (jw ? jw : 1.0);
-        printf("\n  median ratio ours/vendor : %.3f\n", om / (vm ? vm : 1.0));
+        double vs = (double)theirs[(n * 99) / 100] / (vm != 0.0 ? vm : 1.0);
+        double os = (double)ours  [(n * 99) / 100] / (om != 0.0 ? om : 1.0);
+        double raw_v = ((double)vm - jo) / (jw != 0.0f ? jw : 1.0);
+        double raw_o = ((double)om - jo) / (jw != 0.0f ? jw : 1.0);
+        printf("\n  median ratio ours/vendor : %.3f\n", om / (vm != 0.0 ? vm : 1.0));
         printf("  implied raw median       : vendor %.4f   ours %.4f   (x%.2f)\n",
-               raw_v, raw_o, raw_o / (raw_v ? raw_v : 1.0));
+               raw_v, raw_o, raw_o / (raw_v != 0.0 ? raw_v : 1.0));
         printf("  p99/p50 (scale-invariant): vendor %.3f   ours %.3f\n", vs, os);
         printf("  suggested raw scale to align medians: %.4f\n",
-               raw_v / (raw_o ? raw_o : 1.0));
+               raw_v / (raw_o != 0.0 ? raw_o : 1.0));
     }
 
     free(ours); free(theirs);

@@ -4,6 +4,8 @@
 
 - **Add macOS Speechify binaries to the release assets.** This is a macOS build of the spfy re-implementation engine that can be used on both types of macOS systems. It is built using the same source code as the Windows and Linux builds, and is intended to provide a native macOS experience for users who prefer to use the command line on macOS. NOTE: Does NOT include the GUI yet. It will soon, however. Builds are available for both Intel and Apple Silicon (M1/M2) Macs, as well as a single universal build.
 
+- **Update broken workflow.**
+
 ---
 
 ## 2026-09-06
