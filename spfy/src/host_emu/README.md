@@ -84,8 +84,14 @@ interpreter, which is how `data/fnset.json` was grown.
 
 Measured on the 7900X, tom, CLI per request: 0.55 -> 0.14 ms/char
 (+ ~65 ms fixed). Gates: master parity 221/221 and all 1,349 wayback
-transcripts byte-identical with recompilation on vs off. 157 rule functions
-over 8 KB stay interpreted (~110 MB of C if translated; `--include-big`).
+transcripts byte-identical with recompilation on vs off.
+
+Second pass (2026-09-29): hot helpers forced inline (`EMU_AINL`),
+compare+branch fusion, x87 memory forms translated (stepped instructions
+341 -> 94), the entry lookup hashed, and 75 accessor functions Ghidra had not
+defined added. Of the 156 rule functions over 8 KB, only `data/big_hot.json`
+is translated (`recomp_big_*.c`, built at -O1): together they are ~3% of
+runtime, so the rest stay interpreted rather than add ~110 MB of C.
 
 ## The four x87 fixes (verified in `cpu.c` of this directory)
 

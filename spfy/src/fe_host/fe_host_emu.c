@@ -600,9 +600,14 @@ int spfy_fe_synth_text(spfy_fe_t                  *opaque,
     u->hints = hints;
     parse_fe_output_into_slots(fe, tagged, hints, u);
 
-    if (!spfy_env("SPFY_SILENT"))
-        fprintf(stderr, "[fe_host_emu] tagged output (%zu bytes): %s\n",
-                strlen(tagged), tagged);
+    if (!spfy_env("SPFY_SILENT")) {
+        /* mingw's printf feeds unbuffered stderr one byte per WriteFile:
+         * 180K syscalls for a long text. Same bytes, one fwrite. */
+        size_t tl = strlen(tagged);
+        fprintf(stderr, "[fe_host_emu] tagged output (%zu bytes): ", tl);
+        fwrite(tagged, 1, tl, stderr);
+        fputc('\n', stderr);
+    }
     free(tagged);
 
     *out_utt = u;

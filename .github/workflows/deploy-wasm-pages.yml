@@ -72,13 +72,34 @@ jobs:
           fetch-depth: 1
           submodules: false
 
-      # Emscripten SDK. The setup action caches the toolchain across
-      # runs keyed by version, so warm runs install in seconds.
-      - name: Set up Emscripten
-        uses: mymindstorm/setup-emsdk@v14
+      # Emscripten SDK, pinned and cached with actions/cache@v4.
+      # mymindstorm/setup-emsdk@v14 bundles a pre-v4 @actions/cache that
+      # talks to the retired cache service (restore 400, save fails), and
+      # "latest" would change the key on every emsdk release anyway.
+      # ~/emsdk also holds emscripten's compiled sysroot cache, so warm runs
+      # skip that rebuild too. Bump EMSDK_VERSION deliberately.
+      - name: Cache Emscripten SDK
+        id: emsdk-cache
+        uses: actions/cache@v4
         with:
-          version: "latest"
-          actions-cache-folder: "emsdk-cache"
+          path: ~/emsdk
+          key: emsdk-${{ runner.os }}-6.0.10
+
+      - name: Set up Emscripten
+        env:
+          EMSDK_VERSION: "6.0.10"
+        run: |
+          if [ ! -x ~/emsdk/emsdk ]; then
+            git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
+            ~/emsdk/emsdk install "$EMSDK_VERSION"
+          fi
+          ~/emsdk/emsdk activate "$EMSDK_VERSION"
+          source ~/emsdk/emsdk_env.sh
+          echo "EMSDK=$EMSDK" >> "$GITHUB_ENV"
+          echo "EMSDK_NODE=$EMSDK_NODE" >> "$GITHUB_ENV"
+          echo "$EMSDK" >> "$GITHUB_PATH"
+          echo "$EMSDK/upstream/emscripten" >> "$GITHUB_PATH"
+          emcc --version | head -1
 
       - name: Set up Node.js
         uses: actions/setup-node@v5

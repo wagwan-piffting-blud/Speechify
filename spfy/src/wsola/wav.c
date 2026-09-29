@@ -49,6 +49,7 @@ int spfy_wav_open(spfy_wav_writer_t *w, const char *path, uint32_t sample_rate)
     memset(w, 0, sizeof *w);
     w->fp = fopen(path, "wb+");
     if (!w->fp) return SPFY_E_IO;
+    setvbuf(w->fp, NULL, _IOFBF, 256 * 1024);
     w->sample_rate = sample_rate;
     return write_header(w, 0);
 }

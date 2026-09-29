@@ -205,3 +205,15 @@ int spfy_unit_record_get(const spfy_unit_table_t *t, uint32_t uid,
                       ? 0u : p[t->off_context_cost];
     return SPFY_OK;
 }
+
+int spfy_unit_flag_b(const spfy_unit_table_t *t, uint32_t uid)
+{
+    if (!t || uid >= t->n_units) return 0;
+    const uint8_t *p = t->data + (size_t)uid * t->rec_size;
+    if (le_u32(p + 0x00) != uid) {
+        spfy_unit_record_t r;
+        (void)spfy_unit_record_get(t, uid, &r);
+        return 0;
+    }
+    return ((t->off_flag_b == OFF_ABSENT) ? 1u : p[t->off_flag_b]) != 0;
+}

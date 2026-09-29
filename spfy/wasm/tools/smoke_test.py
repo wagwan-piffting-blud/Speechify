@@ -160,6 +160,9 @@ def main():
             f"not 'tom', change DEFAULT_VOICE_ID in stage_voices.py rather "
             f"than this assertion")
         do_synth(drv, "The quick brown fox jumps over the lazy dog.", "Tom")
+        rc = [l["message"] for l in drv.get_log("browser") if "FE recomp" in l["message"]]
+        print(f"    {rc[-1][:120] if rc else 'no FE recomp line in console'}")
+        assert rc and "recomp: on" in rc[-1], "en-US FE ran without static recompilation"
         results["1_tom"] = "PASS"
 
         print("[Phase 2] Felix - switch to fr-CA (fresh module) + synth")

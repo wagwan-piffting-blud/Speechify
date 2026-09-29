@@ -67,6 +67,36 @@ static int parse_indx(spfy_vdb_t *v)
     return SPFY_OK;
 }
 
+/* The single top-level 'data' chunk's payload, walked exactly as
+ * spfy_riff_iter_next would walk the de-obfuscated file. Anything unusual
+ * (no data chunk, two of them, a malformed header) returns [n, n) so the
+ * caller de-obfuscates the whole file as before. */
+static void vdb_find_data_body(const uint8_t *buf, size_t n, size_t *d0, size_t *d1)
+{
+    const uint32_t k = 0x01010101u * (uint32_t)SPFY_OBFUSCATION_BYTE;
+    *d0 = *d1 = n;
+    if (n < 12) return;
+    uint32_t riff_size = le_u32(buf + 4) ^ k;
+    if (riff_size < 4 || (size_t)riff_size + 8 > n) return;
+    size_t cur = 12, end = 12 + (size_t)riff_size - 4;
+    size_t b0 = n, b1 = n;
+    int found = 0;
+    while (cur < end) {
+        if (end - cur < 8) return;
+        uint32_t fcc  = le_u32(buf + cur) ^ k;
+        uint32_t size = le_u32(buf + cur + 4) ^ k;
+        size_t payload = cur + 8;
+        if (size > end - payload) return;
+        if (fcc == FCC_DATA) {
+            if (found++) return;
+            b0 = payload;
+            b1 = payload + size;
+        }
+        cur = payload + (size_t)size + ((size & 1u) ? 1u : 0u);
+    }
+    if (found == 1) { *d0 = b0; *d1 = b1; }
+}
+
 int spfy_vdb_load(const char *path, spfy_vdb_t *out)
 {
     if (!path || !out) return SPFY_E_INVAL;
@@ -74,24 +104,31 @@ int spfy_vdb_load(const char *path, spfy_vdb_t *out)
 
     uint8_t *buf = NULL;
     size_t   n   = 0;
-    int rc = spfy_slurp_file(path, &buf, &n);
+    int mapped = 0;
+    int rc = spfy_map_file(path, &buf, &n, &mapped);
     if (rc != SPFY_OK) return rc;
-    spfy_unobfuscate_ce(buf, n);
+    /* The audio stays obfuscated and mapped: a request touches a few
+     * hundred KB of a ~60 MB file. spfy_vdb_decode applies data_xor. */
+    size_t d0, d1;
+    vdb_find_data_body(buf, n, &d0, &d1);
+    spfy_unobfuscate_ce(buf, d0);
+    spfy_unobfuscate_ce(buf + d1, n - d1);
+    out->data_xor = (d0 < d1) ? (uint8_t)SPFY_OBFUSCATION_BYTE : 0u;
+    out->bytes    = buf;
+    out->n_bytes  = n;
+    out->mapped   = mapped;
 
-    if (n < 12) { free(buf); return SPFY_E_FORMAT; }
+    if (n < 12) { spfy_vdb_free(out); return SPFY_E_FORMAT; }
     if (le_u32(buf) != FOURCC_RIFF || le_u32(buf + 8) != FOURCC_WAVE) {
         spfy_log_err("vdb: not a RIFF/WAVE file");
-        free(buf); return SPFY_E_FORMAT;
+        spfy_vdb_free(out); return SPFY_E_FORMAT;
     }
     uint32_t riff_size = le_u32(buf + 4);
     if ((size_t)riff_size + 8 > n) {
         spfy_log_err("vdb: RIFF size %u overruns file (%zu bytes)",
                      riff_size, n);
-        free(buf); return SPFY_E_FORMAT;
+        spfy_vdb_free(out); return SPFY_E_FORMAT;
     }
-
-    out->bytes   = buf;
-    out->n_bytes = n;
 
     spfy_riff_iter it;
     spfy_riff_iter_init(&it, buf + 12, (size_t)riff_size - 4);
@@ -173,7 +210,7 @@ int spfy_vdb_require_supported(const spfy_vdb_t *vdb, const char *path)
  * spfy_voice, so depending on it here would close a cycle. Decoding VDB
  * storage is a voice concern anyway; WSOLA only happens to have owned the
  * table first. If these ever diverge, parity breaks loudly and immediately. */
-static void vdb_ulaw_expand(const uint8_t *src, size_t n, int16_t *dst)
+static void vdb_ulaw_expand(const uint8_t *src, size_t n, uint8_t x, int16_t *dst)
 {
     static int16_t lut[256];
     static int ready = 0;
@@ -189,7 +226,7 @@ static void vdb_ulaw_expand(const uint8_t *src, size_t n, int16_t *dst)
         }
         ready = 1;
     }
-    for (size_t i = 0; i < n; ++i) dst[i] = lut[src[i]];
+    for (size_t i = 0; i < n; ++i) dst[i] = lut[(uint8_t)(src[i] ^ x)];
 }
 
 size_t spfy_vdb_decode(const spfy_vdb_t *vdb, size_t rec_off,
@@ -203,12 +240,13 @@ size_t spfy_vdb_decode(const spfy_vdb_t *vdb, size_t rec_off,
     size_t got = (n_samples < avail) ? n_samples : avail;
     if (got) {
         const uint8_t *src = vdb->data + byte_off;
+        const uint8_t x = vdb->data_xor;
         if (bps == 1u) {
-            vdb_ulaw_expand(src, got, dst);
+            vdb_ulaw_expand(src, got, x, dst);
         } else {
             for (size_t i = 0; i < got; ++i)
-                dst[i] = (int16_t)((uint16_t)src[2 * i]
-                                   | ((uint16_t)src[2 * i + 1] << 8));
+                dst[i] = (int16_t)((uint16_t)(uint8_t)(src[2 * i] ^ x)
+                                   | ((uint16_t)(uint8_t)(src[2 * i + 1] ^ x) << 8));
         }
     }
     if (got < n_samples)

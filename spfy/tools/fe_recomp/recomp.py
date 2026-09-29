@@ -6,12 +6,18 @@ interpreter's own CPU struct through the interpreter's own helpers
 exactly what cpu.c does for it. Anything not translated is SINGLE-STEPPED by
 the interpreter, so coverage is complete and output byte-identical by
 construction. On top: ALU ops whose flags are provably dead use flag-free
-NF_* variants (eliminate_dead_flags).
+NF_* variants (eliminate_dead_flags); a compare followed by a Jcc whose flags
+die there tests its operands directly (fuse_compare_branch); the common x87
+forms use do_x87's own bodies (x87_c).
 
 Inputs: data/ghidra_export.jsonl.gz (FeRecompExport.java), data/fnset.json
 (entry VAs: sampled hot set + every call target the interpreter executed over
-the 1,349 wayback transcripts, data/trace_corpus.py) and bin/SWIttsFe-en-US.dll.
-Output: spfy/src/host_emu/recomp/{recomp_gen_*.c,recomp_tab.c,recomp_protos.h}.
+the 1,349 wayback transcripts, data/trace_corpus.py; add_fnset.py appends),
+data/big_hot.json (over-size functions worth translating) and
+bin/SWIttsFe-en-US.dll. A call target that is not a Ghidra function (the 75
+accessors after 0835dfdf were) needs a function created there and a fresh
+export before it can be added.
+Output: spfy/src/host_emu/recomp/{recomp_gen_*.c,recomp_big_*.c,recomp_tab.c,recomp_protos.h}.
 
     python recomp.py
 Gates after regenerating: master parity 221/221 and data/equiv_corpus.py
@@ -175,6 +181,74 @@ def ea_decl(m):
     return f"ea={m['addr']}; " if m["mem"] else ""
 
 
+# x87: the bodies of cpu.c's do_x87, verbatim, for the forms the FE uses in
+# hot code. Anything else returns None and is single-stepped.
+X87_ARITH_M = {0: "*st(0)+=b;", 1: "*st(0)*=b;", 2: "set_fcom(*st(0),b);", 3: "set_fcom(*st(0),b);fpop();",
+               4: "*st(0)-=b;", 5: "*st(0)=b-*st(0);", 6: "*st(0)/=b;", 7: "*st(0)=b/ *st(0);"}
+X87_D8_R = {0: "*st(0)+=*st(I);", 1: "*st(0)*=*st(I);", 2: "set_fcom(*st(0),*st(I));",
+            3: "set_fcom(*st(0),*st(I));fpop();", 4: "*st(0)-=*st(I);", 5: "*st(0)=*st(I)-*st(0);",
+            6: "*st(0)/=*st(I);", 7: "*st(0)=*st(I)/ *st(0);"}
+X87_DC_R = {0: "*st(I)+=*st(0);", 1: "*st(I)*=*st(0);", 2: "set_fcom(*st(0),*st(I));",
+            3: "set_fcom(*st(0),*st(I));", 4: "*st(I)=*st(0)-*st(I);", 5: "*st(I)-=*st(0);",
+            6: "*st(I)=*st(0)/ *st(I);", 7: "*st(I)/=*st(0);"}
+X87_DE_R = {0: "*st(I)+=*st(0);fpop();", 1: "*st(I)*=*st(0);fpop();", 2: "set_fcom(*st(0),*st(I));fpop();",
+            3: "set_fcom(*st(0),*st(I));fpop();fpop();", 4: "*st(I)=*st(0)-*st(I);fpop();",
+            5: "*st(I)-=*st(0);fpop();", 6: "*st(I)=*st(0)/ *st(I);fpop();", 7: "*st(I)/=*st(0);fpop();"}
+X87_D9_FULL = {0xE0: "*st(0)=-*st(0);", 0xE1: "if(*st(0)<0)*st(0)=-*st(0);", 0xE4: "set_fcom(*st(0),0.0);",
+               0xE8: "fpush(1.0);", 0xEE: "fpush(0.0);"}
+
+
+def x87_c(ins, op):
+    m = ins.modrm()
+    reg = m["reg"]
+    if m["mem"]:
+        e = ea_decl(m)
+        if op == 0xD9:
+            if reg == 0:
+                return e + "{ uint32_t b=rd32(ea); float f; memcpy(&f,&b,4); fpush(f); }"
+            if reg == 2:
+                return e + "{ float f=(float)*st(0); uint32_t b; memcpy(&b,&f,4); wr32(ea,b); }"
+            if reg == 3:
+                return e + "{ float f=(float)*st(0); uint32_t b; memcpy(&b,&f,4); wr32(ea,b); fpop(); }"
+            return None
+        if op == 0xDD:
+            if reg == 0:
+                return e + "{ uint64_t b=rd32(ea)|((uint64_t)rd32(ea+4)<<32); double d; memcpy(&d,&b,8); fpush(d); }"
+            if reg in (2, 3):
+                pop = " fpop();" if reg == 3 else ""
+                return e + ("{ double d=*st(0); uint64_t b; memcpy(&b,&d,8); wr32(ea,(uint32_t)b); "
+                            f"wr32(ea+4,(uint32_t)(b>>32));{pop} }}")
+            return None
+        if op == 0xDB:
+            if reg == 0:
+                return e + "{ int32_t v=(int32_t)rd32(ea); fpush((double)v); }"
+            return None
+        if op in (0xD8, 0xDC):
+            load = ("uint32_t bb=rd32(ea); float f; memcpy(&f,&bb,4); b=f;" if op == 0xD8
+                    else "uint64_t bb=rd32(ea)|((uint64_t)rd32(ea+4)<<32); memcpy(&b,&bb,8);")
+            return e + f"{{ double b; {load} {X87_ARITH_M[reg]} }}"
+        if op == 0xDA:
+            return e + f"{{ double b=(double)(int32_t)rd32(ea); {X87_ARITH_M[reg]} }}"
+        return None
+    i = m["rm"]
+    full = 0xC0 | (reg << 3) | i
+    if op == 0xD8:
+        return X87_D8_R[reg].replace("I", str(i))
+    if op == 0xDC:
+        return X87_DC_R[reg].replace("I", str(i))
+    if op == 0xDE:
+        if full == 0xD9:
+            return "set_fcom(*st(0),*st(1)); fpop(); fpop();"
+        return X87_DE_R[reg].replace("I", str(i))
+    if op == 0xD9:
+        if reg == 0:
+            return f"{{ double v=*st({i}); fpush(v); }}"
+        if reg == 1:
+            return f"{{ double t=*st(0); *st(0)=*st({i}); *st({i})=t; }}"
+        return X87_D9_FULL.get(full)
+    return None
+
+
 class Fn:
     def __init__(self, rec, im, entries):
         self.rec = rec
@@ -286,6 +360,12 @@ class Fn:
                         c = f"do_sub(getreg(0,{s}),{h32(v)},{s});"
                     else:
                         c = f"setreg(0,{s},{ALU[grp]}(getreg(0,{s}),{h32(v)},{s}));"
+                n["native"] += 1
+                return c
+            if 0xD8 <= op <= 0xDF:
+                c = x87_c(ins, op)
+                if c is None:
+                    raise _Step
                 n["native"] += 1
                 return c
             if 0x40 <= op <= 0x4F:
@@ -514,7 +594,9 @@ class Fn:
             ins2.stepped = False
             c = self.translate(ins2)
             recs.append([ins.va, c, ins2.p, ins2])
-        self.stats["nf"] = eliminate_dead_flags(self.im, recs)
+        self.stats["nf"], self.stats["fused"] = eliminate_dead_flags(self.im, recs)
+        if self.stats["fused"]:
+            self.lines.append("    uint32_t fa=0,fb=0,fr=0,fs=0; (void)fa; (void)fb; (void)fr; (void)fs;")
         body = []
         prev_end = None
         first = True
@@ -662,6 +744,72 @@ def eliminate_dead_flags(im, recs):
         if ok and w and not (w & out):
             rec[1] = SETF_RE.sub("", NF_RE.sub(r"NF_\1(", rec[1]))
             count += 1
+    return count, fuse_compare_branch(recs, rw, succ, live_in)
+
+
+# ---- compare+branch fusion ------------------------------------------------
+# `cmp/sub/test/and/or/xor/inc/dec` immediately followed by a Jcc that is not
+# itself a branch target, when none of the flags the ALU op writes are live
+# after the Jcc: the ALU op records its operands in locals (FC_*) instead of
+# building EFLAGS, and the Jcc tests them directly. Nothing but that Jcc can
+# observe the skipped EFLAGS write.
+FC_RE = re.compile(r"\bdo_(sub|logic_or|logic_and|logic_xor|logic|inc|dec)\(")
+JCC_RE = re.compile(r"^if\(cond\((\d+)\)\) ")
+FC_KIND = {"sub": "sub", "logic": "logic", "logic_or": "logic", "logic_and": "logic",
+           "logic_xor": "logic", "inc": "incdec", "dec": "incdec"}
+FC_COND = {
+    "sub": {0: "(fa^fb)&(fa^fr)&fs", 1: "!((fa^fb)&(fa^fr)&fs)", 2: "fa<fb", 3: "fa>=fb",
+            4: "fr==0", 5: "fr!=0", 6: "fa<=fb", 7: "fa>fb", 8: "fr&fs", 9: "!(fr&fs)",
+            10: "parity8(fr)", 11: "!parity8(fr)", 12: "(fa^fs)<(fb^fs)", 13: "(fa^fs)>=(fb^fs)",
+            14: "(fa^fs)<=(fb^fs)", 15: "(fa^fs)>(fb^fs)"},
+    "logic": {0: "0", 1: "1", 2: "0", 3: "1", 4: "fr==0", 5: "fr!=0", 6: "fr==0", 7: "fr!=0",
+              8: "fr&fs", 9: "!(fr&fs)", 10: "parity8(fr)", 11: "!parity8(fr)", 12: "fr&fs",
+              13: "!(fr&fs)", 14: "fr==0||(fr&fs)", 15: "fr!=0&&!(fr&fs)"},
+    "incdec": {4: "fr==0", 5: "fr!=0", 8: "fr&fs", 9: "!(fr&fs)",
+               10: "parity8(fr)", 11: "!parity8(fr)"},
+}
+
+
+def fuse_compare_branch(recs, rw, succ, live_in):
+    targets = set()
+    for r in recs:
+        targets.update(int(t, 16) for t in re.findall(r"goto L_([0-9a-f]{8});", r[1]))
+    count = 0
+    for i in range(len(recs) - 1):
+        a = recs[i]
+        if "return" in a[1]:
+            continue
+        # Flag-neutral instructions between the ALU op and the Jcc are fine:
+        # the operands were captured when the ALU op ran.
+        jn = i + 1
+        while (jn < len(recs) and jn - i <= 4 and recs[jn - 1][2] == recs[jn][0]
+               and recs[jn][0] not in targets and not JCC_RE.match(recs[jn][1])
+               and rw[jn][0] == 0 and rw[jn][1] == 0 and "return" not in recs[jn][1]
+               and "goto" not in recs[jn][1]):
+            jn += 1
+        if jn >= len(recs) or recs[jn - 1][2] != recs[jn][0] or recs[jn][0] in targets:
+            continue
+        j = recs[jn]
+        r, w, ok = rw[i]
+        if not ok or not w:
+            continue
+        calls = FC_RE.findall(a[1])
+        m = JCC_RE.match(j[1])
+        if len(calls) != 1 or not m or "do_" in FC_RE.sub("", a[1]):
+            continue
+        kind = FC_KIND[calls[0]]
+        cc = int(m.group(1))
+        if cc not in FC_COND[kind]:
+            continue
+        s, exits = succ[jn]
+        out = ALLF if exits else 0
+        for k in s:
+            out |= live_in[k]
+        if w & out:
+            continue
+        a[1] = SETF_RE.sub("", FC_RE.sub(r"FC_\1(", a[1]))
+        j[1] = f"if({FC_COND[kind][cc]}) " + j[1][m.end():]
+        count += 1
     return count
 
 
@@ -690,7 +838,12 @@ def main():
     # functions simply stay interpreted.
     ap.add_argument("--max-bytes", type=int, default=8192)
     ap.add_argument("--include-big", action="store_true")
+    # Big functions worth their C, picked by profile (guest time while the
+    # interpreter runs), each emitted to its own recomp_big_NNN.c.
+    ap.add_argument("--big", default=str(here / "big_hot.json"),
+                    help="JSON list of over-size entry VAs to translate anyway")
     args = ap.parse_args()
+    big_ok = set(json.load(open(args.big))) if args.big and Path(args.big).exists() else set()
     im = Image(DLL)
     opener = gzip.open if args.export.endswith(".gz") else open
     with opener(args.export, "rt", encoding="utf-8") as fh:
@@ -701,8 +854,9 @@ def main():
     size = lambda r: sum(int(b, 16) - int(a, 16) + 1 for a, b in r["ranges"])
     if not args.include_big:
         n0 = len(recs)
-        recs = [r for r in recs if size(r) <= args.max_bytes]
-        print(f"left {n0 - len(recs)} functions over {args.max_bytes} bytes interpreted (--include-big to translate)")
+        recs = [r for r in recs if size(r) <= args.max_bytes or r["fn"] in big_ok]
+        print(f"left {n0 - len(recs)} functions over {args.max_bytes} bytes interpreted "
+              f"({len(big_ok)} hot ones translated via --big; --include-big for all)")
     entries = {int(r["fn"], 16) for r in recs}
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -727,8 +881,17 @@ def main():
                 "static inline uint32_t NF_logic_and(uint32_t a,uint32_t b,int sz){ return (a&b)&SZMASK[sz]; }\n"
                 "static inline uint32_t NF_logic_xor(uint32_t a,uint32_t b,int sz){ return (a^b)&SZMASK[sz]; }\n"
                 "static inline uint32_t NF_inc(uint32_t a,int sz){ return (a+1)&SZMASK[sz]; }\n"
-                "static inline uint32_t NF_dec(uint32_t a,int sz){ return (a-1)&SZMASK[sz]; }\n")
-    tot = {"native": 0, "step": 0, "nf": 0}
+                "static inline uint32_t NF_dec(uint32_t a,int sz){ return (a-1)&SZMASK[sz]; }\n"
+                "/* Compare+branch fusion (fuse_compare_branch): same value as do_*, operands\n"
+                " * kept in the function's fa/fb/fr/fs for the following Jcc, EFLAGS untouched. */\n"
+                "#define FC_sub(a,b,sz) (fa=(a)&SZMASK[sz], fb=(b)&SZMASK[sz], fs=SIGN[sz], fr=(fa-fb)&SZMASK[sz])\n"
+                "#define FC_logic(r,sz) (fs=SIGN[sz], fr=(r)&SZMASK[sz])\n"
+                "#define FC_logic_or(a,b,sz) FC_logic((a)|(b),sz)\n"
+                "#define FC_logic_and(a,b,sz) FC_logic((a)&(b),sz)\n"
+                "#define FC_logic_xor(a,b,sz) FC_logic((a)^(b),sz)\n"
+                "#define FC_inc(a,sz) (fs=SIGN[sz], fr=((a)+1)&SZMASK[sz])\n"
+                "#define FC_dec(a,sz) (fs=SIGN[sz], fr=((a)-1)&SZMASK[sz])\n")
+    tot = {"native": 0, "step": 0, "nf": 0, "fused": 0}
     shard, shard_bytes, n_shard, n_big = [], 0, 0, 0
 
     def flush(name):
@@ -769,7 +932,8 @@ def main():
            "int (*const rc_entry_fn[])(void) = {" + ",".join(f"rc_{e:08x}" for e in ents) + "};"]
     (out_dir / "recomp_tab.c").write_text("\n".join(tab) + "\n", encoding="ascii")
     print(f"{len(recs)} functions -> {out_dir} ({n_shard} shards + {n_big} big): {tot['native']} native, "
-          f"{tot['step']} stepped, {tot['nf']} flag-free ALU ops ({100 * tot['native'] / max(1, tot['native'] + tot['step']):.1f}% native)")
+          f"{tot['step']} stepped, {tot['nf']} flag-free ALU ops, {tot['fused']} fused compare+branch "
+          f"({100 * tot['native'] / max(1, tot['native'] + tot['step']):.1f}% native)")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 #include "voice.h"
+#include "../common/file_io.h"
 
 #include <stdlib.h>
 
@@ -12,9 +13,9 @@ void spfy_vin_free(spfy_vin_t *v)
 void spfy_vdb_free(spfy_vdb_t *v)
 {
     if (!v) return;
-    free(v->bytes);
+    spfy_release_file(v->bytes, v->n_bytes, v->mapped);
     free(v->indx_entries);
-    v->bytes = NULL; v->n_bytes = 0;
+    v->bytes = NULL; v->n_bytes = 0; v->mapped = 0;
     v->indx_entries = NULL; v->n_indx_entries = 0;
 }
 

@@ -50,9 +50,9 @@
 #     mingw32 compiler (see the Configure step).
 #   * Linux: stock gcc, cmake, ninja. gcc-multilib is needed ONLY by the
 #     i386 leg, and only for its 32-bit libc.
-#   * Linux armv7: no hosted 32-bit ARM runner exists, so this leg builds
-#     inside a qemu-emulated debian:bookworm container on an x86_64 runner.
-#     Emulated, therefore slow - see its timeout in the matrix.
+#   * Linux armv7: no hosted 32-bit ARM runner exists, so this leg
+#     cross-compiles (arm-linux-gnueabihf) in a native debian:bookworm
+#     container and runs only the byte-exact verification under qemu.
 #   * macOS: AppleClang + brew ninja.
 #
 # Every unix leg - native or emulated - runs spfy/ci/build_unix.sh, so the
@@ -623,14 +623,14 @@ jobs:
             guiPlatform: "linux/arm64"
             timeout: 30
           # 32-bit ARM. There is NO hosted armv7 runner (ubuntu-24.04-arm
-          # is aarch64), so this one builds in a qemu-emulated container on
-          # an x86_64 runner. Cross-compiling would be far faster but the
-          # runner couldn't execute the result - the same objection that
-          # ruled out cross-compiling Intel macOS. debian:bookworm because
-          # the Ubuntu armhf images are unreliable.
-          #
-          # Emulation makes this the slowest leg by a wide margin; the
-          # timeout below is set from a measured local run, not a guess.
+          # is aarch64, and its cores cannot execute AArch32 at all), so
+          # this leg CROSS-COMPILES in a native amd64 debian:bookworm
+          # container with Debian's arm-linux-gnueabihf gcc (same armv7-a/
+          # vfpv3-d16/thumb2 defaults and glibc 2.36 as a native armhf
+          # install) and runs only build_unix.sh's two byte-exact reference
+          # synths under qemu-arm-static. It used to compile inside a
+          # qemu-emulated armhf container; once the FE's recompiled shards
+          # landed that spent 14 minutes on one file and never finished.
           #
           # ⭐ THE GUI ON THIS LEG IS CROSS-COMPILED, NOT EMULATED, and that is
           # the difference between a leg that finishes and one that does not.
@@ -641,24 +641,25 @@ jobs:
           # alternative -- Debian multi-arch :armhf dev packages on an amd64
           # root -- is blocked outright by gobject-introspection:armhf.
           #
-          # So guiPlatform is linux/amd64 while platform stays linux/arm/v7:
-          # the GUI container is NATIVE and builds against an armhf sysroot
-          # unpacked by mmdebstrap in ~30s. Same bookworm packages either way,
-          # so the glibc 2.36 ceiling is unchanged.
+          # So guiPlatform is linux/amd64, and now the engine's platform is
+          # too: both containers are NATIVE. The GUI builds against an armhf
+          # sysroot unpacked by mmdebstrap in ~30s. Same bookworm packages
+          # either way, so the glibc 2.36 ceiling is unchanged.
           - id: linux-armv7
             runner: ubuntu-latest
             cflags: "-D_GNU_SOURCE=1"
             ldflags: ""
             multilib: false
-            qemu: "linux/arm/v7"
+            qemu: ""
             image: "debian:bookworm"
-            platform: "linux/arm/v7"
+            platform: "linux/amd64"
+            cross: "armhf"
             osx_target: ""
             gui: true
             guiImage: "debian:bookworm"
             guiPlatform: "linux/amd64"
             guiCross: "armhf"
-            timeout: 40
+            timeout: 30
           # ⭐ musl, STATICALLY linked -- the "runs anywhere" build.
           #
           # The glibc tarballs above cannot run on Alpine at all: their
@@ -881,6 +882,7 @@ jobs:
             -e SPFY_VERSION="${{ needs.setup.outputs.version }}" \
             -e SPFY_INSTALL_DEPS=1 \
             -e SPFY_MULTILIB=${{ matrix.multilib && '1' || '0' }} \
+            -e SPFY_CROSS="${{ matrix.cross }}" \
             -e SPFY_MAX_GLIBC=2.36 \
             "${{ matrix.image }}" \
             sh -c 'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null; exec bash spfy/ci/build_unix.sh'

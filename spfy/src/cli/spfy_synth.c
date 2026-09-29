@@ -2395,9 +2395,7 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
      * same_rec, 1 hash_hit, 2 miss/no_curve. */
     int path_kind = 2;
     if (curr_uid == prev_uid_join_key + 1u && curr_uid > 0u) {
-        spfy_unit_record_t r;
-        if (spfy_unit_record_get(jc->units, curr_uid, &r) == SPFY_OK
-            && r.flag_b) {
+        if (spfy_unit_flag_b(jc->units, curr_uid)) {
             cost = 0.0f;
             path = "same_rec";
             path_kind = 0;
@@ -2985,25 +2983,65 @@ static void fe_fill_char_starts(void *parsed_v, const char *text)
     if (!p || !text) return;
     size_t n = strlen(text), cur = 0;
     int last = 0;
+    /* Words the FE invented miss and scan the whole remaining text, so this
+     * is quadratic in practice: fold once through the CRT's own tables and
+     * hop between first-letter candidates with memchr. `cur` only grows, so
+     * a word that missed once misses again: remember it. Same matches. */
+    unsigned char alnum[256], lower[256];
+    for (int c = 0; c < 256; ++c) {
+        alnum[c] = isalnum(c) ? 1 : 0;
+        lower[c] = (unsigned char)tolower(c);
+    }
+    size_t mcap = 64;
+    while (mcap < (size_t)p->n_words * 2) mcap <<= 1;
+    unsigned char *fold = (unsigned char *)malloc(n + 1);
+    int *missed = (int *)malloc(mcap * sizeof *missed);
+    if (!fold || !missed) { free(fold); free(missed); return; }
+    memset(missed, 0xff, mcap * sizeof *missed);
+    for (size_t s = 0; s < n; ++s) fold[s] = lower[(unsigned char)text[s]];
     for (int i = 0; i < p->n_words; ++i) {
         fe_parsed_word_t *w = &p->words[i];
         size_t wl = strlen(w->text);
         if (wl == 0 || wl > n) { w->char_start = last; continue; }
-        size_t found = (size_t)-1;
-        for (size_t s = cur; s + wl <= n; ++s) {
-            if (s > 0 && isalnum((unsigned char)text[s - 1])) continue;
-            if (s + wl < n && isalnum((unsigned char)text[s + wl])) continue;
+        uint32_t hsh = 2166136261u;
+        for (size_t k = 0; k < wl; ++k)
+            hsh = (hsh ^ lower[(unsigned char)w->text[k]]) * 16777619u;
+        size_t slot = hsh & (mcap - 1);
+        int known_miss = 0;
+        for (; missed[slot] >= 0; slot = (slot + 1) & (mcap - 1)) {
+            const char *o = p->words[missed[slot]].text;
             size_t k = 0;
-            while (k < wl
-                   && tolower((unsigned char)text[s + k])
-                      == tolower((unsigned char)w->text[k])) ++k;
-            if (k == wl) { found = s; break; }
+            while (k < wl && o[k]
+                   && lower[(unsigned char)o[k]] == lower[(unsigned char)w->text[k]]) ++k;
+            if (k == wl && !o[k]) { known_miss = 1; break; }
         }
-        if (found == (size_t)-1) { w->char_start = last; continue; }
+        if (known_miss) { w->char_start = last; continue; }
+        size_t found = (size_t)-1;
+        unsigned char c0 = lower[(unsigned char)w->text[0]];
+        size_t s = cur;
+        while (s + wl <= n) {
+            const unsigned char *hit = memchr(fold + s, c0, n - wl + 1 - s);
+            if (!hit) break;
+            s = (size_t)(hit - fold);
+            if (!(s > 0 && alnum[(unsigned char)text[s - 1]])
+                && !(s + wl < n && alnum[(unsigned char)text[s + wl]])) {
+                size_t k = 1;
+                while (k < wl && fold[s + k] == lower[(unsigned char)w->text[k]]) ++k;
+                if (k == wl) { found = s; break; }
+            }
+            ++s;
+        }
+        if (found == (size_t)-1) {
+            missed[slot] = i;
+            w->char_start = last;
+            continue;
+        }
         w->char_start = (int)found;
         last = (int)found;
         cur = found + wl;
     }
+    free(missed);
+    free(fold);
 }
 
 /* Parse `\\![SPR]` and emit an FE tagged-output string. */

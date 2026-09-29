@@ -100,16 +100,6 @@ static void decode_modrm(modrm_t* m,int addr_override){
 static uint32_t rm_read(modrm_t* m,int sz){ return m->is_mem ? (sz==1?rd8(m->addr):sz==2?rd16(m->addr):rd32(m->addr)) : getreg(m->rm,sz); }
 static void rm_write(modrm_t* m,int sz,uint32_t v){ if(m->is_mem){ if(sz==1)wr8(m->addr,v);else if(sz==2)wr16(m->addr,v);else wr32(m->addr,v);} else setreg(m->rm,sz,v); }
 
-static double* st(int i){ return &CPU.st[(CPU.fpu_top+i)&7]; }
-static void fpush(double v){ CPU.fpu_top=(CPU.fpu_top-1)&7; CPU.st[CPU.fpu_top]=v; }
-static double fpop(void){ double v=CPU.st[CPU.fpu_top]; CPU.fpu_top=(CPU.fpu_top+1)&7; return v; }
-
-static void set_fcom(double a,double b){
-    CPU.fpu_sw &= ~((1<<8)|(1<<10)|(1<<14));
-    if(a!=a||b!=b) CPU.fpu_sw |= (1<<8)|(1<<10)|(1<<14);
-    else if(a<b)  CPU.fpu_sw |= (1<<8);
-    else if(a==b) CPU.fpu_sw |= (1<<14);
-}
 static void set_fcomi(double a,double b){
     setf(FL_OF,0); setf(FL_SF,0); setf(FL_AF,0);
     if(a!=a||b!=b){ setf(FL_ZF,1); setf(FL_PF,1); setf(FL_CF,1); }
@@ -603,6 +593,9 @@ static int cpu_run_core(uint64_t max_insns, uint32_t stop_eip, uint32_t stop_esp
     if(g_rc_on<0){
         const char* e=getenv("SPFY_FE_RECOMP"); g_rc_on = (e && *e=='0') ? 0 : rc_image_matches();
         const char* p=getenv("SPFY_FE_RECOMP_TRACE"); g_rc_trace = p ? fopen(p,"a") : NULL; g_rc_trace_on = g_rc_trace!=NULL;
+#ifdef __EMSCRIPTEN__
+        printf("spfy FE recomp: %s (%d functions)\n", g_rc_on ? "on" : "off (interpreted)", g_rc_on ? rc_n_entries : 0);
+#endif
     }
     if(g_newbt<0) g_newbt = getenv("EMU_OLDBT") ? 0 : 1;
     if(g_fputrace<0){ const char* e=getenv("EMU_FPUTRACE"); if(e){ unsigned lo,hi,mx; if(sscanf(e,"%x,%x,%u",&lo,&hi,&mx)==3){ g_ftlo=lo; g_fthi=hi; g_ftmax=mx; g_fputrace=1; } else g_fputrace=0; } else g_fputrace=0; }
@@ -990,13 +983,34 @@ static int rc_image_matches(void){
  * interpreted instruction is rejected by one load. */
 static uint8_t g_rc_pages[1u << 17];
 static int g_rc_pages_ready = 0;
+/* Interpreted code inside a page that holds an entry would otherwise pay a
+ * binary search per instruction: open-addressed hash, linear probe. */
+#define RC_HASH_BITS 13
+static uint32_t g_rc_hkey[1u << RC_HASH_BITS];
+static int32_t  g_rc_hidx[1u << RC_HASH_BITS];
+static int g_rc_hash_ok = 0;
+static inline uint32_t rc_hash(uint32_t va){ return (va * 2654435761u) >> (32 - RC_HASH_BITS); }
 static int rc_lookup(uint32_t eip){
     if(!g_rc_pages_ready){
         for(int i=0;i<rc_n_entries;i++){ uint32_t pg=rc_entry_va[i]>>12; g_rc_pages[pg>>3] |= (uint8_t)(1u<<(pg&7)); }
+        g_rc_hash_ok = rc_n_entries <= (1 << (RC_HASH_BITS - 1));
+        if(g_rc_hash_ok){
+            memset(g_rc_hidx, 0xff, sizeof g_rc_hidx);
+            for(int i=0;i<rc_n_entries;i++){
+                uint32_t h = rc_hash(rc_entry_va[i]);
+                while(g_rc_hidx[h] >= 0) h = (h + 1) & ((1u << RC_HASH_BITS) - 1);
+                g_rc_hkey[h] = rc_entry_va[i]; g_rc_hidx[h] = i;
+            }
+        }
         g_rc_pages_ready = 1;
     }
     uint32_t pg = eip>>12;
     if(!(g_rc_pages[pg>>3] & (1u<<(pg&7)))) return -1;
+    if(g_rc_hash_ok){
+        for(uint32_t h = rc_hash(eip); g_rc_hidx[h] >= 0; h = (h + 1) & ((1u << RC_HASH_BITS) - 1))
+            if(g_rc_hkey[h] == eip) return g_rc_hidx[h];
+        return -1;
+    }
     int lo=0, hi=rc_n_entries-1;
     while(lo<=hi){ int mid=(lo+hi)>>1; uint32_t v=rc_entry_va[mid]; if(v==eip) return mid; if(v<eip) lo=mid+1; else hi=mid-1; }
     return -1;

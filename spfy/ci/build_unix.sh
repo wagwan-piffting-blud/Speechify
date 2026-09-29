@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Shared configure + build + verify for the CI `build-unix` matrix.
 #
-# Every unix leg runs THIS script, so a native leg and an emulated
-# (cross-arch) leg cannot drift apart in flags, build type, or what counts
-# as passing. The native legs invoke it directly on the runner; the armv7
-# leg invokes it inside a qemu-emulated debian container with the
-# workspace bind-mounted.
+# Every unix leg runs THIS script, so a native leg and a cross-compiled
+# leg cannot drift apart in flags, build type, or what counts as passing.
+# The Linux legs invoke it inside a debian/alpine container with the
+# workspace bind-mounted; armv7 cross-compiles there (SPFY_CROSS).
 #
 # Configured entirely through the environment so the workflow can pass
 # matrix values without this script needing to know about matrices:
@@ -17,6 +16,13 @@
 #   SPFY_INSTALL_DEPS  1 = apt-get the toolchain first (containers only:
 #                      assumes root and a Debian/Ubuntu base)
 #   SPFY_MULTILIB      1 = also install gcc-multilib (the i386 leg)
+#   SPFY_CROSS         armhf = cross-compile for 32-bit ARM with Debian's
+#                      arm-linux-gnueabihf toolchain (same armv7-a/vfpv3-d16/
+#                      thumb2 defaults and glibc as a native armhf install),
+#                      and run the verification under qemu-arm-static. The
+#                      compiler runs natively; only the two reference synths
+#                      are emulated. Compiling under an emulated container
+#                      spent 14 minutes on ONE recompiled FE shard.
 #   SPFY_VERIFY        1 = synthesize and check the reference hash
 #                      (default 1; set 0 to build only)
 #   SPFY_VERSION       calver stamped into the binary and reported by
@@ -52,6 +58,23 @@ EXTRA_LDFLAGS="${SPFY_LDFLAGS:-}"
 INSTALL_DEPS="${SPFY_INSTALL_DEPS:-0}"
 MULTILIB="${SPFY_MULTILIB:-0}"
 VERIFY="${SPFY_VERIFY:-1}"
+CROSS="${SPFY_CROSS:-}"
+
+# RUN prefixes every execution of the built binary.
+CROSS_ARGS=""
+RUN=""
+case "$CROSS" in
+"") ;;
+armhf)
+    CROSS_ARGS="-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=armv7l \
+-DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc"
+    RUN="qemu-arm-static -L /usr/arm-linux-gnueabihf"
+    ;;
+*)
+    echo "ERROR: unknown SPFY_CROSS=$CROSS (only armhf)" >&2
+    exit 1
+    ;;
+esac
 
 # "The quick brown fox jumps over the lazy dog." through en-US/tom must
 # produce this exact WAV on every target. Byte-exactness IS the ship gate
@@ -88,6 +111,9 @@ if [ "$INSTALL_DEPS" = "1" ]; then
         if [ "$MULTILIB" = "1" ]; then
             pkgs="$pkgs gcc-multilib g++-multilib"
         fi
+        if [ "$CROSS" = "armhf" ]; then
+            pkgs="$pkgs gcc-arm-linux-gnueabihf libc6-dev-armhf-cross qemu-user-static"
+        fi
         # Unquoted on purpose: $pkgs is a word list, not one argument.
         # shellcheck disable=SC2086
         apt-get install -y -qq --no-install-recommends $pkgs
@@ -121,7 +147,7 @@ cmake -S "$SRC_DIR" -B "$BUILD_DIR" -G Ninja \
     -DSPFY_STRICT_FP=ON \
     -DSPFY_BUILD_TESTS=OFF \
     -DSPFY_FE_HOSTED=ON \
-    $VERSION_ARG $OSX_ARG
+    $VERSION_ARG $OSX_ARG $CROSS_ARGS
 
 cmake --build "$BUILD_DIR"
 
@@ -199,7 +225,8 @@ fi
 
 echo "=== verify: reference synthesis ==="
 out_wav="${BUILD_DIR}/ref_tom.wav"
-"$SYNTH" "$REF_VIN" "$REF_VDB" "$REF_VCF" "$REF_TEXT" "$out_wav"
+# shellcheck disable=SC2086
+$RUN "$SYNTH" "$REF_VIN" "$REF_VDB" "$REF_VCF" "$REF_TEXT" "$out_wav"
 
 # sha256sum on Linux, shasum on macOS.
 if command -v sha256sum >/dev/null 2>&1; then
@@ -211,7 +238,7 @@ fi
 echo "  got:      $got"
 echo "  expected: $REF_SHA"
 if [ "$got" != "$REF_SHA" ]; then
-    echo "::error title=Fidelity regression::$(uname -m) output does not match the reference WAV" >&2
+    echo "::error title=Fidelity regression::${CROSS:-$(uname -m)} output does not match the reference WAV" >&2
     exit 1
 fi
 echo "  BYTE-EXACT"
@@ -232,8 +259,9 @@ mkdir -p "$iso/bin" "$iso/cwd" "$iso/home"
 cp "$SYNTH" "$iso/bin/spfy_synth"
 (
     cd "$iso/cwd"
+    # shellcheck disable=SC2086
     env -u SPFY_VOICE_DIR HOME="$iso/home" \
-        "$iso/bin/spfy_synth" "$repo/$REF_VIN" "$repo/$REF_VDB" \
+        $RUN "$iso/bin/spfy_synth" "$repo/$REF_VIN" "$repo/$REF_VDB" \
         "$repo/$REF_VCF" "$REF_TEXT" "$iso/cwd/ref_tom.wav"
 )
 if command -v sha256sum >/dev/null 2>&1; then

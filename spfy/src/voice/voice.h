@@ -38,6 +38,10 @@ typedef struct {
     /* wFormatTag decides the storage, and it is the ONLY field that does. */
     uint16_t  fmt_tag;
     uint32_t  bytes_per_sample;
+    /* The data chunk is left obfuscated (spfy_vdb_load maps the file and
+     * de-obfuscates everything else): spfy_vdb_decode XORs with this. */
+    uint8_t   data_xor;
+    int       mapped;
 } spfy_vdb_t;
 
 typedef struct spfy_vcf_kv {

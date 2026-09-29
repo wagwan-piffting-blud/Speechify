@@ -57,4 +57,8 @@ int  spfy_unit_table_load(const spfy_vin_t *vin, spfy_unit_table_t *out);
 int  spfy_unit_record_get(const spfy_unit_table_t *t, uint32_t uid,
                           spfy_unit_record_t *out);
 
+/* 1 when spfy_unit_record_get would succeed with flag_b set, else 0 (same
+ * error log on a bad record). The join DP's inner loop needs only this. */
+int  spfy_unit_flag_b(const spfy_unit_table_t *t, uint32_t uid);
+
 #endif
