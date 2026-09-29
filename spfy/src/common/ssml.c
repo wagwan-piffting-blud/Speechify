@@ -265,6 +265,33 @@ static int pitch_pct(const char *v, int cur)
     return cur;
 }
 
+/* SAPI 5 <rate> units (-10..+10) <-> the `\!rp` percent axis: 100 * 3^(u/10),
+ * the vendor SAPI5Speechify.dll curve (measured 2026-09-28: +5 -> 1.733x,
+ * +10 -> 2.989x, -5 -> 0.603x) and the same one spfy_sapi.c now uses for
+ * SPVSTATE.RateAdj, so `<rate absspeed>` sounds the same whichever side
+ * parsed the XML. */
+static int sapi_rate_to_pct(int u)
+{
+    if (u < -10) u = -10;
+    if (u >  10) u =  10;
+    return (int)lround(100.0 * pow(3.0, (double)u / 10.0));
+}
+
+static int pct_to_sapi_rate(int pct)
+{
+    if (pct <= 0) return -10;
+    int u = (int)lround(10.0 * log((double)pct / 100.0) / log(3.0));
+    return u < -10 ? -10 : (u > 10 ? 10 : u);
+}
+
+/* SAPI <pitch>: "approximately one semitone per unit", -10..+10. */
+static int sapi_pitch_to_pct(int st)
+{
+    if (st < -10) st = -10;
+    if (st >  10) st =  10;
+    return spfy_ssml_semitones_to_pct(st);
+}
+
 /* <break time="..."> */
 static int break_time_ms(const char *v)
 {
@@ -523,12 +550,15 @@ static int decode_entity(const char **pp, sbuf_t *out)
     return 0;
 }
 
-/* Element names this translator claims. `pron` is NOT here on purpose: it is
- * an existing engine feature that build_inline_mixed_tagged() handles, and
+/* Element names this translator claims: SSML, then the SAPI 5 TTS XML set
+ * (`voice`, `p` and `s` are shared). `pron` is NOT here on purpose: it is an
+ * existing engine feature that build_inline_mixed_tagged() handles, and
  * consuming it here would delete it. */
 static const char *const SSML_NAMES[] = {
     "speak", "prosody", "break", "emphasis", "phoneme", "say-as", "sub",
     "voice", "audio", "mark", "p", "s", "lexicon", "meta", "metadata", "desc",
+    "sapi", "volume", "rate", "pitch", "silence", "emph", "spell",
+    "bookmark", "partofsp", "context", "lang",
 };
 
 static int is_ssml_name(const char *s, size_t n)
@@ -568,9 +598,6 @@ typedef struct {
     int   vol, rate, pitch;      /* state to restore on close  */
     int   spell, year;           /* ditto for \!ts* and \!ny*  */
     char  emph[8];               /* ToBI tag active in this span, "" if none */
-    int   restores_prosody;
-    int   restores_speech;
-    int   restores_emph;
     int   closes_pron;           /* <phoneme> emitted a `<pron ...>` open   */
     int   skip_content;          /* <sub>, <desc>: drop until the close tag */
 } frame_t;
@@ -582,6 +609,24 @@ static void emit_emph(sbuf_t *out, const char *tobi)
     sb_str(out, "\\![ToBI:");
     sb_str(out, tobi);
     sb_ch(out, ']');
+}
+
+static void set_level(sbuf_t *out, const char *tag, int *cur, int v)
+{
+    if (*cur == v) return;
+    *cur = v;
+    sb_str(out, tag);
+    sb_int(out, v);
+    sb_ch(out, ' ');
+}
+
+static void set_spell(sbuf_t *out, int *cur, int v)
+{
+    if (*cur == v) return;
+    *cur = v;
+    sb_str(out, v == 'c' ? "\\!tsc " :
+                v == 'a' ? "\\!tsa " :
+                v == 'r' ? "\\!tsr " : "\\!ts0 ");
 }
 
 static const char *emph_to_tobi(const char *level)
@@ -687,30 +732,23 @@ char *spfy_ssml_to_etags(const char *ssml)
             for (i = top - 1; i >= 0; --i)
                 if (name_is(ns, nl, stack[i].name)) break;
             if (i < 0) continue;
+            /* Every frame restores everything, not just what its own tag set:
+             * a SAPI empty element (`<rate absspeed="-5"/>`) changes state for
+             * the rest of the ENCLOSING element, so that element's close is
+             * what has to undo it. */
             for (int j = top - 1; j >= i; --j) {
                 frame_t *f = &stack[j];
                 if (f->closes_pron) { sb_str(&out, "</pron>"); at_word_start = 1; }
                 if (f->skip_content && skip_depth) --skip_depth;
-                if (f->restores_emph) {
-                    snprintf(emph, sizeof emph, "%s", f->emph);
+                snprintf(emph, sizeof emph, "%s", f->emph);
+                set_spell(&out, &spell, f->spell);
+                if (year != f->year) {
+                    year = f->year;
+                    sb_str(&out, year ? "\\!ny0 " : "\\!ny1 ");
                 }
-                if (f->restores_speech) {
-                    if (spell != f->spell) {
-                        spell = f->spell;
-                        sb_str(&out, spell == 'c' ? "\\!tsc " :
-                                     spell == 'a' ? "\\!tsa " :
-                                     spell == 'r' ? "\\!tsr " : "\\!ts0 ");
-                    }
-                    if (year != f->year) {
-                        year = f->year;
-                        sb_str(&out, year ? "\\!ny0 " : "\\!ny1 ");
-                    }
-                }
-                if (f->restores_prosody) {
-                    if (vol != f->vol)   { vol = f->vol;     sb_str(&out, "\\!vp"); sb_int(&out, vol);   sb_ch(&out, ' '); }
-                    if (rate != f->rate) { rate = f->rate;   sb_str(&out, "\\!rp"); sb_int(&out, rate);  sb_ch(&out, ' '); }
-                    if (pitch != f->pitch){ pitch = f->pitch; sb_str(&out, "\\!pp"); sb_int(&out, pitch); sb_ch(&out, ' '); }
-                }
+                set_level(&out, "\\!vp", &vol, f->vol);
+                set_level(&out, "\\!rp", &rate, f->rate);
+                set_level(&out, "\\!pp", &pitch, f->pitch);
                 if (name_is(ns, nl, "p") || name_is(ns, nl, "s")) {
                     /* A paragraph or sentence element IS a phrase boundary,
                      * whether or not the author typed the full stop.
@@ -843,28 +881,42 @@ char *spfy_ssml_to_etags(const char *ssml)
                 /* \!ny0 is what turns "1985" into "nineteen eighty five". */
                 new_year = 1;
             }
-            if (new_spell != spell) {
-                spell = new_spell;
-                sb_str(&out, spell == 'c' ? "\\!tsc " :
-                             spell == 'a' ? "\\!tsa " :
-                             spell == 'r' ? "\\!tsr " : "\\!ts0 ");
-                f.restores_speech = 1;
-            }
+            set_spell(&out, &spell, new_spell);
             if (new_year != year) {
                 year = new_year;
                 sb_str(&out, year ? "\\!ny0 " : "\\!ny1 ");
-                f.restores_speech = 1;
             }
             at_word_start = 1;
             if (!self_closing && top < SSML_DEPTH_MAX) stack[top++] = f;
             continue;
         }
 
-        if (name_is(ns, nl, "emphasis")) {
+        if (name_is(ns, nl, "context")) {
+            char id[32] = "";
+            get_attr(attrs, attrs_end, "id", id, sizeof id);
+            size_t idn = strlen(id);
+            if (name_is(id, idn, "number_digit") || name_is(id, idn, "phone_number")) {
+                set_spell(&out, &spell, 'a');
+            } else if (name_is(id, idn, "date_year") && !year) {
+                year = 1;
+                sb_str(&out, "\\!ny0 ");
+            }
+            at_word_start = 1;
+            if (!self_closing && top < SSML_DEPTH_MAX) stack[top++] = f;
+            continue;
+        }
+
+        if (name_is(ns, nl, "spell")) {
+            set_spell(&out, &spell, 'c');
+            at_word_start = 1;
+            if (!self_closing && top < SSML_DEPTH_MAX) stack[top++] = f;
+            continue;
+        }
+
+        if (name_is(ns, nl, "emphasis") || name_is(ns, nl, "emph")) {
             char level[16] = "";
             get_attr(attrs, attrs_end, "level", level, sizeof level);
             snprintf(emph, sizeof emph, "%s", emph_to_tobi(level));
-            f.restores_emph = 1;
             at_word_start = 1;
             if (!self_closing && top < SSML_DEPTH_MAX) stack[top++] = f;
             else snprintf(emph, sizeof emph, "%s", f.emph);
@@ -872,33 +924,19 @@ char *spfy_ssml_to_etags(const char *ssml)
         }
 
         if (name_is(ns, nl, "prosody")) {
-            if (get_attr(attrs, attrs_end, "volume", av, sizeof av)) {
-                int nv = volume_pct(av, vol);
-                if (nv != vol) {
-                    vol = nv;
-                    sb_str(&out, "\\!vp"); sb_int(&out, vol); sb_ch(&out, ' ');
-                    f.restores_prosody = 1;
-                }
-            }
+            if (get_attr(attrs, attrs_end, "volume", av, sizeof av))
+                set_level(&out, "\\!vp", &vol, volume_pct(av, vol));
             if (get_attr(attrs, attrs_end, "rate", av, sizeof av)) {
                 int nv = rate_pct(av, rate);
                 if (nv < 33) nv = 33;
                 if (nv > 300) nv = 300;
-                if (nv != rate) {
-                    rate = nv;
-                    sb_str(&out, "\\!rp"); sb_int(&out, rate); sb_ch(&out, ' ');
-                    f.restores_prosody = 1;
-                }
+                set_level(&out, "\\!rp", &rate, nv);
             }
             if (get_attr(attrs, attrs_end, "pitch", av, sizeof av)) {
                 int nv = pitch_pct(av, pitch);
                 if (nv < 25) nv = 25;
                 if (nv > 400) nv = 400;
-                if (nv != pitch) {
-                    pitch = nv;
-                    sb_str(&out, "\\!pp"); sb_int(&out, pitch); sb_ch(&out, ' ');
-                    f.restores_prosody = 1;
-                }
+                set_level(&out, "\\!pp", &pitch, nv);
             }
             /* `range` and `contour` describe an F0 SHAPE, which the engine
              * takes from its own f0tr CART; there is no lever to hand them
@@ -908,6 +946,55 @@ char *spfy_ssml_to_etags(const char *ssml)
             continue;
         }
 
+        /* SAPI 5 <volume>/<rate>/<pitch>. Empty form changes state until the
+         * enclosing element closes; container form until its own close. */
+        if (name_is(ns, nl, "volume")) {
+            if (get_attr(attrs, attrs_end, "level", av, sizeof av)) {
+                int nv = atoi(av);
+                set_level(&out, "\\!vp", &vol, nv < 0 ? 0 : (nv > 100 ? 100 : nv));
+            }
+            at_word_start = 1;
+            if (!self_closing && top < SSML_DEPTH_MAX) stack[top++] = f;
+            continue;
+        }
+
+        if (name_is(ns, nl, "rate")) {
+            int u = pct_to_sapi_rate(rate), any = 0;
+            if (get_attr(attrs, attrs_end, "absspeed", av, sizeof av)) { u = atoi(av); any = 1; }
+            if (get_attr(attrs, attrs_end, "speed", av, sizeof av))    { u += atoi(av); any = 1; }
+            if (any) set_level(&out, "\\!rp", &rate, sapi_rate_to_pct(u));
+            at_word_start = 1;
+            if (!self_closing && top < SSML_DEPTH_MAX) stack[top++] = f;
+            continue;
+        }
+
+        if (name_is(ns, nl, "pitch")) {
+            int st = spfy_ssml_pct_to_semitones(pitch), any = 0;
+            if (get_attr(attrs, attrs_end, "absmiddle", av, sizeof av)) { st = atoi(av); any = 1; }
+            if (get_attr(attrs, attrs_end, "middle", av, sizeof av))    { st += atoi(av); any = 1; }
+            /* `absrange`/`range`: no lever, as with <prosody range>. */
+            if (any) set_level(&out, "\\!pp", &pitch, sapi_pitch_to_pct(st));
+            at_word_start = 1;
+            if (!self_closing && top < SSML_DEPTH_MAX) stack[top++] = f;
+            continue;
+        }
+
+        if (name_is(ns, nl, "silence")) {
+            int ms = get_attr(attrs, attrs_end, "msec", av, sizeof av) ? atoi(av) : 0;
+            if (ms > 0) {
+                if (ms > 32767) ms = 32767;
+                sb_str(&out, " \\!p");
+                sb_int(&out, ms);
+                sb_ch(&out, ' ');
+            }
+            at_word_start = 1;
+            continue;                       /* always empty */
+        }
+
+        /* <bookmark>: an event, and events only exist on the SAPI path, where
+         * SAPI parses the tag itself. Nothing to speak. */
+        if (name_is(ns, nl, "bookmark")) continue;
+
         if (name_is(ns, nl, "p") || name_is(ns, nl, "s")) {
             if (out.n && !isspace((unsigned char)out.p[out.n - 1])) sb_ch(&out, ' ');
             at_word_start = 1;
@@ -915,7 +1002,8 @@ char *spfy_ssml_to_etags(const char *ssml)
             continue;
         }
 
-        /* <speak>, <voice>, <audio>: structural only. A voice change cannot
+        /* <speak>, <voice>, <audio>, and SAPI's <sapi>, <lang>, <partofsp>:
+         * structural only. A voice change cannot
          * be honoured -- the engine is one voice per process (see
          * SPFY_GUI_HANDOFF.md) -- so the content is spoken in the voice
          * already loaded rather than dropped. */

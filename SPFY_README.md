@@ -391,7 +391,7 @@ passed it.
 | Element | Mapped to | Notes |
 |---|---|---|
 | `<speak>` | - | stripped; `xml:lang` and other attributes ignored |
-| `<prosody rate>` | `\!wp` | `x-slow` to `x-fast`, `150%`, `+20%`, `1.5` |
+| `<prosody rate>` | `\!rp` | `x-slow` to `x-fast`, `150%`, `+20%`, `1.5` |
 | `<prosody pitch>` | `\!pp` | `x-low` to `x-high`, `+4st`, `+10%`. `Hz` is ignored, not guessed: an absolute target needs a base F0 that is not known this far upstream |
 | `<prosody volume>` | `\!vp` | `silent` to `x-loud`, `+6dB`, `50%` |
 | `<break time or strength>` | `\!pN` | `800ms`, `1.5s`; `none` to `x-strong` maps to 0 to 1000 ms; bare `<break/>` is 250 ms |
@@ -403,6 +403,43 @@ passed it.
 | `<voice>` | - | content kept, voice not switched: the engine is one voice per process |
 | `<mark>` `<metadata>` `<desc>` `<lexicon>` | - | dropped |
 | anything else | passed through | which is what keeps `<pron sym="...">` working |
+
+#### SAPI 5 XML
+
+SAPI's own TTS markup is not SSML, and it reaches the engine as raw text
+whenever a host speaks without `SPF_IS_XML` (or wraps it in `<speak>`). Until
+2026-09-28 every tag below was read aloud: `<rate absspeed="-5">` added about
+three seconds of "rate absspeed equals minus five". The same translator now
+handles both dialects, inside or outside `<speak>`.
+
+| Element | Mapped to | Notes |
+|---|---|---|
+| `<rate absspeed speed>` | `\!rp` | -10 to +10, `100 * 3^(u/10)` percent: the vendor `SAPI5Speechify.dll` curve, measured 2026-09-28 (+5 = 1.733x, +10 = 2.989x). The SAPI DLLs use the same curve for the host rate slider (they used `1.2^(u/2)` before, 2.49x at +10). `speed` adds to the current rate |
+| `<pitch absmiddle middle>` | `\!pp` | -10 to +10 semitones; `middle` adds. `absrange`/`range` dropped |
+| `<volume level>` | `\!vp` | 0 to 100 |
+| `<silence msec>` | `\!pN` | |
+| `<emph>` | `\![ToBI:H*]` | per word, as `<emphasis>` |
+| `<spell>` | `\!tsc` | |
+| `<context id>` | `\!tsa` / `\!ny0` | `number_digit`, `phone_number`, `date_year`; other ids keep the content unchanged |
+| `<sapi>` `<lang>` `<partofsp>` `<voice>` `<P>` `<S>` | - | content kept |
+| `<bookmark>` | - | dropped; bookmark events exist only when SAPI parses the XML itself |
+| `<pron sym>` | passed through | handled downstream, as before |
+
+A `<pron sym>` is phonemized in the context of its whole sentence
+(`build_inline_pron_tagged` in `spfy_synth.c`). The construct is replaced by a
+placeholder word: its own text, or "thing" for the self-closing form. The FE
+reads the sentence in one pass, and the placeholder's block is then swapped for
+the pron phones, keeping the accent and boundary tone the FE gave that slot.
+Before 2026-09-28 the text on each side was phonemized as its own sentence, so
+the word before a `<pron>` came out phrase-final (`say` as `.1,H*;L-L%`) and
+function words were unreduced (`it` as `ih t`). `SPFY_INLINE_PRON_LEGACY=1`
+restores the old segment-by-segment path; text containing an SPR escape
+`\![...]` still takes it. Gate: `spfy/test/pron_context_test.py`
+(`--expect-fail` proves it fails on the legacy path).
+
+The empty form (`<rate absspeed="-5"/>`) lasts until the enclosing element
+closes, as SAPI specifies. Every element now restores rate, pitch, volume,
+spelling and emphasis on close, not just the ones it set.
 
 XML comments, `<?xml?>`, CDATA and entities (`&amp;`, `&#233;`, `&#xE9;`) are
 handled. Malformed input degrades to "strip the markup, keep the text" rather
@@ -1306,6 +1343,7 @@ spfy/
     diff/      WAV / per-cand-total diff utilities
     unit/      C unit tests
     ssml_translate_test.py  ssml_effect_test.py   SSML gates
+    pron_context_test.py   <pron> must not change its neighbours' phonemization
 ```
 
 ### CLIs

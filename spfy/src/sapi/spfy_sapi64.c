@@ -722,7 +722,8 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
         long ra = f->State.RateAdj + site_base_rate;
         if (ra > 10) ra = 10;
         if (ra < -10) ra = -10;
-        float rate_factor = (float)pow(1.2, (double)ra / 2.0);
+        /* 3^(ra/10), as spfy_sapi.c: the vendor SAPI5Speechify.dll curve. */
+        float rate_factor = (float)pow(3.0, (double)ra / 10.0);
 
         if (f->State.SilenceMSecs > 0) {
             HRESULT shr = emit_silence64(pOutputSite,

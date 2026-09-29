@@ -612,7 +612,10 @@ tts_Speak(ISpTTSEngine *This, DWORD dwSpeakFlags, REFGUID rguidFormatId,
             long ra = f->State.RateAdj + site_base_rate;
             if (ra > 10) ra = 10;
             if (ra < -10) ra = -10;
-            sink_ctx.rate_factor = powf(1.2f, (float)ra / 2.0f);
+            /* 3^(ra/10): measured on the vendor's own SAPI5Speechify.dll
+             * 2026-09-28, +5 -> 1.733x, +10 -> 2.989x. The 1.2^(ra/2) this
+             * replaced gave 2.49x at +10. */
+            sink_ctx.rate_factor = powf(3.0f, (float)ra / 10.0f);
         }
 
         /* SilenceMSecs: a hard prefix-pause before the fragment's audio

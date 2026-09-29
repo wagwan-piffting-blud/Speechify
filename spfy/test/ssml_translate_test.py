@@ -188,6 +188,44 @@ CASES = [
     ("namespaced-attr",
      '<speak xml:lang="en-US">hi</speak>',
      "hi"),
+
+    # SAPI 5 TTS XML. Reaches the engine raw whenever a host speaks without
+    # SPF_IS_XML, and was spoken aloud tag and all before these existed.
+    ("sapi-rate-absspeed",
+     'Normal <rate absspeed="-5">slow</rate> again.',
+     "Normal \\!rp58 slow\\!rp100  again."),
+
+    ("sapi-rate-relative-nests",
+     '<rate absspeed="3">a <rate speed="-6">b</rate> c</rate> d',
+     "\\!rp139 a \\!rp72 b\\!rp139  c\\!rp100  d"),
+
+    ("sapi-rate-empty-scoped-to-parent",
+     '<P><rate absspeed="-5"/>slow here</P> normal.',
+     "\\!rp58 slow here\\!rp100.  normal."),
+
+    ("sapi-pitch-absmiddle-in-speak",
+     '<speak>Hello <pitch absmiddle="5">high</pitch> world.</speak>',
+     "Hello \\!pp133 high\\!pp100  world."),
+
+    ("sapi-pitch-middle-composes",
+     '<pitch middle="2"><pitch middle="2">up</pitch></pitch>',
+     "\\!pp112 \\!pp126 up\\!pp112 \\!pp100 "),
+
+    ("sapi-volume-silence-emph",
+     '<sapi><volume level="50">quiet</volume><silence msec="500"/><emph>big</emph></sapi>',
+     "\\!vp50 quiet\\!vp100  \\!p500 \\![ToBI:H*]big"),
+
+    ("sapi-spell-context",
+     '<spell>abc</spell> <context id="number_digit">1234</context> <context id="date_year">1985</context>',
+     "\\!tsc abc\\!ts0  \\!tsa 1234\\!ts0  \\!ny0 1985\\!ny1 "),
+
+    ("sapi-structural-dropped",
+     '<sapi><lang langid="409"><partofsp part="noun">record</partofsp></lang><bookmark mark="m1"/></sapi>',
+     "record"),
+
+    ("sapi-pron-survives-beside-sapi-tags",
+     '<rate speed="4">Say <pron sym="h eh 1 l ow"/></rate>',
+     '\\!rp155 Say <pron sym="h eh 1 l ow"/>\\!rp100 '),
 ]
 
 

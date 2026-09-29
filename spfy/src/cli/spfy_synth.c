@@ -3305,6 +3305,20 @@ static char *build_inline_pau_tagged(spfy_fe_t *fe, const char *text)
         if (after_word[i] >= n_words_all) { trail_ms += ms[i]; continue; }
         size_t off = tagged_word_end(segbuf, after_word[i]);
         if (off == (size_t)-1) goto fail;
+        /* ⚠ A tag AFTER PHRASE-ENDING PUNCTUATION (`First. \!p1000 Second.`)
+         * belongs at the HEAD of the next phrase, not the tail of this one.
+         * Spliced before this phrase's closing pad the engine drops it
+         * outright -- the render was byte-identical to no pause at all.
+         * At the next phrase's head it is byte-identical to vendor after
+         * `.` (captured 2026-09-28 via bin\spfy_dumpwav.exe, +991 ms for
+         * \!p1000, +490 ms for \!p500). After `,` it lands within 1.2 ms of
+         * vendor: the residual starts at the end of the word before the
+         * comma, inside the engine, and no tagged-text shape reaches it. */
+        {
+            const char *nx = strchr(segbuf + off, '<');
+            if (nx && memchr(segbuf + off, '}', (size_t)(nx - (segbuf + off))))
+                off = (size_t)(nx - segbuf);
+        }
         if (off < cur) off = cur;
         if (out_n + (off - cur) + 64u >= cap) goto fail;
         memcpy(acc + out_n, segbuf + cur, off - cur);
@@ -3341,6 +3355,270 @@ fail:
     return NULL;
 }
 
+/* Max `<pron>` constructs in one utterance; past this we fall back. */
+#define SPFY_MAX_INLINE_PRON 32
+
+/* Stand-in for a self-closing `<pron sym=.../>`: a plain noun, so the FE
+ * gives the slot the accent and boundary tone a word there would get. */
+static const char PRON_PLACEHOLDER[] = "thing";
+
+/* A tagged syllable marker is `.S` optionally followed by `,ACCENT` and/or
+ * `;TONE`, e.g. `.1,H*;L-L%`. */
+static int is_syl_marker(const char *t, size_t n)
+{
+    return n >= 2 && t[0] == '.' && isdigit((unsigned char)t[1]);
+}
+
+static void syl_marker_parts(const char *t, size_t n,
+                             char *acc, size_t acap, char *tone, size_t tcap)
+{
+    acc[0] = tone[0] = '\0';
+    const char *e = t + n;
+    const char *c = (const char *)memchr(t, ',', n);
+    const char *s = (const char *)memchr(t, ';', n);
+    if (c && (!s || c < s)) {
+        const char *ae = s ? s : e;
+        snprintf(acc, acap, "%.*s", (int)(ae - c - 1), c + 1);
+    }
+    if (s) snprintf(tone, tcap, "%.*s", (int)(e - s - 1), s + 1);
+}
+
+/* Rewrite the placeholder's word block(s) `range` as one block carrying the
+ * `<pron>` phones from `pron_tagged` (the in-house FE's rendering of the
+ * construct), while keeping what the FE decided from CONTEXT: the POS and
+ * word-stress header, the pitch accent (moved onto the pron's primary-stress
+ * syllable) and the boundary tone (moved onto its last syllable). */
+static int pron_rewrite_block(const char *range, size_t range_len,
+                              int keep_name, const char *pron_tagged,
+                              char *out, size_t cap)
+{
+    const char *re = range + range_len;
+    const char *lb = (const char *)memchr(range, '[', range_len);
+    if (range[0] != '<' || !lb) return -1;
+
+    char acc[16] = "", tone[16] = "";
+    for (const char *q = lb + 1; q < re; ) {
+        while (q < re && isspace((unsigned char)*q)) ++q;
+        const char *ts = q;
+        while (q < re && !isspace((unsigned char)*q)) ++q;
+        if (!is_syl_marker(ts, (size_t)(q - ts))) continue;
+        char a[16], t[16];
+        syl_marker_parts(ts, (size_t)(q - ts), a, sizeof a, t, sizeof t);
+        if (!acc[0] && a[0]) snprintf(acc, sizeof acc, "%s", a);
+        snprintf(tone, sizeof tone, "%s", t);
+    }
+
+    const char *pb = strchr(pron_tagged, '[');
+    const char *pe = pb ? strchr(pb, ']') : NULL;
+    if (!pe) return -1;
+
+    int n_mark = 0, primary = -1;
+    for (const char *q = pb + 1; q < pe; ) {
+        while (q < pe && isspace((unsigned char)*q)) ++q;
+        const char *ts = q;
+        while (q < pe && !isspace((unsigned char)*q)) ++q;
+        if (!is_syl_marker(ts, (size_t)(q - ts))) continue;
+        if (primary < 0 && ts[1] == '1') primary = n_mark;
+        ++n_mark;
+    }
+    if (n_mark == 0) return -1;
+    if (primary < 0) primary = 0;
+
+    size_t o = 0;
+#define PRON_PUT(fmt, ...) do { \
+        int w_ = snprintf(out + o, cap - o, fmt, __VA_ARGS__); \
+        if (w_ < 0 || (size_t)w_ >= cap - o) return -1; \
+        o += (size_t)w_; \
+    } while (0)
+
+    if (keep_name) {
+        PRON_PUT("%.*s", (int)(lb + 1 - range), range);
+    } else {
+        const char *ne = range + 1;
+        while (ne < lb && !isspace((unsigned char)*ne) && *ne != '(') ++ne;
+        PRON_PUT("<_pron_%.*s", (int)(lb + 1 - ne), ne);
+    }
+    int k = 0;
+    for (const char *q = pb + 1; q < pe; ) {
+        while (q < pe && isspace((unsigned char)*q)) ++q;
+        const char *ts = q;
+        while (q < pe && !isspace((unsigned char)*q)) ++q;
+        if (q == ts) break;
+        if (!is_syl_marker(ts, (size_t)(q - ts))) {
+            PRON_PUT(" %.*s", (int)(q - ts), ts);
+            continue;
+        }
+        PRON_PUT(" .%c", ts[1]);
+        if (k == primary && acc[0]) PRON_PUT(",%s", acc);
+        if (k == n_mark - 1 && tone[0]) PRON_PUT(";%s", tone);
+        ++k;
+    }
+    PRON_PUT("%s", " ] >");
+#undef PRON_PUT
+    return (int)o;
+}
+
+/* Build ONE tagged utterance for text whose inline markup is `<pron ...>`
+ * (optionally with `\!pN`), phonemizing the WHOLE text in a single FE call.
+ *
+ * ⚠ Same defect as build_inline_pau_tagged fixed for `\!p`, in `<pron>`
+ * form. The segment-by-segment builder hands the FE the text on each side of
+ * the tag as its own sentence, so the word before a `<pron>` came back
+ * phrase-final: on `Say <pron sym="h eh 1 l ow"/> now.` "say" carried
+ * `.1,H*;L-L%` where the whole sentence gives `.1`, and `Is it <pron/> or
+ * goodbye?` read "it" as a stressed, accented `ih t` instead of `ix t`.
+ *
+ * Each construct becomes a placeholder word -- its own annotation text when
+ * it has one, else PRON_PLACEHOLDER -- so every neighbour is phonemized in
+ * context; the placeholder's block is then swapped for the pron phones by
+ * pron_rewrite_block. The word range each placeholder occupies comes from
+ * phonemizing text PREFIXES, as the pause splice does.
+ *
+ * Returns NULL for anything it cannot place exactly (an SPR escape, a
+ * placeholder the FE split across a phrase break, too many constructs), and
+ * the caller falls back to the segment-by-segment builder. */
+static char *build_inline_pron_tagged(spfy_fe_t *fe, const char *text)
+{
+    size_t tlen    = strlen(text);
+    size_t txt_cap = tlen + SPFY_MAX_INLINE_PRON * (sizeof PRON_PLACEHOLDER + 2) + 1;
+    size_t cap     = tlen * 80 + 65536;
+    char  *withp   = (char *)malloc(txt_cap);   /* placeholders, `\!p` kept  */
+    char  *clean   = (char *)malloc(txt_cap);   /* placeholders, `\!p` gone  */
+    char  *segbuf  = (char *)malloc(cap);
+    char  *pronbuf = (char *)malloc(cap);
+    char  *cons    = (char *)malloc(tlen + 1);
+    char  *tagged  = NULL, *out = NULL;
+    if (!withp || !clean || !segbuf || !pronbuf || !cons) goto fail;
+
+    size_t      pr_at[SPFY_MAX_INLINE_PRON], pr_end[SPFY_MAX_INLINE_PRON];
+    const char *pr_tok[SPFY_MAX_INLINE_PRON];
+    size_t      pr_len[SPFY_MAX_INLINE_PRON];
+    int         pr_named[SPFY_MAX_INLINE_PRON];
+    int         n_pron = 0, any_pause = 0;
+    size_t      wn = 0, cn = 0;
+
+    const char *p = text;
+    for (;;) {
+        int kind; const char *te = NULL;
+        const char *tok = find_inline_token(p, &kind, &te);
+        const char *stop = tok ? tok : p + strlen(p);
+        memcpy(withp + wn, p, (size_t)(stop - p)); wn += (size_t)(stop - p);
+        memcpy(clean + cn, p, (size_t)(stop - p)); cn += (size_t)(stop - p);
+        if (!tok) break;
+        if (kind == SEG_SPR) goto fail;
+        if (kind == SEG_PAUSE) {
+            memcpy(withp + wn, tok, (size_t)(te - tok)); wn += (size_t)(te - tok);
+            any_pause = 1;
+            p = te;
+            continue;
+        }
+        if (n_pron >= SPFY_MAX_INLINE_PRON) goto fail;
+
+        const char *as = NULL, *ae = NULL;
+        const char *gt = strchr(tok, '>');
+        if (gt && gt[-1] != '/' && te - (gt + 1) >= 7
+            && memcmp(te - 7, "</pron>", 7) == 0) {
+            as = gt + 1;
+            ae = te - 7;
+            while (as < ae && isspace((unsigned char)*as)) ++as;
+            while (ae > as && isspace((unsigned char)ae[-1])) --ae;
+            for (const char *q = as; q < ae; ++q)
+                if (*q == '<' || *q == '\\') goto fail;
+        }
+        int named = (as && ae > as);
+        const char *ph = named ? as : PRON_PLACEHOLDER;
+        size_t      pl = named ? (size_t)(ae - as) : sizeof PRON_PLACEHOLDER - 1;
+
+        if (cn && isalnum((unsigned char)clean[cn - 1])) {
+            withp[wn++] = ' '; clean[cn++] = ' ';
+        }
+        pr_at[n_pron] = cn;
+        memcpy(withp + wn, ph, pl); wn += pl;
+        memcpy(clean + cn, ph, pl); cn += pl;
+        pr_end[n_pron] = cn;
+        if (isalnum((unsigned char)*te)) {
+            withp[wn++] = ' '; clean[cn++] = ' ';
+        }
+        pr_tok[n_pron]   = tok;
+        pr_len[n_pron]   = (size_t)(te - tok);
+        pr_named[n_pron] = named;
+        ++n_pron;
+        p = te;
+    }
+    withp[wn] = clean[cn] = '\0';
+    if (n_pron == 0) goto fail;
+
+    uint32_t w0[SPFY_MAX_INLINE_PRON], w1[SPFY_MAX_INLINE_PRON];
+    for (int i = 0; i < n_pron; ++i) {
+        size_t cuts[2] = { pr_at[i], pr_end[i] };
+        uint32_t *dst[2] = { &w0[i], &w1[i] };
+        for (int j = 0; j < 2; ++j) {
+            *dst[j] = 0;
+            if (cuts[j] == 0) continue;
+            char keep = clean[cuts[j]];
+            clean[cuts[j]] = '\0';
+            int r = spfy_fe_text_to_tagged(fe, clean, segbuf, cap);
+            clean[cuts[j]] = keep;
+            if (r <= 0) goto fail;
+            *dst[j] = tagged_word_count(segbuf);
+        }
+        if (w1[i] <= w0[i] || (i && w0[i] < w1[i - 1])) goto fail;
+    }
+
+    if (any_pause) {
+        tagged = build_inline_pau_tagged(fe, withp);
+    } else {
+        tagged = (char *)malloc(cap);
+        if (tagged && spfy_fe_text_to_tagged(fe, clean, tagged, cap) <= 0) {
+            free(tagged); tagged = NULL;
+        }
+    }
+    if (!tagged) goto fail;
+
+    size_t tg_len  = strlen(tagged);
+    size_t out_cap = tg_len + (size_t)n_pron * 4096u + 1024u;
+    out = (char *)malloc(out_cap);
+    if (!out) goto fail;
+    size_t o = 0, cur = 0;
+    for (int i = 0; i < n_pron; ++i) {
+        size_t s = tagged_word_end(tagged, w0[i]);
+        size_t e = tagged_word_end(tagged, w1[i]);
+        if (s == (size_t)-1 || e == (size_t)-1) goto fail;
+        const char *lt = strchr(tagged + s, '<');
+        if (!lt || (size_t)(lt - tagged) >= e) goto fail;
+        s = (size_t)(lt - tagged);
+        if (s < cur) goto fail;
+        for (size_t k = s; k < e; ++k)
+            if (tagged[k] == '}' || tagged[k] == '{'
+                || strncmp(tagged + k, "pau(", 4) == 0) goto fail;
+
+        memcpy(cons, pr_tok[i], pr_len[i]);
+        cons[pr_len[i]] = '\0';
+        if (spfy_fe_internal_text_to_tagged(cons, pronbuf, cap) < 0) goto fail;
+
+        if (o + (s - cur) >= out_cap) goto fail;
+        memcpy(out + o, tagged + cur, s - cur);
+        o += s - cur;
+        int bn = pron_rewrite_block(tagged + s, e - s,
+                                    pr_named[i] && w1[i] - w0[i] == 1,
+                                    pronbuf, out + o, out_cap - o);
+        if (bn < 0) goto fail;
+        o += (size_t)bn;
+        cur = e;
+    }
+    if (o + (tg_len - cur) + 1u > out_cap) goto fail;
+    memcpy(out + o, tagged + cur, tg_len - cur + 1u);
+
+    free(withp); free(clean); free(segbuf); free(pronbuf); free(cons);
+    free(tagged);
+    return out;
+
+fail:
+    free(withp); free(clean); free(segbuf); free(pronbuf); free(cons);
+    free(tagged); free(out);
+    return NULL;
+}
+
 /* Build ONE flowing tagged-output utterance from text that mixes plain
  * words with inline markup - `\![...]` SPR escapes, `\!pN` pause tags,
  * and/or `<pron ...>` tags - none of which the DLL FE can read (it would
@@ -3348,11 +3626,17 @@ fail:
 static char *build_inline_mixed_tagged(spfy_fe_t *fe, const char *text)
 {
     /* `\!pN`-only text keeps the FE's own single-pass phonemization; see
-     * build_inline_pau_tagged. Any other markup, or SPFY_INLINE_PAU_LEGACY,
-     * falls through to the segment-by-segment path below. */
+     * build_inline_pau_tagged. `<pron>` (with or without `\!pN`) likewise
+     * goes through build_inline_pron_tagged. SPR escapes, anything either
+     * builder refuses, SPFY_INLINE_PAU_LEGACY or SPFY_INLINE_PRON_LEGACY
+     * fall through to the segment-by-segment path below. */
     if (!spfy_env("SPFY_INLINE_PAU_LEGACY")) {
         char *one = build_inline_pau_tagged(fe, text);
         if (one) return one;
+        if (!spfy_env("SPFY_INLINE_PRON_LEGACY")) {
+            one = build_inline_pron_tagged(fe, text);
+            if (one) return one;
+        }
     }
 
     size_t tlen   = strlen(text);
@@ -3773,6 +4057,15 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     {
         spfy_fe_utterance_t *utt_unused = NULL;
         const char *tagged_file = spfy_env("SPFY_TAGGED_FILE");
+        if (spfy_env("SPFY_FE_RAW_DUMP")) {
+            /* Diagnostic: what the DLL FE itself makes of the text WITH its
+             * inline tags, which the builders below never show it. */
+            size_t cap = strlen(text) * 80 + 65536;
+            char *raw = (char *)malloc(cap);
+            if (raw && spfy_fe_text_to_tagged(v->fe, text, raw, cap) > 0)
+                fprintf(stderr, "[fe-raw] %s\n", raw);
+            free(raw);
+        }
         if (tagged_file) {
             /* Experiment hook: synth from a tagged-output file verbatim,
              * bypassing the FE text pass entirely. */

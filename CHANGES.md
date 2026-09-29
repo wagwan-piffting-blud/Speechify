@@ -1,5 +1,13 @@
 # Speechify/spfy Changelog
 
+## 2026-09-29
+
+- **Add SAPI markup support.** SAPI is similar to SSML, but has different tag names. spfy allows for either/or, see the [SPFY_README.md](SPFY_README.md) for more information on how to use SAPI markup in spfy.
+
+- **Fix some small bugs related to pauses and rate tags.** The `\!p` pause tag was not being applied correctly in some cases, leading to incorrect timing in the synthesized speech. This has been fixed, and the `\!p` tag now works as expected. Additionally, the `\!r` rate tags were not being applied correctly in some cases, leading to incorrect speech speed. This has also been fixed, and the `\!r` tags now work as expected.
+
+---
+
 ## 2026-09-25
 
 - **Add macOS Speechify binaries to the release assets.** This is a macOS build of the spfy re-implementation engine that can be used on both types of macOS systems. It is built using the same source code as the Windows and Linux builds, and is intended to provide a native macOS experience for users who prefer to use the command line on macOS. NOTE: Does NOT include the GUI yet. It will soon, however. Builds are available for both Intel and Apple Silicon (M1/M2) Macs, as well as a single universal build.
