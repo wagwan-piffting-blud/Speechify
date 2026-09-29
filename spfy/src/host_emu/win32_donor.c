@@ -71,25 +71,47 @@ static void heap_init(void){
     wr32(HEAP_BASE + 4, 1);
     valloc_init();
 }
-/* First-fit over in-guest block headers [size][free]. Same algorithm and the
- * SAME returned addresses as the donor's rd32/wr32 walk from HEAP_BASE, two
- * things faster: headers are read through the region's host pointer, and the
- * walk starts at g_heap_lo, which is kept <= every free block (freeing lowers
- * it, allocating never creates a lower free block), so every block it skips
- * would have been skipped from HEAP_BASE too. */
+/* First-fit over in-guest block headers [size][free], as the donor's walk
+ * from HEAP_BASE, except that adjacent free blocks are merged as the walk
+ * passes them (see guest_alloc). Headers are read through the region's host
+ * pointer, and the walk starts at g_heap_lo, which is kept <= every free
+ * block (freeing lowers it, allocating never creates a lower free block). */
 static uint8_t* heap_host(uint32_t va){ return mem_host(HEAP_BASE) + (va - HEAP_BASE); }
 static uint32_t hdr_rd(uint32_t va){ uint32_t v; memcpy(&v, heap_host(va), 4); return v; }
 static void hdr_wr(uint32_t va, uint32_t v){ memcpy(heap_host(va), &v, 4); }
+/* EMU_HEAPSTAT=1: report the highest heap address ever handed out and the
+ * bytes live at that moment, at exit. */
+static uint32_t g_heap_top, g_heap_live, g_heap_live_at_top;
+static int g_heapstat = -1;
+static void heapstat_report(void){
+    fprintf(stderr, "[heap] top %u KB of %u KB, live at top %u KB\n",
+            (g_heap_top - HEAP_BASE) >> 10, HEAP_SIZE >> 10, g_heap_live_at_top >> 10);
+}
 uint32_t guest_alloc(uint32_t n, int zero){
     n = (n + 7) & ~7u; if(n==0) n=8;
     if (g_heap_lo < HEAP_BASE || g_heap_lo >= HEAP_END) g_heap_lo = HEAP_BASE;
+    if (g_heapstat < 0){ g_heapstat = getenv("EMU_HEAPSTAT") != NULL; if (g_heapstat) atexit(heapstat_report); }
     uint32_t b = g_heap_lo;
     while (b < HEAP_END){
         uint32_t sz = hdr_rd(b), fr = hdr_rd(b+4);
+        if (fr){
+            /* guest_free only merges forward, so a block freed BEFORE its
+             * lower neighbour never joins it: the FE's realloc-grown buffers
+             * then climb through fresh address space (101 MB of heap for
+             * 603 KB live on a 15 KB text, OOM past ~20 KB). Merge the run
+             * of free blocks here instead. */
+            uint32_t nb = b + 8 + sz;
+            while (nb < HEAP_END && hdr_rd(nb + 4)){ sz += 8 + hdr_rd(nb); nb = b + 8 + sz; }
+            hdr_wr(b, sz);
+        }
         if (fr && sz >= n){
             if (sz >= n + 16){ uint32_t nb = b + 8 + n; hdr_wr(nb, sz - n - 8); hdr_wr(nb+4, 1); hdr_wr(b, n); }
             hdr_wr(b+4, 0);
             if (zero) memset(heap_host(b + 8), 0, (hdr_rd(b) + 3u) & ~3u);
+            if (g_heapstat){
+                g_heap_live += hdr_rd(b);
+                if (b + 8 + hdr_rd(b) > g_heap_top){ g_heap_top = b + 8 + hdr_rd(b); g_heap_live_at_top = g_heap_live; }
+            }
             return b + 8;
         }
         b += 8 + sz;
@@ -99,12 +121,29 @@ uint32_t guest_alloc(uint32_t n, int zero){
 }
 void guest_free(uint32_t p){
     if(!p) return; uint32_t b=p-8; hdr_wr(b+4,1);
+    if (g_heapstat > 0) g_heap_live -= hdr_rd(b);
     if (b < g_heap_lo) g_heap_lo = b;
     for(;;){ uint32_t sz=hdr_rd(b); uint32_t nb=b+8+sz; if(nb>=HEAP_END) break; if(hdr_rd(nb+4)){ hdr_wr(b, sz + 8 + hdr_rd(nb)); } else break; }
 }
 static uint32_t heap_realloc(uint32_t p, uint32_t n){
     if(!p) return guest_alloc(n,0);
     uint32_t oldsz = hdr_rd(p-8);
+    /* Grow in place into the free run that follows: the FE appends to its
+     * output string by realloc, and copying it every time is quadratic. */
+    uint32_t need = (n + 7) & ~7u;
+    if (need > oldsz){
+        uint32_t b = p - 8, sz = oldsz, nb = b + 8 + sz;
+        while (nb < HEAP_END && hdr_rd(nb + 4) && sz < need){ sz += 8 + hdr_rd(nb); nb = b + 8 + sz; }
+        if (sz >= need){
+            if (sz >= need + 16){ uint32_t tb = b + 8 + need; hdr_wr(tb, sz - need - 8); hdr_wr(tb + 4, 1); sz = need; }
+            hdr_wr(b, sz);
+            if (g_heapstat > 0){
+                g_heap_live += sz - oldsz;
+                if (b + 8 + sz > g_heap_top){ g_heap_top = b + 8 + sz; g_heap_live_at_top = g_heap_live; }
+            }
+            return p;
+        }
+    }
     uint32_t np = guest_alloc(n,0); if(!np) return 0;
     uint32_t c = oldsz<n?oldsz:n; memmove(heap_host(np), heap_host(p), c);
     guest_free(p);

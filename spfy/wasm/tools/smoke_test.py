@@ -98,6 +98,29 @@ def do_synth(drv, text, label):
     print(f"    [{label}] {samples}")
     if "Duration:" not in samples:
         raise RuntimeError("meta-samples missing Duration after synth")
+    return status_text(drv).split(" in ")[0]
+
+
+def wait_cached_parts(drv, voice_id, timeout):
+    """Block until every part of a voice is in the page's IndexedDB cache;
+    the writes are fire-and-forget, so a reload can otherwise beat them."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        n, want = drv.execute_async_script(
+            "const [id, cb] = arguments;"
+            "Promise.all([fetch('voices/manifest.json').then(r => r.json()),"
+            "  new Promise((res, rej) => { const q = indexedDB.open('spfy-voice-cache', 1);"
+            "    q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); })])"
+            ".then(([m, db]) => {"
+            "  const v = m.voices.find(x => x.id === id);"
+            "  const want = v.files.reduce((a, f) => a + f.parts.length, 0);"
+            "  const r = db.transaction('parts').objectStore('parts').getAllKeys();"
+            "  r.onsuccess = () => cb([r.result.filter(k => k.startsWith(id + '/')).length, want]);"
+            "}).catch(() => cb([0, -1]));", voice_id)
+        if n == want:
+            return n
+        time.sleep(0.5)
+    raise TimeoutError(f"{voice_id}: parts never all reached the IndexedDB cache")
 
 
 def main():
@@ -159,11 +182,22 @@ def main():
             f"Tom not loaded - manifest default is {declared!r}; if that is "
             f"not 'tom', change DEFAULT_VOICE_ID in stage_voices.py rather "
             f"than this assertion")
-        do_synth(drv, "The quick brown fox jumps over the lazy dog.", "Tom")
+        fox = "The quick brown fox jumps over the lazy dog."
+        net = do_synth(drv, fox, "Tom")
         rc = [l["message"] for l in drv.get_log("browser") if "FE recomp" in l["message"]]
         print(f"    {rc[-1][:120] if rc else 'no FE recomp line in console'}")
         assert rc and "recomp: on" in rc[-1], "en-US FE ran without static recompilation"
         results["1_tom"] = "PASS"
+
+        print("[Phase 1b] Tom - reload, voice must come from the browser cache")
+        print(f"    parts cached: {wait_cached_parts(drv, 'tom', 60)}")
+        drv.get(base)
+        wait_status(drv, "Ready", 90, "Tom/cache")
+        assert "from browser cache" in status_text(drv), (
+            "reloaded Tom was downloaded again instead of read from IndexedDB")
+        hit = do_synth(drv, fox, "Tom/cache")
+        assert hit == net, f"cached voice synthesised differently: {hit!r} vs {net!r}"
+        results["1b_tom_cache"] = "PASS"
 
         print("[Phase 2] Felix - switch to fr-CA (fresh module) + synth")
         Select(drv.find_element(By.ID, "voice-select")).select_by_value("felix")

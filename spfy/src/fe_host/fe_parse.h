@@ -48,8 +48,11 @@ typedef struct {
     int                  phonemes_cap;
 } fe_parsed_word_t;
 
-/* Max phrases ({...} utterance blocks) tracked per parse. */
-#define FE_PARSE_MAX_PHRASES 64
+/* The per-phrase arrays in fe_parsed_t ({...} utterance blocks) grow with
+ * the text: fe_parsed_phrase_reserve() before writing index pid, and
+ * `pid < phrase_cap` before reading. They were fixed at 64, so every phrase
+ * from the 65th on silently took default pauses and terminators (diverging
+ * from the vendor at 42.03 s on a 70-phrase text). */
 
 /* What `pau(p?d)` ("default duration") resolves to. The engine's own value
  * for the pau target is readable at sub+0x18 in FUN_08ee2960; a live capture
@@ -88,13 +91,13 @@ typedef struct {
     int               words_cap;
     /* Per-phrase terminating punctuation, parsed from the marker char the
      * FE emits inside each `{X` opener (e.g. */
-    char              phrase_terms[FE_PARSE_MAX_PHRASES];
+    char             *phrase_terms;
     int               n_phrase_terms;
     /* Per-phrase user pause (ms), from `\!pN` embedded tags rendered by
      * build_inline_mixed_tagged as `pau(uN)` openers (the `u` unit marks a
      * USER pause, distinct from the FE's structural `pau(pN)` which is not
      * rendered as... */
-    int               phrase_lead_pause_ms[FE_PARSE_MAX_PHRASES];
+    int              *phrase_lead_pause_ms;
     /* An inline `\!pN` sitting BEFORE the first word of its own utterance.
      *
      * ⚠ NOT the same thing as phrase_lead_pause_ms above. The engine keeps a
@@ -103,14 +106,14 @@ typedef struct {
      * is 68 units in ONE wsola_in call, units [2] and [3] carrying
      * tgt 250.00003 -- where phrase_lead_pause_ms is silence injected
      * BETWEEN two utterances. 0 = none. */
-    int               phrase_head_pau_ms[FE_PARSE_MAX_PHRASES];
+    int              *phrase_head_pau_ms;
     /* Its target in engine ms, from the FE's duration clock. */
-    float             phrase_head_pau_target_ms[FE_PARSE_MAX_PHRASES];
+    float            *phrase_head_pau_target_ms;
     /* This utterance holds a structural pau and NO words -- which is what a
      * TRAILING `\!pN` becomes. The engine renders `... warning. \!p500` as a
      * second wsola_in call of exactly 2 units, one pau phone at tgt p/2 per
      * halfphone. Its duration is in phrase_pau_ms_before. */
-    uint8_t           phrase_pau_only[FE_PARSE_MAX_PHRASES];
+    uint8_t          *phrase_pau_only;
     /* Structural `pau(pN)` values, per phrase, as the FE emitted them.
      *
      * Every phrase opens and closes with a structural pau, which the slot
@@ -126,15 +129,39 @@ typedef struct {
      * ⚠ pause_before_ms / pause_after_ms are NOT per-phrase and cannot
      * substitute: they key off the global word count, so phrase 1's leading
      * pau is recorded as a trailing one. */
-    int16_t           phrase_pau_p_before[FE_PARSE_MAX_PHRASES];
-    int16_t           phrase_pau_p_after [FE_PARSE_MAX_PHRASES];
+    int16_t          *phrase_pau_p_before;
+    int16_t          *phrase_pau_p_after;
     /* The same two pauses as TARGET MILLISECONDS, exactly as the engine
      * holds them: N/2 for a concrete pau(pN), FE_PAU_DEFAULT_MS for the
      * default form. The int fields above cannot express that value, which
      * is not a whole number of half-milliseconds. 0 = no pause. */
-    float             phrase_pau_ms_before[FE_PARSE_MAX_PHRASES];
-    float             phrase_pau_ms_after [FE_PARSE_MAX_PHRASES];
+    float            *phrase_pau_ms_before;
+    float            *phrase_pau_ms_after;
+    /* First and last index into words[] of each phrase's words (hi < lo when
+     * it has none). Loops over one phrase walk [lo, hi] and still test
+     * phrase_id, instead of scanning every word of the document per phrase,
+     * which made long texts quadratic. */
+    int              *phrase_word_lo;
+    int              *phrase_word_hi;
+    int               phrase_cap;
 } fe_parsed_t;
+
+/* Make every per-phrase array hold index pid (new entries zeroed).
+ * Returns 0 on allocation failure. */
+int  fe_parsed_phrase_reserve(fe_parsed_t *out, int pid);
+
+/* The words[] range to walk for phrase pid; the whole list when the parse
+ * recorded none (callers still test phrase_id, so this is always exact). */
+static inline void fe_parsed_phrase_range(const fe_parsed_t *p, int pid,
+                                          int *lo, int *hi) {
+    if (p->phrase_word_lo && pid >= 0 && pid < p->phrase_cap) {
+        *lo = p->phrase_word_lo[pid];
+        *hi = p->phrase_word_hi[pid];
+    } else {
+        *lo = 0;
+        *hi = p->n_words - 1;
+    }
+}
 
 /* Parse the FE's tagged-text output (see host/PROTOCOL.md). */
 int  fe_parse_tagged_output(const char *tagged, fe_parsed_t *out);

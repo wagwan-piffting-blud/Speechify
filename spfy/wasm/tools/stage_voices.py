@@ -25,6 +25,7 @@ Usage:
 SPDX-License-Identifier: GPL-3.0-or-later
 """
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -233,6 +234,19 @@ def split_file(src, dst_dir, base, threshold):
     return parts
 
 
+def file_sha(path):
+    """First 16 hex digits of the file's SHA-256: the browser cache key, so a
+    rebuilt voice file is re-downloaded even when its size is unchanged."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            b = f.read(COPY_CHUNK)
+            if not b:
+                break
+            h.update(b)
+    return h.hexdigest()[:16]
+
+
 def stage_voice(v, root, out, threshold):
     """Stage one voice. Returns its manifest entry, or None if skipped."""
     vdir = root / v["dir"]
@@ -267,7 +281,8 @@ def stage_voice(v, root, out, threshold):
         else:
             copy_whole(src, dst_dir / name)
             parts = [name]
-        file_entries.append({"name": name, "bytes": n, "parts": parts})
+        file_entries.append({"name": name, "bytes": n, "sha": file_sha(src),
+                             "parts": parts})
 
     return {
         "id": v["id"],
@@ -295,8 +310,11 @@ def external_entry(v):
     total = 0
     for f in v["files"]:
         total += f["bytes"]
-        files.append({"name": f["name"], "bytes": f["bytes"],
-                      "parts": [base + f["name"]]})
+        entry = {"name": f["name"], "bytes": f["bytes"],
+                 "parts": [base + f["name"]]}
+        if f.get("sha"):
+            entry["sha"] = f["sha"]
+        files.append(entry)
     return {
         "id": v["id"],
         "display": v["display"],

@@ -239,6 +239,7 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
                            const spfy_fe_utt_t    *utt,
                            uint32_t                sentence_idx_in_para,
                            int                     voice_d4_flag,
+                           int                     accent_phrase_single,
                            spfy_sp_target_table_t *out);
 
 /* Per-halfphone-leaf-slot q_type 5 derivation.

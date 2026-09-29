@@ -1116,6 +1116,7 @@ static void process_entry(const char *fe_path, const char *vit_path,
             int rc4 = spfy_derive_sp_targets(&tree, &fe,
                                              utt_idx,
                                              0,
+                                             1,
                                              &spt);
             if (rc4 == SPFY_OK) {
                 uint32_t (*cap)[5] = is_caps.per_slot_sp[utt_idx];

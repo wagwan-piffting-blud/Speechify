@@ -75,6 +75,38 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+#  include <shellapi.h>
+#endif
+
+#if defined(_WIN32) && !defined(SPFY_SYNTH_NO_MAIN)
+/* The CRT hands main() the ANSI-codepage argv, which replaces anything the
+ * codepage cannot hold with a best-fit or '?': "2 1<U+2044>2" arrived as
+ * "2 1/2" and was spoken as a fraction, where the engine (and `-f`) deletes
+ * the character. Each argument
+ * that did not survive the ANSI round trip is swapped for its UTF-8 form;
+ * the rest stay byte-identical, so ANSI paths and cp1252 text are unchanged. */
+static void argv_utf8_repair(int argc, char **argv)
+{
+    int wargc = 0;
+    LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+    if (!wargv) return;
+    if (wargc == argc) {
+        for (int i = 1; i < argc; ++i) {
+            BOOL lossy = FALSE;
+            /* Without NO_BEST_FIT, U+2044 "fits" as '/' and is not lossy. */
+            if (WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, wargv[i], -1,
+                                    NULL, 0, NULL, &lossy) <= 0 || !lossy)
+                continue;
+            int n = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0,
+                                        NULL, NULL);
+            char *u8 = (n > 0) ? (char *)malloc((size_t)n) : NULL;
+            if (!u8) continue;
+            WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, u8, n, NULL, NULL);
+            argv[i] = u8;
+        }
+    }
+    LocalFree(wargv);
+}
 #endif
 
 /* ⚠ 169578 is TOM's last unit index, not a universal constant. The engine's
@@ -623,8 +655,8 @@ static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_m
      * So the buffer stays full length (which is why clamping `blen` was
      * wrong) while the limit does not -- and FUN_08ee36e0's bail-out
      * `0x35c4 < W + hop + ideal` tests the LIMIT. `dec_n` is already exactly
-     * that clamped value. */
-    if (out_lim_n) *out_lim_n = dec_n;
+     * that clamped value; the pau resize below moves it with the splice. */
+    uint32_t lim = dec_n;
     /* Sample-domain call: spfy_vdb_decode applies bytes-per-sample and
      * zero-fills any shortfall, so the µ-law/PCM split stays out of here. */
     spfy_vdb_decode(vdb, rec_off, start, dec_n, buf);
@@ -647,6 +679,9 @@ static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_m
      * plain C float->int cast already does. */
     uint32_t content = nominal;
     int32_t  shift   = 0;
+    static int shrink_all = -1;
+    if (shrink_all < 0)
+        shrink_all = (spfy_env("SPFY_PAU_SHRINK_ALL") != NULL);
     for (uint32_t k = 0; k < n_pau; ++k) {
         uint32_t splice_at = 0, splice_n = 0;
         /* ⚠ `blen` has ALREADY absorbed every earlier splice, so `shift`
@@ -683,8 +718,21 @@ static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_m
             uint32_t cut_end = mid + rm / 2u;
             if (cut_end <= blen && cut_end >= rm && (cut_end - rm) >= pre) {
                 uint32_t cut_start = cut_end - rm;
-                memmove(buf + cut_start, buf + cut_end,
-                        (size_t)(blen - cut_end) * sizeof *buf);
+                /* ⚠ FUN_08ee1ee0 moves only up to the span LIMIT (+1 sample),
+                 * not the zero padding, then lowers the limit by the cut.
+                 * Past the new limit lies the old, unmoved audio: the lag
+                 * search reads it, the next history copy (clamped to the
+                 * limit) does not. Moving the padding down instead zeroed it
+                 * and took tom "Monday, September" from lag 56 to 80.
+                 * SPFY_PAU_SHRINK_ALL=1 restores the whole-buffer move. */
+                size_t mv = blen - cut_end;
+                if (!shrink_all) {
+                    size_t lim_mv = (lim >= cut_end)
+                                  ? (size_t)(lim - cut_end) + 1u : 0u;
+                    if (lim_mv < mv) mv = lim_mv;
+                    lim = (lim > rm) ? lim - rm : 0u;
+                }
+                memmove(buf + cut_start, buf + cut_end, mv * sizeof *buf);
                 blen    -= rm;
                 content -= rm;
                 shift   -= (int32_t)rm;
@@ -709,6 +757,7 @@ static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_m
                         (size_t)(blen - mid) * sizeof *buf);
                 memset(buf + mid, 0, (size_t)add * sizeof *buf);
                 blen    += add;
+                if (!shrink_all) lim += add;
                 content += add;
                 shift   += (int32_t)add;
             }
@@ -717,6 +766,7 @@ static int decode_unit_samples(uint16_t file_idx, uint16_t lp_ms, uint16_t dur_m
     }
 
     *out = buf; *out_n = blen;
+    if (out_lim_n) *out_lim_n = lim;
     if (out_pre_n) *out_pre_n = pre;
     /* The unit's own length after any resize; the caller offsets past `pre`
      * to reach it. */
@@ -1649,14 +1699,14 @@ static int spfy_tobi_by_code(uint8_t code, uint8_t *accented, int8_t *bias)
  * unit pair, placed immediately after the leading pad. Same lockstep rule as
  * INLINE_PAU_AFTER -- all four sites must agree. */
 #define INLINE_PAU_HEAD(p_, pid_)                                          \
-    (((pid_) >= 0 && (pid_) < FE_PARSE_MAX_PHRASES)                        \
+    (((pid_) >= 0 && (pid_) < (p_)->phrase_cap)                           \
      ? (p_)->phrase_head_pau_ms[(pid_)] : 0)
 
 /* This phrase is a TRAILING `\!pN`: a pau and no words. The engine gives it
  * its own utterance of exactly one pau phone -- no pads, so one segment, not
  * the usual leading + trailing pair. */
 #define PHRASE_IS_PAU_ONLY(p_, pid_)                                       \
-    (((pid_) >= 0 && (pid_) < FE_PARSE_MAX_PHRASES                         \
+    (((pid_) >= 0 && (pid_) < (p_)->phrase_cap                             \
       && (p_)->phrase_pau_only[(pid_)]) ? 1 : 0)
 
 static int parsed_to_fe_utt(const fe_parsed_t *parsed,
@@ -1667,7 +1717,9 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
     memset(out, 0, sizeof *out);
 
     int n_words_phr = 0, n_syls_phr = 0, n_segs_phr = 0, n_inline_pau = 0;
-    for (int i = 0; i < parsed->n_words; i++) {
+    int w_lo, w_hi;
+    fe_parsed_phrase_range(parsed, phrase_id, &w_lo, &w_hi);
+    for (int i = w_lo; i <= w_hi; i++) {
         if (parsed->words[i].phrase_id != phrase_id) continue;
         n_words_phr++;
         n_syls_phr += parsed->words[i].n_syllables;
@@ -1796,7 +1848,7 @@ static int parsed_to_fe_utt(const fe_parsed_t *parsed,
         word_out_idx++;
     }
 
-    for (int wi = 0; wi < parsed->n_words; wi++) {
+    for (int wi = w_lo; wi <= w_hi; wi++) {
         const fe_parsed_word_t *w = &parsed->words[wi];
         if (w->phrase_id != phrase_id) continue;
 
@@ -1958,7 +2010,9 @@ static int build_segments_from_parsed(const fe_parsed_t *parsed,
                                       const char       ***out, uint32_t *out_n)
 {
     int n_phons = 0, n_inline_pau = 0, n_words_phr = 0;
-    for (int wi = 0; wi < parsed->n_words; wi++) {
+    int w_lo, w_hi;
+    fe_parsed_phrase_range(parsed, phrase_id, &w_lo, &w_hi);
+    for (int wi = w_lo; wi <= w_hi; wi++) {
         if (parsed->words[wi].phrase_id != phrase_id) continue;
         n_words_phr++;
         n_phons += parsed->words[wi].n_phonemes;
@@ -1980,7 +2034,7 @@ static int build_segments_from_parsed(const fe_parsed_t *parsed,
     arr[total - 1u]   = "pau";
     uint32_t k = 1;
     if (INLINE_PAU_HEAD(parsed, phrase_id)) arr[k++] = "pau";
-    for (int wi = 0; wi < parsed->n_words; wi++) {
+    for (int wi = w_lo; wi <= w_hi; wi++) {
         const fe_parsed_word_t *w = &parsed->words[wi];
         if (w->phrase_id != phrase_id) continue;
         for (int pi = 0; pi < w->n_phonemes; pi++) {
@@ -1998,11 +2052,11 @@ static int build_segments_from_parsed(const fe_parsed_t *parsed,
  *
  * Returns the SEGMENT duration p (as the FE would have written `pau(pN)`),
  * so callers derive target ms as p/2 and samples as ((p+1)/2)*sps, exactly
- * like the phrase pads. Walks the parse per call -- O(words), and only ever
- * reached on pause slots -- which keeps it allocation-free and immune to the
- * function's several `goto fail` paths. */
+ * like the phrase pads. Walks the phrase's words [lo, hi] (the caller finds
+ * them once per phrase) -- allocation-free and immune to the function's
+ * several `goto fail` paths. */
 static int inline_pau_p_at(const fe_parsed_t *parsed, uint32_t phrase_idx,
-                           uint32_t si)
+                           uint32_t si, int lo, int hi)
 {
     if (!parsed) return 0;
     uint32_t seg = 1u;                     /* seg 0 is the leading pad */
@@ -2013,7 +2067,7 @@ static int inline_pau_p_at(const fe_parsed_t *parsed, uint32_t phrase_idx,
             seg++;
         }
     }
-    for (int wi = 0; wi < parsed->n_words; wi++) {
+    for (int wi = lo; wi <= hi; wi++) {
         const fe_parsed_word_t *w = &parsed->words[wi];
         if ((uint32_t)w->phrase_id != phrase_idx) continue;
         seg += (uint32_t)w->n_phonemes;
@@ -2034,7 +2088,8 @@ static int inline_pau_p_at(const fe_parsed_t *parsed, uint32_t phrase_idx,
  * multiplies the output cursor, and the product is TRUNCATED -- so one ULP
  * moves a frame's source by a sample. See fe_compute_pau_targets(). */
 static float inline_pau_target_ms_at(const fe_parsed_t *parsed,
-                                     uint32_t phrase_idx, uint32_t si)
+                                     uint32_t phrase_idx, uint32_t si,
+                                     int lo, int hi)
 {
     if (!parsed) return 0.0f;
     uint32_t seg = 1u;
@@ -2043,7 +2098,7 @@ static float inline_pau_target_ms_at(const fe_parsed_t *parsed,
             return parsed->phrase_head_pau_target_ms[phrase_idx];
         seg++;
     }
-    for (int wi = 0; wi < parsed->n_words; wi++) {
+    for (int wi = lo; wi <= hi; wi++) {
         const fe_parsed_word_t *w = &parsed->words[wi];
         if ((uint32_t)w->phrase_id != phrase_idx) continue;
         seg += (uint32_t)w->n_phonemes;
@@ -4020,6 +4075,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     int rc;
     char *etags_text = NULL;
     char *ssml_text = NULL;
+    int char_starts_done = 0;
     uint16_t *etag_vol = NULL;
     uint16_t *etag_rate = NULL;
     uint16_t *etag_pitch = NULL;
@@ -4232,7 +4288,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     /* A TRAILING `\!pN` is a pau-only utterance with no words at all, so it
      * cannot raise max_phrase_id. Extend past it, or the engine's second
      * wsola_in call has no counterpart here and the pause is simply lost. */
-    for (int pid = FE_PARSE_MAX_PHRASES - 1; pid >= (int)n_phrases; --pid) {
+    for (int pid = parsed->phrase_cap - 1; pid >= (int)n_phrases; --pid) {
         if (PHRASE_IS_PAU_ONLY(parsed, pid)) { n_phrases = (uint32_t)pid + 1u; break; }
     }
     int first_phrase_only = (spfy_env("SPFY_FIRST_PHRASE_ONLY") != NULL);
@@ -4443,8 +4499,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
 
 
     {
-        int phrase_has_words = 0;
-        for (int i = 0; i < parsed->n_words; i++) {
+        int phrase_has_words = 0, w_lo, w_hi;
+        fe_parsed_phrase_range(parsed, (int)phrase_idx, &w_lo, &w_hi);
+        for (int i = w_lo; i <= w_hi; i++) {
             if ((uint32_t)parsed->words[i].phrase_id == phrase_idx) {
                 phrase_has_words = 1; break;
             }
@@ -4491,7 +4548,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         || (rc = spfy_derive_sp_targets(&tree, &fe_utt,
                 spfy_env("SPFY_NO_SENTENCE_IDX_PARA") ? 0 : sentence_idx_in_para,
                 spfy_env("SPFY_VOICE_D4_FLAG")
-                    ? atoi(spfy_env("SPFY_VOICE_D4_FLAG")) : 0, &sp_tab))
+                    ? atoi(spfy_env("SPFY_VOICE_D4_FLAG")) : 0,
+                spfy_vcf_f32(&v->vcf, "ACCENT_PHRASE_SINGLE", 0.0f) != 0.0f,
+                &sp_tab))
            != SPFY_OK) {
         free(seg_names); goto fail;
     }
@@ -4769,8 +4828,13 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             /* The accessor hands back a const view; this is the single
              * place that writes back into it, and only to fill a field the
              * FE itself left unspecified. */
-            fe_fill_char_starts((void *)(uintptr_t)spfy_fe_get_parsed(v->fe),
-                                text);
+            /* Once per call, not per phrase: text and parse are fixed, and
+             * per phrase it rescanned the whole text every time. */
+            if (!char_starts_done) {
+                fe_fill_char_starts((void *)(uintptr_t)spfy_fe_get_parsed(v->fe),
+                                    text);
+                char_starts_done = 1;
+            }
             const fe_parsed_t *parsed_ro =
                 (const fe_parsed_t *)spfy_fe_get_parsed(v->fe);
             if (parsed_ro) {
@@ -4940,7 +5004,9 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         const fe_parsed_t *pv = (const fe_parsed_t *)spfy_fe_get_parsed(v->fe);
         if (pv) {
             uint32_t fw = 1;
-            for (int wi = 0; wi < pv->n_words; ++wi) {
+            int v_lo, v_hi;
+            fe_parsed_phrase_range(pv, (int)phrase_idx, &v_lo, &v_hi);
+            for (int wi = v_lo; wi <= v_hi; ++wi) {
                 if (pv->words[wi].phrase_id != (int)phrase_idx) continue;
                 int cs = pv->words[wi].char_start;
                 /* A word we could not place back in the resolved text is
@@ -7093,7 +7159,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
      * path rounds it to whole ms (FUN_08ee1ee0: "f=12.5 -> dur=13"). Keeping
      * the rounded sample count for both loses 0.5 ms per pause. */
     float pau_ms_lead = 0.0f, pau_ms_trail = 0.0f;
-    if (!pau_full && parsed && phrase_idx < FE_PARSE_MAX_PHRASES) {
+    /* PAU_TARGET_* run per slot: walk only this phrase's words. */
+    int pw_lo = 0, pw_hi = -1;
+    if (parsed) fe_parsed_phrase_range(parsed, (int)phrase_idx, &pw_lo, &pw_hi);
+    if (!pau_full && parsed && (int)phrase_idx < parsed->phrase_cap) {
         int pb = parsed->phrase_pau_p_before[phrase_idx];
         int pa = parsed->phrase_pau_p_after [phrase_idx];
         if (pb <= 0) pb = FE_PAU_DEFAULT_P;
@@ -7172,14 +7241,14 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
         ((pau_full || n_slots < 2u) ? 0u \
          : ((si) < 2u ? pau_smp_lead \
             : ((si) >= n_slots - 2u ? pau_smp_trail \
-               : (uint32_t)(((uint32_t)inline_pau_p_at(parsed, phrase_idx, (si)) \
+               : (uint32_t)(((uint32_t)inline_pau_p_at(parsed, phrase_idx, (si), pw_lo, pw_hi) \
                              + 1u) / 2u) * pau_sps)))
     /* Same slots, engine units: p/2 ms unrounded, 0 where no pause applies. */
     #define PAU_TARGET_MS(si) \
         ((pau_full || n_slots < 2u) ? 0.0f \
          : ((si) < 2u ? pau_ms_lead \
             : ((si) >= n_slots - 2u ? pau_ms_trail \
-               : inline_pau_target_ms_at(parsed, phrase_idx, (si)))))
+               : inline_pau_target_ms_at(parsed, phrase_idx, (si), pw_lo, pw_hi))))
 
     /* Back-fill the phrase's leading pad/pau slots with the first rate a tag
      * covers -- from index 1, NOT index 0.
@@ -7716,9 +7785,11 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     free(hp_rate_pct);
     free(hp_rate_n);   hp_rate_n   = NULL;
     free(hp_durt_q);   hp_durt_q   = NULL;
-    free(ctx_to_ms);   ctx_to_ms   = NULL;
+    /* ctx_to_ms is per voice, built once before the phrase loop: freeing it
+     * here sized every later phrase's time-scale from natural lengths. */
     free(hp_psola_st); hp_psola_st = NULL;
     free(hp_wsola);    hp_wsola    = NULL;
+    free(hp_tobi);     hp_tobi     = NULL;
     free(syl_vol);
     if (pros.on) {
         spfy_pmarks_free(&pros.marks);
@@ -7768,7 +7839,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * parser's phrase_lead_pause_ms (set from `pau(uN)` markers that
          * build_inline_mixed_tagged emits for embedded pause tags). */
         int npid = (int)phrase_idx + 1;
-        if (npid < FE_PARSE_MAX_PHRASES
+        if (npid < parsed->phrase_cap
             && parsed->phrase_lead_pause_ms[npid] > sil_ms)
             sil_ms = parsed->phrase_lead_pause_ms[npid];
         /* A \!p pause is a duration like any other, so it takes the same
@@ -7903,6 +7974,7 @@ cleanup:
     free(ssml_text);
     free(etag_acc);
     free(hp_tobi);
+    free(ctx_to_ms);
     free(etag_vol);
     free(etag_rate);
     free(etag_pitch);
@@ -8201,6 +8273,9 @@ int main(int argc, char **argv)
     const char *text, *out_wav;
     spfy_asset_paths_t embedded_paths = {0};
     char *file_text = NULL;
+#if defined(_WIN32)
+    argv_utf8_repair(argc, argv);
+#endif
 
     /* Pull the option flags (-f/--file and its =VALUE variants, -q/--quiet,
      * -v/--verbose) out of argv, compacting the remaining positionals down

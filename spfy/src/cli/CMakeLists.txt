@@ -198,6 +198,11 @@ target_link_libraries(spfy_synth_trace
     PRIVATE spfy_synth_lib spfy_fe spfy_fe_internal spfy_usel spfy_cart spfy_voice spfy_wsola spfy_dsp spfy_prosody spfy_common
             spfy_update_core)
 target_compile_definitions(spfy_synth_trace PRIVATE SPFY_HAVE_UPDATE_CHECK=1)
+# CommandLineToArgvW, for the UTF-8 argv repair in spfy_synth.c's main().
+if(WIN32)
+    target_link_libraries(spfy_synth PRIVATE shell32)
+    target_link_libraries(spfy_synth_trace PRIVATE shell32)
+endif()
 
 # A/B test tool for the TD-PSOLA pitch shifter (used to tune quality
 # before wiring into the SAPI shim's <prosody pitch=...> path).

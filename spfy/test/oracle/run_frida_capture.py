@@ -83,6 +83,7 @@ HOOK_JS = {
     "slice_dur":    HOOK_DIR / "slice_dur_hook.js",
     "wsola_cursor": HOOK_DIR / "wsola_cursor_hook.js",
     "wsola_frame":  HOOK_DIR / "wsola_frame_hook.js",
+    "wsola_lag":    HOOK_DIR / "wsola_lag_hook.js",      # 2026-09-29: FUN_08ee1330 hist/head/lag per join
     "prsl_lookup":  HOOK_DIR / "prsl_lookup_hook.js",
     "prsl_slot":    HOOK_DIR / "prsl_slot_hook.js",      # M3.4c per-slot preselect
     "inner_scorer": HOOK_DIR / "inner_scorer_hook.js",   # M3.4e per-slot SP target

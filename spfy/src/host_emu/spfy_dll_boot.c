@@ -51,6 +51,10 @@ uint32_t spfy_dll_emu_alloc(uint32_t n, int zero) {
     return guest_alloc(n, zero);
 }
 
+void spfy_dll_emu_free(uint32_t va) {
+    if (g_booted && va) guest_free(va);
+}
+
 void spfy_dll_emu_read(uint32_t guest_va, void *host_dst, uint32_t n) {
     mem_read(guest_va, host_dst, n);
 }

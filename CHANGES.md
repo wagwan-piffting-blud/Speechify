@@ -10,6 +10,8 @@
 
 - **The "I am speed" commit, part 2.** Addendum to the above commit to make some more optimizations and fixes to the spfy engine.
 
+- **Fix some very edge-case bugs related to the spfy engine.** Some very specific and rare cases were found where the spfy engine would produce incorrect output or unexpected behavior. These have been fixed, and the engine is now more robust and stable.
+
 ---
 
 ## 2026-09-25

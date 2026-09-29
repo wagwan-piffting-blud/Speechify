@@ -11,7 +11,8 @@
 //      language change means a fresh module), fetch the voice's
 //      vin/vdb/vcf over the network - stitching any >90 MiB file that was
 //      split into <100 MB parts for GitHub Pages - stream them into the
-//      emscripten FS, then call spfy_wasm_init('/voice', prefix).
+//      emscripten FS, then call spfy_wasm_init('/voice', prefix). Parts are
+//      kept in IndexedDB, so a return visit reads them from disk.
 //   4. On Speak: spfy_wasm_synth(text), read the int16 PCM from WASM
 //      memory, convert to Float32 [-1,1], feed an AudioBuffer.
 //   5. Stop cancels playback; Save packs the last PCM into a WAV blob.
@@ -112,50 +113,135 @@ async function createModuleForLang(lang) {
 // Voice fetch → emscripten FS
 // ---------------------------------------------------------------------
 
+// Voice parts persist in IndexedDB across visits. GitHub Pages serves them
+// with max-age=600 and gzips on the fly, so without this every visit after
+// ten minutes re-downloads ~90 MB and waits out a CDN miss per file. A record
+// is used only while it carries the manifest's sha for its file (external
+// voices without a sha fall back to the byte count), so a rebuilt voice is
+// fetched again. Keyed per PART, which keeps every stored blob under 100 MB.
+const VOICE_DB = "spfy-voice-cache";
+const VOICE_STORE = "parts";
+let voiceDbPromise = null;
+
+function openVoiceDb() {
+    if (!voiceDbPromise) {
+        voiceDbPromise = new Promise((resolve, reject) => {
+            if (!window.indexedDB) { reject(new Error("IndexedDB unavailable")); return; }
+            const req = indexedDB.open(VOICE_DB, 1);
+            req.onupgradeneeded = () => req.result.createObjectStore(VOICE_STORE);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+    return voiceDbPromise;
+}
+
+async function voiceStore(mode, op) {
+    const db = await openVoiceDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(VOICE_STORE, mode);
+        const req = op(tx.objectStore(VOICE_STORE));
+        tx.oncomplete = () => resolve(req.result);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+    });
+}
+
+const partKey = (voice, f, k) => `${voice.id}/${f.name}#${k}`;
+
+async function cachedPart(voice, f, k) {
+    try {
+        const rec = await voiceStore("readonly", (s) => s.get(partKey(voice, f, k)));
+        if (!rec || !(rec.blob instanceof Blob) || !rec.blob.size) return null;
+        if (rec.sha !== (f.sha || "")) return null;
+        if (!f.sha && f.parts.length === 1 && rec.blob.size !== f.bytes) return null;
+        return rec.blob;
+    } catch (_) {
+        return null;
+    }
+}
+
+function storePart(voice, f, k, blob) {
+    return voiceStore("readwrite", (s) =>
+        s.put({ sha: f.sha || "", blob, savedAt: Date.now() }, partKey(voice, f, k)))
+        .catch((err) => console.warn("[spfy] voice cache write failed:", err));
+}
+
+async function pump(readable, sink) {
+    const reader = readable.getReader();
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        sink(value);
+    }
+}
+
 // Stream one voice's files into /voice on the module FS. Each file may be
 // a single object or a list of <100 MB parts; parts are written back to
-// back so the reassembled file is byte-identical. Streams chunk-by-chunk
-// so even a 253 MB VDB never sits fully in a JS buffer.
+// back so the reassembled file is byte-identical. Returns how many bytes
+// came from the browser cache.
 async function fetchVoiceIntoFS(voice, onProgress) {
     const FS = state.module.FS;
     try { FS.mkdir("/voice"); } catch (_) { /* already exists */ }
 
-    let done = 0;
-    for (const f of voice.files) {
-        const stream = FS.open("/voice/" + f.name, "w");
-        let pos = 0;
-        for (const part of f.parts) {
-            // A part is normally a filename relative to voices/<dir>/, but
-            // may be an absolute URL - that lets an over-100 MB voice be
-            // hosted off-Pages (e.g. a GitHub Release asset or CDN) while
-            // the rest ship from the site.
-            const url = /^https?:\/\//i.test(part)
-                ? part
-                : "voices/" + voice.dir + "/" + part;
-            const resp = await fetch(url);
-            if (!resp.ok) throw new Error(`fetch ${url} → HTTP ${resp.status}`);
+    // A part is normally a filename relative to voices/<dir>/, but may be
+    // an absolute URL - that lets an over-100 MB voice be hosted off-Pages
+    // (e.g. a GitHub Release asset or CDN) while the rest ship from the site.
+    const partUrl = (part) => /^https?:\/\//i.test(part)
+        ? part
+        : "voices/" + voice.dir + "/" + part;
 
-            if (resp.body && resp.body.getReader) {
-                const reader = resp.body.getReader();
-                for (;;) {
-                    const { done: rdDone, value } = await reader.read();
-                    if (rdDone) break;
-                    FS.write(stream, value, 0, value.length, pos);
-                    pos += value.length;
-                    done += value.length;
-                    onProgress(done, voice.totalBytes);
+    const cached = await Promise.all(voice.files.map((f) =>
+        Promise.all(f.parts.map((_, k) => cachedPart(voice, f, k)))));
+
+    // Every download is requested NOW rather than when the previous file
+    // finishes: a CDN miss costs 1-3 s before the first byte, and asking up
+    // front overlaps those waits with the transfer in progress. Bodies are
+    // still read in order; stream backpressure stops the queued ones from
+    // buffering whole.
+    const pending = voice.files.map((f, i) => f.parts.map((part, k) => {
+        if (cached[i][k]) return null;
+        const p = fetch(partUrl(part));
+        p.catch(() => { /* surfaced when awaited below */ });
+        return p;
+    }));
+
+    let done = 0, fromCache = 0;
+    for (let i = 0; i < voice.files.length; ++i) {
+        const f = voice.files[i];
+        const stream = FS.open("/voice/" + f.name, "w");
+        let pos = 0, fromDisk = false;
+        const put = (chunk) => {
+            FS.write(stream, chunk, 0, chunk.length, pos);
+            pos += chunk.length;
+            done += chunk.length;
+            onProgress(done, voice.totalBytes, fromDisk);
+        };
+        try {
+            for (let k = 0; k < f.parts.length; ++k) {
+                const hit = cached[i][k];
+                fromDisk = !!hit;
+                if (hit) {
+                    fromCache += hit.size;
+                    await pump(hit.stream(), put);
+                    continue;
                 }
-            } else {
-                // Fallback for environments without a streaming body.
-                const buf = new Uint8Array(await resp.arrayBuffer());
-                FS.write(stream, buf, 0, buf.length, pos);
-                pos += buf.length;
-                done += buf.length;
-                onProgress(done, voice.totalBytes);
+                const resp = await pending[i][k];
+                if (!resp.ok) throw new Error(`fetch ${resp.url} → HTTP ${resp.status}`);
+                const chunks = [];
+                const keep = (c) => { chunks.push(c); put(c); };
+                if (resp.body && resp.body.getReader) {
+                    await pump(resp.body, keep);
+                } else {
+                    keep(new Uint8Array(await resp.arrayBuffer()));
+                }
+                storePart(voice, f, k, new Blob(chunks));
             }
+        } finally {
+            FS.close(stream);
         }
-        FS.close(stream);
     }
+    return fromCache;
 }
 
 async function loadVoice(voiceId) {
@@ -192,9 +278,10 @@ async function loadVoice(voiceId) {
         const total = voice.totalBytes;
         setStatus(`Downloading ${voice.display} … 0 / ${fmtMB(total)} MB`);
         const t0 = performance.now();
-        await fetchVoiceIntoFS(voice, (dl) => {
+        const fromCache = await fetchVoiceIntoFS(voice, (dl, _total, fromDisk) => {
             progressEl.value = total ? (dl / total) * 100 : 0;
-            setStatus(`Downloading ${voice.display} … ${fmtMB(dl)} / ${fmtMB(total)} MB`);
+            setStatus(`${fromDisk ? "Loading cached" : "Downloading"} ${voice.display} … `
+                      + `${fmtMB(dl)} / ${fmtMB(total)} MB`);
         });
 
         setStatus(`Loading ${voice.display} …`);
@@ -207,7 +294,9 @@ async function loadVoice(voiceId) {
         state.currentVoice = voice.id;
         state.lastRate = state.api.sampleRate();
         const dt = (performance.now() - t0).toFixed(0);
-        setStatus(`Ready - ${voice.display} loaded in ${dt} ms.`, "ok");
+        const src = fromCache >= total ? " from browser cache"
+                  : fromCache > 0 ? " (partly cached)" : "";
+        setStatus(`Ready - ${voice.display} loaded${src} in ${dt} ms.`, "ok");
         progressEl.value = 100;
         synthSec.hidden = false;
         speakBtn.disabled = false;

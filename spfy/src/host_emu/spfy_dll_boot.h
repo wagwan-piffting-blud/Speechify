@@ -37,6 +37,7 @@ uint32_t spfy_dll_emu_call(uint32_t fn, const uint32_t *args, int n);
 
 /* Allocate `n` bytes in the guest heap. */
 uint32_t spfy_dll_emu_alloc(uint32_t n, int zero);
+void     spfy_dll_emu_free(uint32_t va);
 
 void     spfy_dll_emu_read(uint32_t guest_va, void *host_dst, uint32_t n);
 void     spfy_dll_emu_write(uint32_t guest_va, const void *host_src, uint32_t n);

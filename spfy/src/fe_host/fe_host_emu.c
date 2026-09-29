@@ -54,7 +54,12 @@
 #define IOBJ_OFF_INIT_FLAG 0xc
 #define IOBJ_OFF_ERR_FLAG  0xd
 
-#define DRAIN_BUF_SIZE     256
+/* Each read (0836c420) erases what it returned by shifting the REST of the
+ * FE's output string down a byte at a time (0838c2c0), so a small buffer is
+ * quadratic in the output: 256 bytes cost 33% of a 121 KB text. A read that
+ * takes everything hits the erase's truncate path instead. */
+#define DRAIN_BUF_SIZE     (4u << 20)
+#define DRAIN_MAX_BYTES    ((size_t)64 << 20)
 
 typedef struct spfy_fe_s {
     uint32_t          iobj_va;
@@ -170,9 +175,17 @@ static char *drain_tagged(hosted_fe_t *fe) {
      * drain iteration. */
     uint32_t buf_va    = spfy_dll_emu_alloc(DRAIN_BUF_SIZE, 0);
     uint32_t outlen_va = spfy_dll_emu_alloc(4, 0);
-    if (!buf_va || !outlen_va) { free(out); return NULL; }
+    if (!buf_va || !outlen_va) {
+        spfy_dll_emu_free(buf_va);
+        spfy_dll_emu_free(outlen_va);
+        free(out);
+        return NULL;
+    }
 
-    for (int safety = 0; safety < 4096; safety++) {
+    /* Bounded by bytes, not reads: 4096 reads of 255 bytes once silently cut
+     * the output of a ~120 KB text off at ~1 MB, mid-token, and the parse
+     * failure then dropped the whole utterance. */
+    while (len < DRAIN_MAX_BYTES) {
         uint32_t zero = 0;
         spfy_dll_emu_write(outlen_va, &zero, 4);
 
@@ -187,24 +200,28 @@ static char *drain_tagged(hosted_fe_t *fe) {
         if (len + copied + 1 > cap) {
             while (len + copied + 1 > cap) cap *= 2;
             char *p = (char *)realloc(out, cap);
-            if (!p) { free(out); return NULL; }
+            if (!p) { free(out); out = NULL; break; }
             out = p;
         }
         spfy_dll_emu_read(buf_va, out + len, copied);
         len += copied;
     }
-    out[len] = '\0';
+    spfy_dll_emu_free(outlen_va);
+    spfy_dll_emu_free(buf_va);
+    if (out) out[len] = '\0';
     return out;
 }
 
-/* Feed plain text into the FE via slot 5. */
-static void feed_text(hosted_fe_t *fe, const char *s) {
+/* Feed plain text into the FE via slot 5. Returns the guest copy, which the
+ * caller frees once the utterance is released. */
+static uint32_t feed_text(hosted_fe_t *fe, const char *s) {
     uint32_t n = (uint32_t)strlen(s) + 1;
     uint32_t va = spfy_dll_emu_alloc(n, 0);
-    if (!va) return;
+    if (!va) return 0;
     spfy_dll_emu_write(va, s, n);
     uint32_t args[1] = { va };
     call_vfn(fe, SLOT_FEED_CONFIG_A, args, 1);
+    return va;
 }
 
 /* Same shape as fe_host.c::parse_fe_output_into_slots. */
@@ -261,9 +278,13 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
 
     /* ESPR mode: feed the voice's control header first (see fe_host.c for
      * the full rationale). */
+    /* Guest buffers handed to the FE for this utterance. The FE may still
+     * hold pointers into them until RUN_OR_ABORT releases it; without the
+     * frees a long-lived host (the SAPI DLL) leaked every input text. */
+    uint32_t hdr_va = 0, hdr_empty_va = 0;
     if (fe->espr_enabled) {
-        feed_text(fe, fe->espr_header);
-        uint32_t hdr_empty_va = spfy_dll_emu_alloc(1, 1);
+        hdr_va = feed_text(fe, fe->espr_header);
+        hdr_empty_va = spfy_dll_emu_alloc(1, 1);
         uint32_t hdrB_args[1] = { hdr_empty_va };
         call_vfn(fe, SLOT_FEED_CONFIG_B, hdrB_args, 1);
     }
@@ -271,7 +292,7 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     char *latin1 = (char *)malloc(strlen(text) + 1);
     if (!latin1) return NULL;
     text_to_latin1(text, latin1, strlen(text) + 1);
-    feed_text(fe, latin1);
+    uint32_t text_va = feed_text(fe, latin1);
     free(latin1);
 
     uint32_t empty_va = spfy_dll_emu_alloc(1, 1);
@@ -279,8 +300,7 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
     call_vfn(fe, SLOT_FEED_CONFIG_B, fcB_args, 1);
 
     char *tagged = drain_tagged(fe);
-    if (!tagged) return NULL;
-    fe_clean_stream_inplace(tagged);
+    if (tagged) fe_clean_stream_inplace(tagged);
 
     /* Scan here too: RUN_OR_ABORT below is what releases the utterance, so
      * this is the last moment the FE's own per-segment state is live. */
@@ -297,6 +317,10 @@ static char *hosted_fe_drain_tagged(hosted_fe_t *fe, const char *text) {
 
     uint32_t roa_args[1] = { 0 };
     call_vfn(fe, SLOT_RUN_OR_ABORT, roa_args, 1);
+    spfy_dll_emu_free(empty_va);
+    spfy_dll_emu_free(text_va);
+    spfy_dll_emu_free(hdr_empty_va);
+    spfy_dll_emu_free(hdr_va);
     return tagged;
 }
 
@@ -598,9 +622,11 @@ int spfy_fe_synth_text(spfy_fe_t                  *opaque,
     spfy_fe_utterance_t *u = (spfy_fe_utterance_t *)calloc(1, sizeof(*u));
     if (!u) { free(tagged); return -3; }
     u->hints = hints;
-    parse_fe_output_into_slots(fe, tagged, hints, u);
+    /* A tagged stream spfy cannot parse used to fall through as "no words":
+     * exit 0 and an empty WAV for the WHOLE text. */
+    int prc = parse_fe_output_into_slots(fe, tagged, hints, u);
 
-    if (!spfy_env("SPFY_SILENT")) {
+    if (!spfy_env("SPFY_SILENT") || prc != 0) {
         /* mingw's printf feeds unbuffered stderr one byte per WriteFile:
          * 180K syscalls for a long text. Same bytes, one fwrite. */
         size_t tl = strlen(tagged);
@@ -609,6 +635,11 @@ int spfy_fe_synth_text(spfy_fe_t                  *opaque,
         fputc('\n', stderr);
     }
     free(tagged);
+    if (prc != 0) {
+        free(u->slots);
+        free(u);
+        return -1;
+    }
 
     *out_utt = u;
     return 0;

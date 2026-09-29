@@ -415,6 +415,7 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
                            const spfy_fe_utt_t    *utt,
                            uint32_t                sentence_idx_in_para,
                            int                     voice_d4_flag,
+                           int                     accent_phrase_single,
                            spfy_sp_target_table_t *out)
 {
     if (!tree || !utt || !out) return SPFY_E_INVAL;
@@ -572,9 +573,10 @@ int spfy_derive_sp_targets(const spfy_slot_tree_t *tree,
      * punctuation. */
     char term = utt->phrase_term;
     int local_10 = (term == '.' || term == '?' || term == '!') ? 1 : 0;
-    /* config+0x88; 0 for Tom, and Tom is the only voice this was ever read
-     * against. */
-    int flag88 = 0;
+    /* config+0x88 = tts.voiceCfg.ACCENT_PHRASE_SINGLE (1 for every en-US
+     * voice). Only visible on a one-syllable phrase that is neither the
+     * first in its sentence nor '.'/'?'/'!'-typed. */
+    int flag88 = accent_phrase_single;
     {
         const char *e = spfy_env("SPFY_SP_FLAG88");
         if (e) flag88 = atoi(e);

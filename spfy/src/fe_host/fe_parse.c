@@ -65,10 +65,15 @@ static int p_parse_int(parser_t *p, int *out) {
 
 /* Identifier: starts with letter/underscore, continues with
  * alphanumeric/underscore. */
-static int p_parse_ident(parser_t *p, char *buf, size_t buf_sz) {
+static int p_parse_ident_ex(parser_t *p, char *buf, size_t buf_sz,
+                            int lead_apos) {
     p_skip_ws(p);
     if (p->p >= p->end) return 0;
     int c = (unsigned char)*p->p;
+    /* Word names may open with an apostrophe: the FE keeps elisions such as
+     * 'em, 'til, 'twas, 'tis as the word itself. */
+    if (lead_apos && c == '\'' && p->p + 1 < p->end)
+        c = (unsigned char)p->p[1];
     /* A byte >= 0x80 is an accented Latin-1 letter in a word name -- the FE
      * emits fr-CA/es-MX words like "días", "niño", "être" with their
      * accents intact. */
@@ -83,6 +88,10 @@ static int p_parse_ident(parser_t *p, char *buf, size_t buf_sz) {
     }
     if (buf_sz > 0) buf[(n < buf_sz) ? n : buf_sz - 1] = '\0';
     return (int)n;
+}
+
+static int p_parse_ident(parser_t *p, char *buf, size_t buf_sz) {
+    return p_parse_ident_ex(p, buf, buf_sz, 0);
 }
 
 /* Phoneme symbol: as p_parse_ident, plus '~'. */
@@ -160,7 +169,7 @@ static int parse_pau(parser_t *p, fe_parsed_t *out, int post_word,
          * sub+0x18, and a live capture of that field gives exactly p/2 ms
          * for every concrete p (p25 -> 12.5, p100 -> 50) and 25.0 for
          * `?d` -- i.e. `?d` behaves as p50. */
-        if (phrase_id >= 0 && phrase_id < FE_PARSE_MAX_PHRASES) {
+        if (phrase_id >= 0 && fe_parsed_phrase_reserve(out, phrase_id)) {
             int pv = is_default ? FE_PAU_DEFAULT_P : dur;
             float pms = is_default ? FE_PAU_DEFAULT_MS : (float)dur / 2.0f;
             if (post_in_utt) {
@@ -185,6 +194,36 @@ static int ensure_word_cap(fe_parsed_t *out) {
         memset(out->words + out->n_words, 0,
                (size_t)(nc - out->n_words) * sizeof(*p));
     }
+    return 1;
+}
+
+int fe_parsed_phrase_reserve(fe_parsed_t *out, int pid) {
+    if (!out || pid < 0) return 0;
+    if (pid < out->phrase_cap) return 1;
+    size_t oc = (size_t)out->phrase_cap;
+    size_t nc = oc ? oc : 64u;
+    while (nc <= (size_t)pid) nc *= 2u;
+#define GROW_ZEROED(f) do {                                                  \
+        void *np_ = realloc(out->f, nc * sizeof *out->f);                    \
+        if (!np_) return 0;                                                  \
+        memset((char *)np_ + oc * sizeof *out->f, 0,                         \
+               (nc - oc) * sizeof *out->f);                                  \
+        out->f = np_;                                                        \
+    } while (0)
+    GROW_ZEROED(phrase_terms);
+    GROW_ZEROED(phrase_lead_pause_ms);
+    GROW_ZEROED(phrase_head_pau_ms);
+    GROW_ZEROED(phrase_head_pau_target_ms);
+    GROW_ZEROED(phrase_pau_only);
+    GROW_ZEROED(phrase_pau_p_before);
+    GROW_ZEROED(phrase_pau_p_after);
+    GROW_ZEROED(phrase_pau_ms_before);
+    GROW_ZEROED(phrase_pau_ms_after);
+    GROW_ZEROED(phrase_word_lo);
+    GROW_ZEROED(phrase_word_hi);
+#undef GROW_ZEROED
+    for (size_t i = oc; i < nc; ++i) out->phrase_word_hi[i] = -1;
+    out->phrase_cap = (int)nc;
     return 1;
 }
 
@@ -287,7 +326,7 @@ static int parse_word(parser_t *p, fe_parsed_t *out) {
     w = &out->words[out->n_words++];
     memset(w, 0, sizeof(*w));
 
-    if (p_parse_ident(p, w->text, sizeof(w->text)) <= 0) {
+    if (p_parse_ident_ex(p, w->text, sizeof(w->text), 1) <= 0) {
         p->err = 1; p->err_msg = "word name"; return 0;
     }
     if (!p_expect_lit(p, "(")) return 0;
@@ -454,7 +493,13 @@ static void fe_compute_pau_targets(fe_parsed_t *out) {
     for (int i = 0; i < out->n_words; ++i) {
         if (out->words[i].phrase_id > max_pid) max_pid = out->words[i].phrase_id;
     }
-    if (max_pid >= FE_PARSE_MAX_PHRASES) max_pid = FE_PARSE_MAX_PHRASES - 1;
+    if (!fe_parsed_phrase_reserve(out, max_pid)) max_pid = out->phrase_cap - 1;
+    for (int wi = 0; wi < out->n_words; ++wi) {
+        int pid = out->words[wi].phrase_id;
+        if (pid < 0 || pid >= out->phrase_cap) continue;
+        if (out->phrase_word_hi[pid] < 0) out->phrase_word_lo[pid] = wi;
+        out->phrase_word_hi[pid] = wi;
+    }
 
     for (int pid = 0; pid <= max_pid; ++pid) {
         fe_dur_clock_t c = { 0, 0.0f };
@@ -471,7 +516,7 @@ static void fe_compute_pau_targets(fe_parsed_t *out) {
             out->phrase_head_pau_target_ms[pid] = fe_pau_target_ms(h1, h2);
         }
 
-        for (int wi = 0; wi < out->n_words; ++wi) {
+        for (int wi = out->phrase_word_lo[pid]; wi <= out->phrase_word_hi[pid]; ++wi) {
             fe_parsed_word_t *w = &out->words[wi];
             if (w->phrase_id != pid) continue;
             for (int ph = 0; ph < w->n_phonemes; ++ph)
@@ -550,8 +595,7 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
                     break;
                 }
             }
-            if (utt_count < (int)(sizeof(out->phrase_terms) /
-                                  sizeof(out->phrase_terms[0]))) {
+            if (fe_parsed_phrase_reserve(out, utt_count)) {
                 out->phrase_terms[utt_count] = term_marker ? term_marker : '.';
                 if (utt_count + 1 > out->n_phrase_terms)
                     out->n_phrase_terms = utt_count + 1;
@@ -586,9 +630,8 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
                     int in_utt = (out->n_words > words_at_utt_start);
                     if (!spfy_env("SPFY_INLINE_PAU_LEGACY") && in_utt) {
                         out->words[out->n_words - 1].pause_after_ms = dur;
-                    } else if (phrase_id_for_this_utt >= 0
-                               && phrase_id_for_this_utt
-                                  < FE_PARSE_MAX_PHRASES) {
+                    } else if (fe_parsed_phrase_reserve(
+                                   out, phrase_id_for_this_utt)) {
                         /* Before this utterance's first word. The engine
                          * keeps it INSIDE the utterance as a pau pair after
                          * the leading pad, so it is head_pau, not the
@@ -631,7 +674,7 @@ int fe_parse_tagged_output(const char *tagged, fe_parsed_t *out) {
          * phrase holding no words. */
         if (out->n_words == words_at_utt_start
             && phrase_id_for_this_utt >= 0
-            && phrase_id_for_this_utt < FE_PARSE_MAX_PHRASES
+            && phrase_id_for_this_utt < out->phrase_cap
             && out->phrase_pau_ms_before[phrase_id_for_this_utt] > 0.0f) {
             out->phrase_pau_only[phrase_id_for_this_utt] = 1u;
         }
@@ -987,6 +1030,17 @@ void fe_parsed_free(fe_parsed_t *out) {
         }
         free(out->words);
     }
+    free(out->phrase_terms);
+    free(out->phrase_lead_pause_ms);
+    free(out->phrase_head_pau_ms);
+    free(out->phrase_head_pau_target_ms);
+    free(out->phrase_pau_only);
+    free(out->phrase_pau_p_before);
+    free(out->phrase_pau_p_after);
+    free(out->phrase_pau_ms_before);
+    free(out->phrase_pau_ms_after);
+    free(out->phrase_word_lo);
+    free(out->phrase_word_hi);
     memset(out, 0, sizeof(*out));
 }
 

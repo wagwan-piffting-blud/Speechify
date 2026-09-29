@@ -935,8 +935,11 @@ int spfy_wsola_push_engine(spfy_wsola_streamer_t *s,
     }
 
     /* History for the next join: FUN_08ee2d60 copies `corr` samples from
-     * where emission stopped, zero-filling any shortfall. */
-    size_t have = (buf_n > end_pos) ? (buf_n - end_pos) : 0;
+     * where emission stopped, zero-filling any shortfall -- short of the span
+     * LIMIT, not the buffer: a shrunk pau leaves unmoved audio past it. */
+    size_t hist_lim = (s->span_limit && s->span_limit < buf_n)
+                    ? s->span_limit : buf_n;
+    size_t have = (hist_lim > end_pos) ? (hist_lim - end_pos) : 0;
     size_t hn   = (have < corr) ? have : corr;
     if (hn) memcpy(s->hist, buf + end_pos, hn * sizeof *buf);
     if (hn < corr) memset(s->hist + hn, 0, (corr - hn) * sizeof *s->hist);
