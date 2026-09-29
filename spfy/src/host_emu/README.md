@@ -62,6 +62,31 @@ file contents are byte-identical to the donor; we will trim VST/GDI/
 Delphi-VCL specifics in a later pass once `EMU_IATDUMP=1` confirms which
 imports `SWIttsFe-en-US.dll` actually pulls in.
 
+⚠ **Local edits since 2026-09-29** (the donor SHA-256s above no longer
+match): the ALU/flag helpers moved verbatim from `cpu.c` into `cpu_ops.h`;
+`cpu.c` gained the static-recompilation hook, a stop condition for nested
+runs, and inline memory access (`emu_fast_mem.h`, which needs `mem.c`'s
+`g_pagemap` non-static); `win32_donor.c`'s guest heap walks headers through a
+host pointer from a lowest-free hint (same algorithm, same returned
+addresses).
+
+## Static recompilation (2026-09-29)
+
+`recomp/` holds the FE DLL's functions translated to C by
+`spfy/tools/fe_recomp/recomp.py` (see its docstring for inputs and gates).
+Each translated instruction calls the same helper the interpreter would, so
+output is byte-identical by construction; anything untranslated is
+single-stepped. The runtime is only enabled when the loaded image's base,
+size and PE timestamp match `recomp_tab.c`, so the fr-CA / es-MX FEs stay
+fully interpreted. `SPFY_FE_RECOMP=0` turns it off;
+`SPFY_FE_RECOMP_TRACE=<file>` logs call targets that fell back to the
+interpreter, which is how `data/fnset.json` was grown.
+
+Measured on the 7900X, tom, CLI per request: 0.55 -> 0.14 ms/char
+(+ ~65 ms fixed). Gates: master parity 221/221 and all 1,349 wayback
+transcripts byte-identical with recompilation on vs off. 157 rule functions
+over 8 KB stay interpreted (~110 MB of C if translated; `--include-big`).
+
 ## The four x87 fixes (verified in `cpu.c` of this directory)
 
 These are the difference between "TTS produces correct audio" and "TTS

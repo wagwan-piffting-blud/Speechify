@@ -14,7 +14,8 @@ mem_t MEM;
 /* g_pagemap[va>>12] = host pointer for guest VA (page<<12), or NULL if
  * unmapped. */
 /* page-aligned (IMAGE_BASE/STACK/HEAP/TEB/... */
-static uint8_t** g_pagemap = NULL;
+/* Not static: cpu.c inlines the same one-load translation (emu_fast_mem.h). */
+uint8_t** g_pagemap = NULL;
 
 static inline uint8_t* xlat(uint32_t va) {
     uint8_t* base = g_pagemap[va >> PAGE_BITS];

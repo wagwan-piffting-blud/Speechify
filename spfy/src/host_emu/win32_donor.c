@@ -55,6 +55,7 @@ uint32_t host_register_callback(shim_fn fn, int argbytes, const char* name){
 }
 
 static uint32_t HEAP_END;
+static uint32_t g_heap_lo;
 static uint32_t g_valloc_next;
 static void valloc_init(void){ mem_map(VALLOC_BASE, VALLOC_SIZE, "valloc"); g_valloc_next = VALLOC_BASE; }
 static uint32_t valloc_reserve(uint32_t n){
@@ -65,19 +66,30 @@ static uint32_t valloc_reserve(uint32_t n){
 static void heap_init(void){
     mem_map(HEAP_BASE, HEAP_SIZE, "heap");
     HEAP_END = HEAP_BASE + HEAP_SIZE;
+    g_heap_lo = HEAP_BASE;
     wr32(HEAP_BASE, HEAP_SIZE - 8);
     wr32(HEAP_BASE + 4, 1);
     valloc_init();
 }
+/* First-fit over in-guest block headers [size][free]. Same algorithm and the
+ * SAME returned addresses as the donor's rd32/wr32 walk from HEAP_BASE, two
+ * things faster: headers are read through the region's host pointer, and the
+ * walk starts at g_heap_lo, which is kept <= every free block (freeing lowers
+ * it, allocating never creates a lower free block), so every block it skips
+ * would have been skipped from HEAP_BASE too. */
+static uint8_t* heap_host(uint32_t va){ return mem_host(HEAP_BASE) + (va - HEAP_BASE); }
+static uint32_t hdr_rd(uint32_t va){ uint32_t v; memcpy(&v, heap_host(va), 4); return v; }
+static void hdr_wr(uint32_t va, uint32_t v){ memcpy(heap_host(va), &v, 4); }
 uint32_t guest_alloc(uint32_t n, int zero){
     n = (n + 7) & ~7u; if(n==0) n=8;
-    uint32_t b = HEAP_BASE;
+    if (g_heap_lo < HEAP_BASE || g_heap_lo >= HEAP_END) g_heap_lo = HEAP_BASE;
+    uint32_t b = g_heap_lo;
     while (b < HEAP_END){
-        uint32_t sz = rd32(b), fr = rd32(b+4);
+        uint32_t sz = hdr_rd(b), fr = hdr_rd(b+4);
         if (fr && sz >= n){
-            if (sz >= n + 16){ uint32_t nb = b + 8 + n; wr32(nb, sz - n - 8); wr32(nb+4, 1); wr32(b, n); }
-            wr32(b+4, 0);
-            if (zero){ for(uint32_t i=0;i<rd32(b);i+=4) wr32(b+8+i,0); }
+            if (sz >= n + 16){ uint32_t nb = b + 8 + n; hdr_wr(nb, sz - n - 8); hdr_wr(nb+4, 1); hdr_wr(b, n); }
+            hdr_wr(b+4, 0);
+            if (zero) memset(heap_host(b + 8), 0, (hdr_rd(b) + 3u) & ~3u);
             return b + 8;
         }
         b += 8 + sz;
@@ -86,14 +98,15 @@ uint32_t guest_alloc(uint32_t n, int zero){
     return 0;
 }
 void guest_free(uint32_t p){
-    if(!p) return; uint32_t b=p-8; wr32(b+4,1);
-    for(;;){ uint32_t sz=rd32(b); uint32_t nb=b+8+sz; if(nb>=HEAP_END) break; if(rd32(nb+4)){ wr32(b, sz + 8 + rd32(nb)); } else break; }
+    if(!p) return; uint32_t b=p-8; hdr_wr(b+4,1);
+    if (b < g_heap_lo) g_heap_lo = b;
+    for(;;){ uint32_t sz=hdr_rd(b); uint32_t nb=b+8+sz; if(nb>=HEAP_END) break; if(hdr_rd(nb+4)){ hdr_wr(b, sz + 8 + hdr_rd(nb)); } else break; }
 }
 static uint32_t heap_realloc(uint32_t p, uint32_t n){
     if(!p) return guest_alloc(n,0);
-    uint32_t oldsz = rd32(p-8);
+    uint32_t oldsz = hdr_rd(p-8);
     uint32_t np = guest_alloc(n,0); if(!np) return 0;
-    uint32_t c = oldsz<n?oldsz:n; for(uint32_t i=0;i<c;i++) wr8(np+i, rd8(p+i));
+    uint32_t c = oldsz<n?oldsz:n; memmove(heap_host(np), heap_host(p), c);
     guest_free(p);
     return np;
 }

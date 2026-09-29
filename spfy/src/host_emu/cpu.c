@@ -1,4 +1,6 @@
 #include "emu.h"
+#include "emu_fast_mem.h"
+#include "recomp.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +29,8 @@ uint32_t do_logic_or (uint32_t a,uint32_t b,int sz);
 uint32_t do_logic_and(uint32_t a,uint32_t b,int sz);
 uint32_t do_logic_xor(uint32_t a,uint32_t b,int sz);
 
-void cpu_reset(void){ memset(&CPU,0,sizeof CPU); CPU.eflags=0x202; CPU.fpu_cw=0x037f; CPU.fpu_top=8; CPU.mxcsr=0x1f80;
+static void rc_reset(void);
+void cpu_reset(void){ rc_reset(); memset(&CPU,0,sizeof CPU); CPU.eflags=0x202; CPU.fpu_cw=0x037f; CPU.fpu_top=8; CPU.mxcsr=0x1f80;
     g_code_host=0; g_code_lo=0; g_code_size=0; jit_reset(); }
 /* x87 FIST/FISTP/FRNDINT round per FPU control-word RC bits (10-11);
  * default 00 = round-to-nearest-even */
@@ -65,71 +68,11 @@ static uint8_t  fetch8(void){ uint8_t v=*g_ip; g_ip++; CPU.eip++; return v; }
 static uint16_t fetch16(void){ uint16_t v; memcpy(&v,g_ip,2); g_ip+=2; CPU.eip+=2; return v; }
 static uint32_t fetch32(void){ uint32_t v; memcpy(&v,g_ip,4); g_ip+=4; CPU.eip+=4; return v; }
 
-static const uint32_t SZMASK[5]={0,0xff,0xffff,0,0xffffffff};
-static const uint32_t SIGN[5]  ={0,0x80,0x8000,0,0x80000000};
+#include "cpu_ops.h"
 static const uint8_t IS_PREFIX[256]={
     [0x66]=1,[0x67]=1,[0xF0]=1,[0xF2]=1,[0xF3]=1,
     [0x2E]=1,[0x36]=1,[0x3E]=1,[0x26]=1,[0x64]=1,[0x65]=1,
 };
-static int parity8(uint32_t v){ v&=0xff; v^=v>>4; v^=v>>2; v^=v>>1; return (~v)&1; }
-static void set_szp(uint32_t res,int sz){
-    uint32_t m=SZMASK[sz]; res&=m;
-    CPU.eflags &= ~(FL_ZF|FL_SF|FL_PF);
-    if(res==0) CPU.eflags|=FL_ZF;
-    if(res & SIGN[sz]) CPU.eflags|=FL_SF;
-    if(parity8(res)) CPU.eflags|=FL_PF;
-}
-static void setf(uint32_t bit,int on){ if(on) CPU.eflags|=bit; else CPU.eflags&=~bit; }
-
-static uint32_t do_add(uint32_t a,uint32_t b,int sz){
-    uint64_t r=(uint64_t)(a&SZMASK[sz])+(b&SZMASK[sz]);
-    uint32_t res=(uint32_t)r; set_szp(res,sz);
-    setf(FL_CF, (r>>(sz*8))&1);
-    setf(FL_AF, ((a^b^res)&0x10)!=0);
-    setf(FL_OF, ((~(a^b)&(a^res))&SIGN[sz])!=0);
-    return res&SZMASK[sz];
-}
-static uint32_t do_adc(uint32_t a,uint32_t b,int sz){
-    uint32_t c=(CPU.eflags&FL_CF)?1:0;
-    uint64_t r=(uint64_t)(a&SZMASK[sz])+(b&SZMASK[sz])+c;
-    uint32_t res=(uint32_t)r; set_szp(res,sz);
-    setf(FL_CF, (r>>(sz*8))&1);
-    setf(FL_AF, ((a^b^res)&0x10)!=0);
-    setf(FL_OF, ((~(a^b)&(a^res))&SIGN[sz])!=0);
-    return res&SZMASK[sz];
-}
-static uint32_t do_sub(uint32_t a,uint32_t b,int sz){
-    uint32_t aa=a&SZMASK[sz], bb=b&SZMASK[sz];
-    uint32_t res=(aa-bb)&SZMASK[sz]; set_szp(res,sz);
-    setf(FL_CF, aa<bb);
-    setf(FL_AF, ((a^b^res)&0x10)!=0);
-    setf(FL_OF, (((a^b)&(a^res))&SIGN[sz])!=0);
-    return res;
-}
-static uint32_t do_sbb(uint32_t a,uint32_t b,int sz){
-    uint32_t c=(CPU.eflags&FL_CF)?1:0;
-    uint32_t aa=a&SZMASK[sz]; uint64_t bb=(uint64_t)(b&SZMASK[sz])+c;
-    uint32_t res=(uint32_t)((aa-bb))&SZMASK[sz]; set_szp(res,sz);
-    setf(FL_CF, (uint64_t)aa < bb);
-    setf(FL_AF, ((a^b^res)&0x10)!=0);
-    setf(FL_OF, (((a^b)&(a^res))&SIGN[sz])!=0);
-    return res;
-}
-static uint32_t do_logic(uint32_t res,int sz){ set_szp(res,sz); setf(FL_CF,0); setf(FL_OF,0); setf(FL_AF,0); return res&SZMASK[sz]; }
-static uint32_t do_inc(uint32_t a,int sz){ uint32_t res=(a+1)&SZMASK[sz]; int cf=CPU.eflags&FL_CF; set_szp(res,sz); setf(FL_AF,((a^1^res)&0x10)!=0); setf(FL_OF,(a&SZMASK[sz])==(SIGN[sz]-1)); setf(FL_CF,cf); return res; }
-static uint32_t do_dec(uint32_t a,int sz){ uint32_t res=(a-1)&SZMASK[sz]; int cf=CPU.eflags&FL_CF; set_szp(res,sz); setf(FL_AF,((a^1^res)&0x10)!=0); setf(FL_OF,(a&SZMASK[sz])==SIGN[sz]); setf(FL_CF,cf); return res; }
-
-static uint32_t getreg(int idx,int sz){
-    if(sz==4) return CPU.r[idx];
-    if(sz==2) return CPU.r[idx]&0xffff;
-    if(idx<4) return CPU.r[idx]&0xff; return (CPU.r[idx-4]>>8)&0xff;
-}
-static void setreg(int idx,int sz,uint32_t v){
-    if(sz==4){ CPU.r[idx]=v; return; }
-    if(sz==2){ CPU.r[idx]=(CPU.r[idx]&~0xffffu)|(v&0xffff); return; }
-    if(idx<4) CPU.r[idx]=(CPU.r[idx]&~0xffu)|(v&0xff); else CPU.r[idx-4]=(CPU.r[idx-4]&~0xff00u)|((v&0xff)<<8);
-}
-
 typedef struct { int mod,reg,rm; int is_mem; uint32_t addr; } modrm_t;
 static uint32_t g_seg_base;
 
@@ -156,50 +99,6 @@ static void decode_modrm(modrm_t* m,int addr_override){
 }
 static uint32_t rm_read(modrm_t* m,int sz){ return m->is_mem ? (sz==1?rd8(m->addr):sz==2?rd16(m->addr):rd32(m->addr)) : getreg(m->rm,sz); }
 static void rm_write(modrm_t* m,int sz,uint32_t v){ if(m->is_mem){ if(sz==1)wr8(m->addr,v);else if(sz==2)wr16(m->addr,v);else wr32(m->addr,v);} else setreg(m->rm,sz,v); }
-
-static int cond(int c){
-    int cf=!!(CPU.eflags&FL_CF), zf=!!(CPU.eflags&FL_ZF), sf=!!(CPU.eflags&FL_SF), of=!!(CPU.eflags&FL_OF), pf=!!(CPU.eflags&FL_PF);
-    switch(c&0xf){
-        case 0x0:return of; case 0x1:return !of; case 0x2:return cf; case 0x3:return !cf;
-        case 0x4:return zf; case 0x5:return !zf; case 0x6:return cf||zf; case 0x7:return !(cf||zf);
-        case 0x8:return sf; case 0x9:return !sf; case 0xa:return pf; case 0xb:return !pf;
-        case 0xc:return sf!=of; case 0xd:return sf==of; case 0xe:return zf||(sf!=of); case 0xf:return !(zf||(sf!=of));
-    } return 0;
-}
-
-static uint32_t do_shift(int op,uint32_t v,uint32_t cnt,int sz){
-    uint32_t m=SZMASK[sz]; v&=m; cnt &= 31; if(sz<4) {}
-    if(cnt==0) return v;
-    uint32_t res=v; int cf=0,of=0;
-    switch(op){
-        case 4: case 6:
-            for(uint32_t i=0;i<cnt;i++){ cf=(res&SIGN[sz])?1:0; res=(res<<1)&m; }
-            of=cf ^ ((res&SIGN[sz])?1:0); break;
-        case 5:
-            for(uint32_t i=0;i<cnt;i++){ cf=res&1; res>>=1; }
-            of=(v&SIGN[sz])?1:0; break;
-        case 7:
-            { int neg=(v&SIGN[sz])?1:0;
-              for(uint32_t i=0;i<cnt;i++){ cf=res&1; res>>=1; if(neg) res|=SIGN[sz]; }
-              of=0; } break;
-        case 0:
-            for(uint32_t i=0;i<cnt;i++){ cf=(res&SIGN[sz])?1:0; res=((res<<1)|cf)&m; }
-            of=cf ^ ((res&SIGN[sz])?1:0); break;
-        case 1:
-            for(uint32_t i=0;i<cnt;i++){ cf=res&1; res=((res>>1)|((uint32_t)cf*SIGN[sz]))&m; }
-            of=((res&SIGN[sz])?1:0) ^ (((res<<1)&SIGN[sz])?1:0); break;
-        case 2:
-            for(uint32_t i=0;i<cnt;i++){ int nc=(res&SIGN[sz])?1:0; res=((res<<1)|(CPU.eflags&FL_CF?1:0))&m; setf(FL_CF,nc); cf=nc; }
-            of=cf ^ ((res&SIGN[sz])?1:0); break;
-        case 3:
-            for(uint32_t i=0;i<cnt;i++){ int nc=res&1; res=(res>>1)|((CPU.eflags&FL_CF?1u:0u)*SIGN[sz]); res&=m; setf(FL_CF,nc); cf=nc; }
-            break;
-    }
-    if(op>=4) set_szp(res,sz);
-    if(op<2||op>3) setf(FL_CF,cf);
-    setf(FL_OF,of);
-    return res&m;
-}
 
 static double* st(int i){ return &CPU.st[(CPU.fpu_top+i)&7]; }
 static void fpush(double v){ CPU.fpu_top=(CPU.fpu_top-1)&7; CPU.st[CPU.fpu_top]=v; }
@@ -668,7 +567,43 @@ static inline jitent_t* jit_find(uint32_t eip){
     return e;
 }
 
-int cpu_run(uint64_t max_insns){
+/* Static recompilation (spfy/tools/fe_recomp/recomp.py -> recomp_gen_*.c).
+ * A recompiled guest function runs on this same CPU struct through these same
+ * helpers (cpu_ops.h), so it is this interpreter minus fetch/decode/dispatch.
+ * The CPU struct stays the ONLY state: when C frames and guest frames
+ * disagree the C side unwinds and the interpreter carries on from an exact
+ * state. SPFY_FE_RECOMP=0 turns it off. */
+static int g_rc_on = -1, g_rc_inhibit = 0;
+static int cpu_run_core(uint64_t max_insns, uint32_t stop_eip, uint32_t stop_esp);
+static int rc_lookup(uint32_t eip);
+static int rc_call_entry(int k);
+static int rc_image_matches(void);
+/* A (re)boot may load a different FE image: decide again on first run. */
+static void rc_reset(void){ g_rc_on = -1; }
+
+/* SPFY_FE_RECOMP_TRACE=<file>: append every call target that is NOT
+ * recompiled, once per process, so recomp.py --functions can grow the set
+ * from real traffic. */
+static FILE* g_rc_trace = NULL;
+static int g_rc_trace_on = 0;
+static uint32_t g_rc_seen[1u << 14];
+static void rc_trace_miss(uint32_t eip){
+    if(!g_rc_trace_on || rc_lookup(eip)>=0) return;
+    uint32_t h = (eip * 2654435761u) >> 18;
+    for(uint32_t i=0;i<(1u<<14);i++){
+        uint32_t* s=&g_rc_seen[(h+i)&((1u<<14)-1)];
+        if(*s==eip) return;
+        if(*s==0){ *s=eip; fprintf(g_rc_trace,"%08x\n",eip); fflush(g_rc_trace); return; }
+    }
+}
+
+int cpu_run(uint64_t max_insns){ return cpu_run_core(max_insns, 0, 0); }
+
+static int cpu_run_core(uint64_t max_insns, uint32_t stop_eip, uint32_t stop_esp){
+    if(g_rc_on<0){
+        const char* e=getenv("SPFY_FE_RECOMP"); g_rc_on = (e && *e=='0') ? 0 : rc_image_matches();
+        const char* p=getenv("SPFY_FE_RECOMP_TRACE"); g_rc_trace = p ? fopen(p,"a") : NULL; g_rc_trace_on = g_rc_trace!=NULL;
+    }
     if(g_newbt<0) g_newbt = getenv("EMU_OLDBT") ? 0 : 1;
     if(g_fputrace<0){ const char* e=getenv("EMU_FPUTRACE"); if(e){ unsigned lo,hi,mx; if(sscanf(e,"%x,%x,%u",&lo,&hi,&mx)==3){ g_ftlo=lo; g_fthi=hi; g_ftmax=mx; g_fputrace=1; } else g_fputrace=0; } else g_fputrace=0; }
     static uint32_t eipring[512]; static int eipri=0;
@@ -688,6 +623,8 @@ int cpu_run(uint64_t max_insns){
             return CPU.faulted?-1:1;
         }
         if(CPU.eip==RET_SENTINEL) return 1;
+        if(stop_eip && CPU.eip==stop_eip && CPU.r[ESP]>=stop_esp) return 2;
+        if(g_rc_on>0 && !g_rc_inhibit){ int k=rc_lookup(CPU.eip); if(k>=0){ rc_call_entry(k); continue; } }
         if(g_jit_enabled && g_jitmap){
             jitent_t* je = jit_find(CPU.eip);
             if(je->slot >= 0){
@@ -906,7 +843,7 @@ int cpu_run(uint64_t max_insns){
         case 0xC9:{CPU.r[ESP]=CPU.r[EBP];CPU.r[EBP]=cpu_pop32();}break;
         case 0xCC: trap("int3",eip0); break;
 
-        case 0xE8:{int32_t d=(int32_t)fetch32();cpu_push32(CPU.eip);CPU.eip+=d;}break;
+        case 0xE8:{int32_t d=(int32_t)fetch32();cpu_push32(CPU.eip);CPU.eip+=d;if(g_rc_trace_on)rc_trace_miss(CPU.eip);}break;
         case 0xE9:{int32_t d=(int32_t)fetch32();CPU.eip+=d;}break;
         case 0xEB:{int8_t d=(int8_t)fetch8();CPU.eip+=d;}break;
         case 0xE3:{int8_t d=(int8_t)fetch8(); if((opsz==2?getreg(ECX,2):CPU.r[ECX])==0) CPU.eip+=d;}break;
@@ -942,7 +879,7 @@ int cpu_run(uint64_t max_insns){
         case 0xFF:{decode_modrm(&m,0);switch(m.reg){
             case 0:rm_write(&m,opsz,do_inc(rm_read(&m,opsz),opsz));break;
             case 1:rm_write(&m,opsz,do_dec(rm_read(&m,opsz),opsz));break;
-            case 2:{uint32_t t=rm_read(&m,opsz);cpu_push32(CPU.eip);CPU.eip=t;}break;
+            case 2:{uint32_t t=rm_read(&m,opsz);cpu_push32(CPU.eip);CPU.eip=t;if(g_rc_trace_on)rc_trace_miss(t);}break;
             case 3:{uint32_t t=rm_read(&m,opsz);cpu_push32(CPU.eip);CPU.eip=t;}break;
             case 4:{CPU.eip=rm_read(&m,opsz);}break;
             case 5:{CPU.eip=rm_read(&m,opsz);}break;
@@ -1023,3 +960,52 @@ int cpu_run(uint64_t max_insns){
 uint32_t do_logic_or (uint32_t a,uint32_t b,int sz){ return do_logic(a|b,sz); }
 uint32_t do_logic_and(uint32_t a,uint32_t b,int sz){ return do_logic(a&b,sz); }
 uint32_t do_logic_xor(uint32_t a,uint32_t b,int sz){ return do_logic(a^b,sz); }
+
+/* ---- static recompilation runtime ---------------------------------- */
+
+/* Execute exactly ONE instruction at CPU.eip in the interpreter. */
+int rc_step(uint32_t next){
+    g_rc_inhibit++;
+    cpu_run_core(1, 0, 0);
+    g_rc_inhibit--;
+    return CPU.eip==next && !CPU.halted;
+}
+/* Interpret until the call that pushed a return to `ret` has come back. */
+int rc_run_until(uint32_t ret, uint32_t min_esp){
+    return cpu_run_core(2000000000ULL, ret, min_esp) == 2;
+}
+
+/* The translation is only valid for the exact image it was generated from:
+ * another FE language may load at the same base. Checked against the PE
+ * header in guest memory each time the guest is (re)booted. */
+static int rc_image_matches(void){
+    if(PE.image_base != rc_image_base || PE.size_of_image != rc_image_size) return 0;
+    uint8_t* b = g_pagemap ? g_pagemap[rc_image_base>>12] : NULL;
+    if(!b) return 0;
+    uint32_t lfanew = rd32(rc_image_base + 0x3c);
+    return rd32(rc_image_base + lfanew + 8) == rc_image_stamp;
+}
+
+/* One bit per 4 KB guest page that holds an entry: nearly every
+ * interpreted instruction is rejected by one load. */
+static uint8_t g_rc_pages[1u << 17];
+static int g_rc_pages_ready = 0;
+static int rc_lookup(uint32_t eip){
+    if(!g_rc_pages_ready){
+        for(int i=0;i<rc_n_entries;i++){ uint32_t pg=rc_entry_va[i]>>12; g_rc_pages[pg>>3] |= (uint8_t)(1u<<(pg&7)); }
+        g_rc_pages_ready = 1;
+    }
+    uint32_t pg = eip>>12;
+    if(!(g_rc_pages[pg>>3] & (1u<<(pg&7)))) return -1;
+    int lo=0, hi=rc_n_entries-1;
+    while(lo<=hi){ int mid=(lo+hi)>>1; uint32_t v=rc_entry_va[mid]; if(v==eip) return mid; if(v<eip) lo=mid+1; else hi=mid-1; }
+    return -1;
+}
+static int rc_call_entry(int k){ return rc_entry_fn[k](); }
+
+int rc_dispatch(uint32_t eip){
+    if(g_rc_on<=0) return RC_EXIT;
+    int k = rc_lookup(eip);
+    if(k<0 && g_rc_trace_on) rc_trace_miss(eip);
+    return k>=0 ? rc_entry_fn[k]() : RC_EXIT;
+}

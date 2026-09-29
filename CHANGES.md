@@ -6,6 +6,8 @@
 
 - **Fix some small bugs related to pauses and rate tags.** The `\!p` pause tag was not being applied correctly in some cases, leading to incorrect timing in the synthesized speech. This has been fixed, and the `\!p` tag now works as expected. Additionally, the `\!r` rate tags were not being applied correctly in some cases, leading to incorrect speech speed. This has also been fixed, and the `\!r` tags now work as expected.
 
+- **The "I am speed" commit, part 1.** The spfy engine now runs faster than ever before, with significant optimizations to the CPU core and memory model. There is now a full static recompilation of the frontend in C (what transforms the text into something Speechify can understand and pick units for), which allows for faster execution of the core spfy engine. The static recompilation is implemented in `cpu.c` and `cpu_ops.h`, and spread across `spfy/src/host_emu/recomp/recomp_gen_N.c`, and allows for the frontend (IBM/ECI Delta, Susan Hertz) to be compiled into the main spfy code so that it can be executed directly, rather than being interpreted at runtime/emulated. This results in significant speed improvements, especially for math-heavy MSVC code.
+
 ---
 
 ## 2026-09-25
