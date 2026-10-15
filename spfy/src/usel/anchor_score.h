@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "../voice/voice.h"
 #include "../voice/ccos.h"
@@ -137,7 +138,28 @@ typedef struct {
     float        pow_a;
     float        pow_b;
     float        w_pow_t;
+    /* SPFY_FIT_UNIT_BIAS: fitted per-uid additive half-phone cost. NOT engine
+     * behaviour; NULL unless the env override is set. */
+    float       *unit_bias;
+    uint32_t     unit_bias_n;
 } spfy_anchor_voice_t;
+
+/* Selection-fit experiments (fp_fit.py). All callers gate these on env vars.
+ *   dump_slot:   one text line per half-phone slot - target-side features
+ *                and the candidate pool, in the terms the inner scorer uses.
+ *   dump_tables: ccos tables, proscost matrices and per-unit features to dir.
+ *   apply_overrides: SPFY_FIT_CCOS / SPFY_FIT_PROSCOST / SPFY_FIT_UNIT_BIAS
+ *                (raw float32 files in dump_tables layout) replace the
+ *                loaded tables in place. */
+void spfy_fit_dump_slot(FILE *f, const spfy_anchor_voice_t *av,
+                        uint32_t phrase, uint32_t slot,
+                        const spfy_anchor_ctx_t *ctx,
+                        const spfy_anchor_sp_target_t *sp_target,
+                        const spfy_anchor_cart_t *cart,
+                        const uint32_t *uids, uint32_t n_uids);
+int  spfy_fit_dump_tables(const spfy_anchor_voice_t *av, const char *dir);
+int  spfy_fit_apply_overrides(spfy_anchor_voice_t *av, spfy_ccos_t *ccos,
+                              spfy_proscost_matrix_t *pros);
 
 typedef struct {
     uint32_t  ss;

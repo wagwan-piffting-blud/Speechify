@@ -1,5 +1,9 @@
 # Speechify/spfy Changelog
 
+## 2026-10-15
+
+- **Fix more edge-cases and wrong behavior in the spfy engine.** More edge-cases were found where the spfy engine would produce incorrect/no output or unexpected behavior. These have been fixed alongside the previous fixes.
+
 ## 2026-09-29
 
 - **Add SAPI markup support.** SAPI is similar to SSML, but has different tag names. spfy allows for either/or, see the [SPFY_README.md](SPFY_README.md) for more information on how to use SAPI markup in spfy.

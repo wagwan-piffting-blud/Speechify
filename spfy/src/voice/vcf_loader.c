@@ -26,6 +26,7 @@
 
 #include "voice.h"
 
+#include "../common/env.h"
 #include "../common/file_io.h"
 #include "../common/log.h"
 #include "../../include/spfy/spfy.h"
@@ -163,9 +164,37 @@ static int vcf_scan_params(const char *xml, size_t xml_n, spfy_vcf_t *out)
     return SPFY_OK;
 }
 
+/* SPFY_VCF_SET="KEY=val;KEY2=val" overrides voiceCfg keys (short names) for
+ * selection-weight experiments. */
+static const char *vcf_env_override(const char *name)
+{
+    static char buf[1024];
+    const char *e = spfy_env("SPFY_VCF_SET");
+    if (!e || !*e) return NULL;
+    size_t nl = strlen(name);
+    for (const char *p = e; *p; ) {
+        const char *semi = strchr(p, ';');
+        size_t len = semi ? (size_t)(semi - p) : strlen(p);
+        if (len > nl && strncmp(p, name, nl) == 0 && p[nl] == '=') {
+            size_t vl = len - nl - 1;
+            if (vl >= sizeof buf) vl = sizeof buf - 1;
+            memcpy(buf, p + nl + 1, vl);
+            buf[vl] = '\0';
+            return buf;
+        }
+        if (!semi) break;
+        p = semi + 1;
+    }
+    return NULL;
+}
+
 const char *spfy_vcf_str(const spfy_vcf_t *vcf, const char *name)
 {
     if (!vcf || !name) return NULL;
+    {
+        const char *o = vcf_env_override(name);
+        if (o) return o;
+    }
     char key[160];
     int n = snprintf(key, sizeof key, "tts.voiceCfg.%s", name);
     if (n < 0 || (size_t)n >= sizeof key) return NULL;

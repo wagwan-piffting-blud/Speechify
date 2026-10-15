@@ -326,9 +326,18 @@ static int parse_word(parser_t *p, fe_parsed_t *out) {
     w = &out->words[out->n_words++];
     memset(w, 0, sizeof(*w));
 
+    /* The en-US FE escapes some words as ![...]: "hmm" -> ![hM],
+     * "and/or" -> ![And] ![or]. Keep the bare word. */
+    p_skip_ws(p);
+    int escaped = 0;
+    if (p_peek(p) == '!' && p->p + 1 < p->end && p->p[1] == '[') {
+        p->p += 2;
+        escaped = 1;
+    }
     if (p_parse_ident_ex(p, w->text, sizeof(w->text), 1) <= 0) {
         p->err = 1; p->err_msg = "word name"; return 0;
     }
+    if (escaped && !p_expect_lit(p, "]")) return 0;
     if (!p_expect_lit(p, "(")) return 0;
     /* Numbers and other text expanded by the FE produce auxiliary words
      * (e.g. */

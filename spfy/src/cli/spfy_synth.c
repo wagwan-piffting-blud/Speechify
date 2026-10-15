@@ -940,6 +940,54 @@ static float ctx_ms_at(const float *ctx_to_ms, float q)
  * is a stop or affricate passes through at its natural length instead.
  *
  * Returns the number of units written, 0 if the plan cannot be built. */
+/* SPFY_TGT_MS_FILE=<path>: experiment hook (Speechify 2 timing transplant).
+ * One "<label> <ms>" line per unit, in the order SPFY_RATE_DUMP prints them;
+ * ms <= 0 keeps the engine's own target. Only acts while a rate tag has armed
+ * time-scaling. The first label that disagrees with the unit being planned
+ * switches the override off for the rest of the run, so a stale file cannot
+ * silently retime a different text. */
+typedef struct { char lab[8]; float ms; } tgt_override_t;
+
+static int tgt_override_ms(const char *lab, float *io_tgt)
+{
+    static tgt_override_t *tab = NULL;
+    static size_t n = 0, next = 0;
+    static int state = -1;                       /* -1 unloaded, 0 off, 1 on */
+    if (state < 0) {
+        state = 0;
+        const char *path = spfy_env("SPFY_TGT_MS_FILE");
+        FILE *fp = (path && *path) ? fopen(path, "r") : NULL;
+        if (fp) {
+            size_t cap = 0;
+            char l[64];
+            float ms;
+            while (fscanf(fp, "%7s %f", l, &ms) == 2) {
+                if (n == cap) {
+                    size_t nc = cap ? cap * 2 : 256;
+                    tgt_override_t *t = (tgt_override_t *)realloc(tab, nc * sizeof *t);
+                    if (!t) break;
+                    tab = t;
+                    cap = nc;
+                }
+                snprintf(tab[n].lab, sizeof tab[n].lab, "%s", l);
+                tab[n++].ms = ms;
+            }
+            fclose(fp);
+            state = n ? 1 : 0;
+        }
+    }
+    if (state != 1) return 0;
+    if (next >= n || strcmp(tab[next].lab, lab ? lab : "?") != 0) {
+        fprintf(stderr, "SPFY_TGT_MS_FILE: unit %zu is '%s', file says '%s' -- override off\n",
+                next, lab ? lab : "?", next < n ? tab[next].lab : "(end)");
+        state = 0;
+        return 0;
+    }
+    float ms = tab[next++].ms;
+    if (ms > 0.0f) *io_tgt = ms;
+    return 1;
+}
+
 static size_t build_unit_plan(const spfy_voice_t *v,
                               const uint32_t (*ctx)[5],
                               const uint32_t *hp_to_post,
@@ -998,6 +1046,7 @@ static size_t build_unit_plan(const spfy_voice_t *v,
             tgt = (float)nat_ms * factor;
 
         if (!(tgt > 0.0f)) tgt = (float)nat_ms;
+        tgt_override_ms(lab, &tgt);
 
         out[n].nat_ms = nat_ms;
         out[n].tgt_ms = tgt;
@@ -2162,7 +2211,77 @@ typedef struct {
     int                      f0_cont_scope;
     /* Extra cost on any join that is NOT a same-rec continuation, i.e. */
     float                    f0_cont_seam;
+    /* SPFY_JOIN_EDGE=<spfy_edge_cache file>: the edge-frames Viterbi's live
+     * join cost (FUN_08e8edd0 path) instead of MISSING_JOIN_COST for pairs the
+     * hash lacks; SPFY_JOIN_EDGE_ALL prices hits the same way too. */
+    const float             *edge_frames;
+    const float             *edge_wt;
+    uint32_t                 edge_n;
+    uint32_t                 edge_dim;
+    float                    edge_gate;
+    float                    edge_k;     /* scale * join_w */
+    float                    edge_off;
+    int                      edge_all;
 } join_ctx_t;
+
+typedef struct {
+    float   *buf;
+    uint32_t n, dim;
+    float    gate, scale, jw, jo;
+} edge_cache_t;
+
+static const edge_cache_t *edge_cache_get(void)
+{
+    static edge_cache_t ec;
+    static int tried = 0;
+    if (tried) return ec.buf ? &ec : NULL;
+    tried = 1;
+    const char *p = spfy_env("SPFY_JOIN_EDGE");
+    FILE *f = (p && *p) ? fopen(p, "rb") : NULL;
+    if (!f) return NULL;
+    uint32_t hdr[3];
+    float hf[4];
+    if (fread(hdr, sizeof hdr, 1, f) != 1 || hdr[0] != 0x45474445u
+        || fread(hf, sizeof hf, 1, f) != 1) { fclose(f); return NULL; }
+    size_t nf = (size_t)hdr[2] + (size_t)hdr[1] * 2u * hdr[2];
+    ec.buf = (float *)malloc(nf * sizeof(float));
+    if (!ec.buf || fread(ec.buf, sizeof(float), nf, f) != nf) {
+        free(ec.buf); ec.buf = NULL; fclose(f); return NULL;
+    }
+    fclose(f);
+    ec.n = hdr[1]; ec.dim = hdr[2];
+    ec.gate = hf[0]; ec.scale = hf[1]; ec.jw = hf[2]; ec.jo = hf[3];
+    return &ec;
+}
+
+static float edge_kernel(const join_ctx_t *jc, const float *x, const float *y)
+{
+    double d = 0.0;
+    if (x[0] > jc->edge_gate && y[0] > jc->edge_gate)
+        d = fabs((double)x[0] - (double)y[0]) * jc->edge_wt[0];
+    for (uint32_t k = 1; k < jc->edge_dim; ++k) {
+        double t = (double)x[k] - (double)y[k];
+        d += t * t * jc->edge_wt[k];
+    }
+    return (float)d;
+}
+
+/* spfy_jc_raw (vb/join_cost.c): seam doubled, plus each side against the
+ * other's natural neighbour. */
+static float edge_join_cost(const join_ctx_t *jc, uint32_t l, uint32_t r)
+{
+    if (l >= jc->edge_n || r >= jc->edge_n) return jc->missing_join_cost;
+    const uint32_t D = jc->edge_dim;
+    const float *l_end   = jc->edge_frames + ((size_t)l * 2u + 1u) * D;
+    const float *r_start = jc->edge_frames + ((size_t)r * 2u) * D;
+    double d = 2.0 * edge_kernel(jc, l_end, r_start);
+    if (r > 0)
+        d += edge_kernel(jc, l_end, jc->edge_frames + ((size_t)(r - 1u) * 2u + 1u) * D);
+    if (l + 1u < jc->edge_n)
+        d += edge_kernel(jc, r_start, jc->edge_frames + ((size_t)(l + 1u) * 2u) * D);
+    double c = d * jc->edge_k + jc->edge_off;
+    return (float)(c > 0.0 ? c : 0.0);
+}
 
 /* NB: the VCF's JOIN_COST_WEIGHT / JOIN_COST_OFFSET are deliberately NOT
  * applied to a hash-HIT cell. */
@@ -2286,6 +2405,101 @@ static float *build_unit_power(const spfy_voice_t *v, uint32_t *out_n,
     return pow;
 }
 
+/* SPFY_TARGET_ORACLE_FILE: "phrase slot uid" lines. Each listed slot's
+ * SELECTION targets become that unit's own stored duration code and f0_start
+ * (SPFY_TARGET_ORACLE_WHAT = d | f | df, default df). The WSOLA duration
+ * target is captured before this and is unaffected. Experiment only. */
+static void target_oracle_apply(const spfy_voice_t *v, uint32_t phrase,
+                                uint32_t slot, spfy_anchor_cart_t *cart)
+{
+    static int loaded = 0, use_d = 1, use_f = 1;
+    static uint32_t *tab = NULL;
+    static size_t n = 0;
+    if (!loaded) {
+        loaded = 1;
+        const char *path = spfy_env("SPFY_TARGET_ORACLE_FILE");
+        const char *what = spfy_env("SPFY_TARGET_ORACLE_WHAT");
+        if (what && *what) {
+            use_d = strchr(what, 'd') != NULL;
+            use_f = strchr(what, 'f') != NULL;
+        }
+        FILE *f = (path && *path) ? fopen(path, "r") : NULL;
+        if (f) {
+            size_t cap = 0;
+            unsigned a, b, c;
+            while (fscanf(f, "%u %u %u", &a, &b, &c) == 3) {
+                if (n + 3 > cap) {
+                    cap = cap ? cap * 2 : 4096;
+                    uint32_t *t = (uint32_t *)realloc(tab, cap * sizeof *tab);
+                    if (!t) break;
+                    tab = t;
+                }
+                tab[n++] = a; tab[n++] = b; tab[n++] = c;
+            }
+            fclose(f);
+        }
+    }
+    if (!tab || !cart) return;
+    for (size_t i = 0; i + 2 < n; i += 3) {
+        if (tab[i] != phrase || tab[i + 1] != slot) continue;
+        spfy_unit_record_t r;
+        if (spfy_unit_record_get(&v->units, tab[i + 2], &r) != SPFY_OK) return;
+        if (use_d && cart->durt_valid) cart->durt_mean = (float)r.f0_context;
+        if (use_f && cart->f0tr_valid && r.f0_start) cart->f0tr_mean = (float)r.f0_start;
+        return;
+    }
+}
+
+/* SPFY_PIN_FILE: "phrase slot uid" lines. A listed slot's pool becomes that
+ * one unit (pinned-selection experiments). Anchor spans that disagree with a
+ * pin are dropped (pin_conflict), so PSA can stay on. */
+static int pin_lookup(uint32_t phrase, uint32_t slot, uint32_t *out_uid)
+{
+    static int loaded = 0;
+    static uint32_t *tab = NULL;
+    static size_t n = 0;
+    if (!loaded) {
+        loaded = 1;
+        const char *path = spfy_env("SPFY_PIN_FILE");
+        FILE *f = (path && *path) ? fopen(path, "r") : NULL;
+        if (f) {
+            size_t cap = 0;
+            unsigned a, b, c;
+            while (fscanf(f, "%u %u %u", &a, &b, &c) == 3) {
+                if (n + 3 > cap) {
+                    cap = cap ? cap * 2 : 4096;
+                    uint32_t *t = (uint32_t *)realloc(tab, cap * sizeof *tab);
+                    if (!t) break;
+                    tab = t;
+                }
+                tab[n++] = a; tab[n++] = b; tab[n++] = c;
+            }
+            fclose(f);
+        }
+    }
+    for (size_t i = 0; tab && i + 2 < n; i += 3) {
+        if (tab[i] == phrase && tab[i + 1] == slot) {
+            *out_uid = tab[i + 2];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* An anchor span [ss..se] over half-phones first_hp.. conflicts with the pins
+ * when a pinned half-phone in its range would get a different unit, or the span
+ * length does not map 1:1 onto the half-phones. Lets pins coexist with PSA. */
+static int pin_conflict(uint32_t phrase, uint32_t first_hp, uint32_t span_n,
+                        uint32_t ss, uint32_t se)
+{
+    for (uint32_t k = 0; k < span_n; ++k) {
+        uint32_t uid;
+        if (!pin_lookup(phrase, first_hp + k, &uid)) continue;
+        if (se - ss + 1 != span_n || ss + k != uid) return 1;
+    }
+    return 0;
+}
+
 /* Read candidate i from whichever candidate pool is live for this slot. */
 /* SPFY_UID_DUMP=<path>|- - the UID capture harness. */
 static FILE *spfy_uid_dump_fp(void)
@@ -2323,16 +2537,31 @@ static void uid_dump_emit(const spfy_voice_t *v, uint32_t phrase_idx,
     if (sps == 0) sps = 1;
     for (uint32_t k = 0; k < run_n; ++k) {
         spfy_unit_record_t rk;
-        uint32_t off = out_start;
+        uint32_t off = out_start, nat = 0;
         if (spfy_unit_record_get(&v->units, path_uids[slot0 + k], &rk)
-                == SPFY_OK && (uint32_t)rk.local_pos >= lp_first)
-            off += ((uint32_t)rk.local_pos - lp_first) * sps;
+                == SPFY_OK) {
+            if ((uint32_t)rk.local_pos >= lp_first)
+                off += ((uint32_t)rk.local_pos - lp_first) * sps;
+            nat = (uint32_t)rk.dur_like * sps;
+        }
         fprintf(uf, "{\"t\":\"emit\",\"phrase\":%u,\"slot\":%u,\"uid\":%u,"
-                    "\"out\":%u,\"run\":%u,\"k\":%u}\n",
+                    "\"out\":%u,\"run\":%u,\"k\":%u,\"nat\":%u}\n",
                 (unsigned)phrase_idx, (unsigned)(slot0 + k),
                 (unsigned)path_uids[slot0 + k],
-                (unsigned)out_pos(sink, off), (unsigned)run_n, (unsigned)k);
+                (unsigned)out_pos(sink, off), (unsigned)run_n, (unsigned)k,
+                (unsigned)nat);
     }
+}
+
+/* SPFY_UID_DUMP, pause resize - a pau slot played at tgt samples instead of
+ * its recorded nom, shifting every later emit in the same run. */
+static void uid_dump_pau(uint32_t phrase_idx, uint32_t slot, uint32_t nom,
+                         uint32_t tgt)
+{
+    FILE *uf = spfy_uid_dump_fp();
+    if (!uf) return;
+    fprintf(uf, "{\"t\":\"pau\",\"phrase\":%u,\"slot\":%u,\"nom\":%u,\"tgt\":%u}\n",
+            (unsigned)phrase_idx, (unsigned)slot, (unsigned)nom, (unsigned)tgt);
 }
 
 /* SPFY_UID_OVERRIDE=<path> - force specific units into the chosen path.
@@ -2457,7 +2686,19 @@ static float dag_join_cb(uint32_t prev_uid_join_key, uint32_t curr_uid,
             goto dump;
         }
     }
+    if (jc->edge_frames && jc->edge_all) {
+        cost = edge_join_cost(jc, prev_uid_join_key, curr_uid);
+        path = "edge_all";
+        path_kind = 1;
+        goto dump;
+    }
     int rc = spfy_hash_lookup(jc->hash, prev_uid_join_key, curr_uid, &cost);
+    if (rc != SPFY_OK && jc->edge_frames) {
+        cost = edge_join_cost(jc, prev_uid_join_key, curr_uid);
+        path = "edge_miss";
+        path_kind = 1;
+        goto dump;
+    }
     if (rc == SPFY_OK) {
         if (jc->apply_join_w) {
             cost = jc->join_w * cost + jc->join_off;
@@ -5097,6 +5338,22 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * "our preselection needs more KEYS" from "it needs more MEMBERS".
          * Printed at the end of the run under SPFY_PRSL_STATS. */
         ++g_prsl_rung_total;
+        /* SPFY_PRSL_MODE=1side|centre starts the ladder at a looser rung
+         * (selection-profile experiments; the engine always starts exact). */
+        {
+            static int mode = -1;
+            if (mode < 0) {
+                const char *m = spfy_env("SPFY_PRSL_MODE");
+                mode = !m ? 0 : !strcmp(m, "1side") ? 1 : !strcmp(m, "centre") ? 2 : 0;
+            }
+            if (mode == 1) {
+                uint32_t side = ctx5[2] & 1u;
+                ck = spfy_prsl_context_key(side ? hp_bound : ctx5[1], ctx5[2],
+                                           side ? ctx5[3] : hp_bound);
+            } else if (mode == 2) {
+                ck = spfy_prsl_context_key(hp_bound, ctx5[2], hp_bound);
+            }
+        }
         spfy_prsl_lookup(&v->prsl, ck, &pool, &pool_n);
         if (pool_n) ++g_prsl_rung_exact;
         if (pool_n == 0 && !spfy_env("SPFY_NO_PRSL_92_FALLBACK")) {
@@ -5130,6 +5387,11 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
             }
         }
     pool_ready:
+        if (pin_lookup(phrase_idx, hp, &pin_uid)) {
+            pool        = NULL;
+            pool_bucket = &pin_uid;
+            pool_n      = 1u;
+        }
         /* NO clamp by default. */
         {
             static long cap = -1;
@@ -5384,6 +5646,18 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                         + (cart.f0tr_mean - f0base) * f0range;
                 }
             }
+        }
+        target_oracle_apply(v, phrase_idx, hp, &cart);
+        {
+            static FILE *fd = NULL;
+            static int fd_init = 0;
+            if (!fd_init) {
+                fd_init = 1;
+                const char *p = spfy_env("SPFY_FIT_SLOT_DUMP");
+                if (p && *p) fd = fopen(p, "w");
+            }
+            if (fd) spfy_fit_dump_slot(fd, &v->av, phrase_idx, hp, &ctx_in, &sp_in,
+                                       &cart, cbuf[hp], pool_n);
         }
 
         /* SPFY_HP_COMP_DUMP marker: emit a per-slot header so the follow-on
@@ -5959,6 +6233,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 if (!spfy_env("SPFY_ANCHOR_RELAX_SPAN_OFF")
                     && spfy_env("SPFY_ANCHOR_STRICT_SPAN")
                     && se - ss + 1 != span_n) continue;
+                if (pin_conflict(phrase_idx, first_hp_idx, span_n, ss, se)) continue;
                 cands_buf[kept] = ss;
                 jks_buf  [kept] = se;
                 tgt_buf  [kept] = out_cands[c].pre_dp;
@@ -6256,6 +6531,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                  * comment for rationale. */
                 if (spfy_env("SPFY_ANCHOR_STRICT_SPAN")
                     && span_uid_n != span_n) continue;
+                if (pin_conflict(phrase_idx, first_hp_idx, span_n, ss, se)) continue;
                 if (cands_s && jks_s && tgt_s) {
                     cands_s[kept_s] = ss;
                     jks_s  [kept_s] = se;
@@ -6392,7 +6668,10 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
     jc.pow_n         = unit_pow_n;
     jc.pow_cont_w    = pow_join_w;
     jc.pow_cont_dead = pow_join_dead;
-    jc.apply_join_w = (spfy_env("SPFY_JOIN_W_APPLY") != NULL);
+    /* SPFY_APPLY_JOIN_COST_WEIGHT is our own VCF key (no shipped voice has
+     * it), so a fitted voice folder can carry the setting without env. */
+    jc.apply_join_w = (spfy_env("SPFY_JOIN_W_APPLY") != NULL)
+                   || spfy_vcf_f32(&v->vcf, "SPFY_APPLY_JOIN_COST_WEIGHT", 0.0f) != 0.0f;
     /* Fallbacks are the ENGINE's built-in defaults, read out of
      * SWIttsUSel.dll FUN_08e90dc0: the constructor stores 0x3e800000 (0.25)
      * at +0x2c and 0x3e4ccccd (0.2) at +0x30, and a failed config lookup
@@ -6421,6 +6700,20 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
          * names makes the server exit rc=5). */
         e = spfy_env("SPFY_MISSING_JOIN");
         if (e && *e) jc.missing_join_cost = (float)atof(e);
+    }
+    {
+        const edge_cache_t *ec = edge_cache_get();
+        jc.edge_frames = ec ? ec->buf + ec->dim : NULL;
+        jc.edge_wt     = ec ? ec->buf : NULL;
+        jc.edge_n      = ec ? ec->n : 0u;
+        jc.edge_dim    = ec ? ec->dim : 0u;
+        jc.edge_gate   = ec ? ec->gate : 0.0f;
+        /* SPFY_JOIN_EDGE_K rescales the live cost against the table's gauge. */
+        const char *e = spfy_env("SPFY_JOIN_EDGE_K");
+        float k = (e && *e) ? (float)atof(e) : 1.0f;
+        jc.edge_k      = ec ? ec->scale * ec->jw * k : 0.0f;
+        jc.edge_off    = ec ? ec->jo : 0.0f;
+        jc.edge_all    = spfy_env("SPFY_JOIN_EDGE_ALL") != NULL;
     }
     if (jc.apply_join_w && synth_is_verbose())
         fprintf(stdout, "join weighting ON: cost = %.3f*cell + %.3f\n",
@@ -7542,6 +7835,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     run_pau[n_run_pau].nom = nsmp;
                     run_pau[n_run_pau].tgt = tsmp;
                     ++n_run_pau;
+                    uid_dump_pau(phrase_idx, s + k, nsmp, tsmp);
                 }
             }
             int align = !prev_have || prev_file_idx != r1.file_idx;
@@ -7553,6 +7847,12 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                 sink->n_samples_written, align, run_n, ws_buf);
             uid_dump_emit(v, phrase_idx, s, path_uids, run_n,
                           r1.local_pos, run_out_start, sink);
+            if (extra_n) {
+                FILE *uf = spfy_uid_dump_fp();
+                if (uf) fprintf(uf, "{\"t\":\"extra\",\"phrase\":%u,\"slot\":%u,\"n\":%u}\n",
+                                (unsigned)phrase_idx, (unsigned)(s + run_n - 1u),
+                                (unsigned)extra_n);
+            }
             /* Per-unit plan supersedes the span-aggregate scale. */
             spfy_wsola_unit_t plan[SPFY_RATE_PLAN_MAX];
             float pau_ms_run[SPFY_RATE_PLAN_MAX];
@@ -7667,6 +7967,7 @@ int spfy_synth_to_sink(spfy_voice_t *v, const char *text,
                     one_pau.nom = nsmp;
                     one_pau.tgt = tsmp;
                     n_one_pau   = 1u;
+                    uid_dump_pau(phrase_idx, s, nsmp, tsmp);
                 }
             }
             spfy_wsola_unit_t plan1[1];

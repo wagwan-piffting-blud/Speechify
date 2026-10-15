@@ -18,6 +18,7 @@
 
 #include "anchor_score.h"
 #include "env.h"
+#include "../common/file_io.h"
 #include "../common/log.h"
 #include "../../include/spfy/spfy.h"
 
@@ -1101,6 +1102,7 @@ int spfy_hp_innerscorer(const spfy_anchor_voice_t       *av,
     }
 
     *out_cost = sp_cost + flag_cost + ccos4 + d_cost + f0_cost + pow_cost;
+    if (av->unit_bias && uid < av->unit_bias_n) *out_cost += av->unit_bias[uid];
 
     /* SPFY_HP_COMP_DUMP - emit per-cand component costs for ALL cands (vs
      * SPFY_HP_COMP_UID which gates on a single uid for verbose diagnostic). */
@@ -1236,4 +1238,152 @@ void spfy_anchor_voice_set_weights_from_vcf(spfy_anchor_voice_t *av,
                                     av->anchor_norm);
     av->anchor_norm2 = spfy_vcf_f32(vcf, "SYL_CAND_PRUNE_SLOPE",
                                     av->anchor_norm2);
+}
+
+/* ------------------------------------------------------------------------
+ * Selection-fit I/O. ccos flat index, as ccos_cell_signed reads it:
+ *   (hp_remap*4 + k)*n*n + row*n + col, valid while row*n + col in [0, n*n).
+ * ---------------------------------------------------------------------- */
+
+void spfy_fit_dump_slot(FILE *f, const spfy_anchor_voice_t *av,
+                        uint32_t phrase, uint32_t slot,
+                        const spfy_anchor_ctx_t *ctx,
+                        const spfy_anchor_sp_target_t *sp_target,
+                        const spfy_anchor_cart_t *cart,
+                        const uint32_t *uids, uint32_t n_uids)
+{
+    if (!f || !av || !av->ccos || !ctx || !sp_target) return;
+    uint32_t nl = av->ccos->n_labels;
+    int32_t self_hpc = ctx->ctx[2];
+    int v_active = 1;
+    if (av->voicing && self_hpc >= 0 && (uint32_t)self_hpc < av->voicing_n)
+        v_active = (av->voicing[self_hpc] != 0);
+    fprintf(f, "%u %u %d %d %d %d %d %d %d %d %d %d %u %u %u %u %u "
+               "%d %.6f %.6f %d %.6f %.6f %d %u",
+            phrase, slot,
+            ctx->ctx[0], ctx->ctx[1], ctx->ctx[2], ctx->ctx[3], ctx->ctx[4],
+            hp_class_remap(av, ctx->ctx[2], nl),
+            s_ctx_remap(av, ctx->ctx[0], nl), s_ctx_remap(av, ctx->ctx[1], nl),
+            s_ctx_remap(av, ctx->ctx[3], nl), s_ctx_remap(av, ctx->ctx[4], nl),
+            sp_target->sp[0], sp_target->sp[1], sp_target->sp[2],
+            sp_target->sp[3], sp_target->sp[4],
+            cart ? cart->durt_valid : 0,
+            cart ? (double)cart->durt_mean : 0.0, cart ? (double)cart->durt_var : 0.0,
+            cart ? cart->f0tr_valid : 0,
+            cart ? (double)cart->f0tr_mean : 0.0, cart ? (double)cart->f0tr_var : 0.0,
+            v_active, n_uids);
+    for (uint32_t i = 0; i < n_uids; ++i) fprintf(f, " %u", uids[i]);
+    fputc('\n', f);
+}
+
+static int fit_write(const char *dir, const char *name, const void *p, size_t n)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    FILE *f = fopen(path, "wb");
+    if (!f) return SPFY_E_IO;
+    size_t w = fwrite(p, 1, n, f);
+    fclose(f);
+    return w == n ? SPFY_OK : SPFY_E_IO;
+}
+
+int spfy_fit_dump_tables(const spfy_anchor_voice_t *av, const char *dir)
+{
+    if (!av || !av->ccos || !av->units || !dir) return SPFY_E_INVAL;
+    const spfy_ccos_t *cc = av->ccos;
+    size_t n_cc = (size_t)cc->n_hp_classes * 4u * cc->n_labels * cc->n_labels;
+    int rc = fit_write(dir, "ccos.f32", cc->tables, n_cc * sizeof(float));
+    if (rc != SPFY_OK) return rc;
+
+    char path[1024];
+    snprintf(path, sizeof path, "%s/meta.txt", dir);
+    FILE *m = fopen(path, "w");
+    if (!m) return SPFY_E_IO;
+    fprintf(m, "n_units %u\nn_labels %u\nn_hp_classes %u\n", av->units->n_units,
+            cc->n_labels, cc->n_hp_classes);
+    fprintf(m, "w_sp %g %g %g %g %g\nw_3c %g\nw_flag_scale %g\nw_ccos %g\n"
+               "w_dur %g\nw_f0 %g\nw_f0_miss %g\n",
+            av->w_sp[0], av->w_sp[1], av->w_sp[2], av->w_sp[3], av->w_sp[4],
+            av->w_3c, av->w_flag_scale, av->w_ccos, av->w_dur, av->w_f0,
+            av->w_f0_miss);
+    snprintf(path, sizeof path, "%s/proscost.f32", dir);
+    FILE *p = fopen(path, "wb");
+    for (int k = 0; k < 5; ++k) {
+        const spfy_proscost_matrix_t *pm = &av->proscost[k];
+        fprintf(m, "proscost %d %u %u\n", k, pm->data ? pm->n_rows : 0u,
+                pm->data ? pm->n_cols : 0u);
+        if (p && pm->data) fwrite(pm->data, sizeof(float), (size_t)pm->n_rows * pm->n_cols, p);
+    }
+    if (p) fclose(p);
+    fclose(m);
+
+    /* per unit: sp[5], ccos col[4] (int8), context_cost, f0_context, f0_start */
+    uint32_t n = av->units->n_units;
+    uint8_t *u8 = (uint8_t *)calloc((size_t)n, 12u);
+    if (!u8) return SPFY_E_NOMEM;
+    for (uint32_t u = 0; u < n; ++u) {
+        spfy_unit_record_t r;
+        if (spfy_unit_record_get(av->units, u, &r) != SPFY_OK) continue;
+        uint8_t *o = u8 + (size_t)u * 12u;
+        o[0] = r.sp_syl_in_phrase; o[1] = r.sp_syl_type; o[2] = r.sp_word_in_phrase;
+        o[3] = r.sp_syl_in_word;   o[4] = r.sp_phone_in_syl;
+        for (int k = 0; k < 4; ++k)
+            o[5 + k] = av->ctx4 ? av->ctx4[u * 4u + (uint32_t)k] : r.phone_ctx[k];
+        o[9] = r.context_cost; o[10] = r.f0_context; o[11] = r.f0_start;
+    }
+    rc = fit_write(dir, "units.bin", u8, (size_t)n * 12u);
+    free(u8);
+    return rc;
+}
+
+static int fit_read_f32(const char *env, float *dst, size_t n)
+{
+    const char *path = spfy_env(env);
+    if (!path || !*path) return 0;
+    uint8_t *buf = NULL;
+    size_t got = 0;
+    if (spfy_slurp_file(path, &buf, &got) != SPFY_OK || got != n * sizeof(float)) {
+        spfy_log_warn("%s: '%s' missing or not %zu floats - ignored", env, path, n);
+        free(buf);
+        return -1;
+    }
+    memcpy(dst, buf, got);
+    free(buf);
+    return 1;
+}
+
+int spfy_fit_apply_overrides(spfy_anchor_voice_t *av, spfy_ccos_t *ccos,
+                             spfy_proscost_matrix_t *pros)
+{
+    if (!av) return SPFY_E_INVAL;
+    if (ccos && ccos->tables)
+        fit_read_f32("SPFY_FIT_CCOS", ccos->tables,
+                     (size_t)ccos->n_hp_classes * 4u * ccos->n_labels * ccos->n_labels);
+    if (pros) {
+        size_t tot = 0;
+        for (int k = 0; k < 5; ++k)
+            if (pros[k].data) tot += (size_t)pros[k].n_rows * pros[k].n_cols;
+        float *tmp = tot ? (float *)malloc(tot * sizeof(float)) : NULL;
+        if (tmp && fit_read_f32("SPFY_FIT_PROSCOST", tmp, tot) == 1) {
+            size_t o = 0;
+            for (int k = 0; k < 5; ++k) {
+                if (!pros[k].data) continue;
+                size_t nk = (size_t)pros[k].n_rows * pros[k].n_cols;
+                memcpy(pros[k].data, tmp + o, nk * sizeof(float));
+                o += nk;
+            }
+        }
+        free(tmp);
+    }
+    if (av->units && spfy_env("SPFY_FIT_UNIT_BIAS")) {
+        float *b = (float *)calloc(av->units->n_units, sizeof(float));
+        if (!b) return SPFY_E_NOMEM;
+        if (fit_read_f32("SPFY_FIT_UNIT_BIAS", b, av->units->n_units) == 1) {
+            av->unit_bias   = b;
+            av->unit_bias_n = av->units->n_units;
+        } else {
+            free(b);
+        }
+    }
+    return SPFY_OK;
 }

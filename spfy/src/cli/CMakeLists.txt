@@ -396,6 +396,22 @@ target_include_directories(spfy_vb_ccos
 )
 target_link_libraries(spfy_vb_ccos PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
 
+add_executable(spfy_edge_cache spfy_edge_cache.c)
+target_include_directories(spfy_edge_cache
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_edge_cache PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
+add_executable(spfy_vb_patch spfy_vb_patch.c)
+target_include_directories(spfy_vb_patch
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/voice
+            ${CMAKE_SOURCE_DIR}/src/usel
+            ${CMAKE_SOURCE_DIR}/src/vb
+)
+target_link_libraries(spfy_vb_patch PRIVATE spfy_vb spfy_usel spfy_voice spfy_common)
+
 add_executable(spfy_vb_wagon spfy_vb_wagon.c)
 target_include_directories(spfy_vb_wagon
     PRIVATE ${CMAKE_SOURCE_DIR}/src/voice

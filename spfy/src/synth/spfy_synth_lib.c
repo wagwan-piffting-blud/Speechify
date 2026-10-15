@@ -5,6 +5,7 @@
 
 #include "../fe/phoneset.h"
 #include "../voice/phone_order.h"
+#include "../common/env.h"
 #include "../common/log.h"
 
 #include <math.h>
@@ -127,6 +128,13 @@ int spfy_voice_load(const spfy_voice_paths_t *paths, spfy_voice_t *v)
     /* v100005 voices (Paulina) ship no on-disk ccos phone context; derive
      * it from recording adjacency exactly as the engine does post-load. */
     if ((rc = spfy_anchor_build_ctx4(&v->av, &v->ctx4_buf)) != SPFY_OK) goto fail;
+
+    {
+        const char *dir = spfy_env("SPFY_FIT_TABLES_DUMP");
+        if (dir && *dir && spfy_fit_dump_tables(&v->av, dir) != SPFY_OK)
+            spfy_log_warn("SPFY_FIT_TABLES_DUMP: could not write to '%s'", dir);
+    }
+    if ((rc = spfy_fit_apply_overrides(&v->av, &v->ccos, v->pros)) != SPFY_OK) goto fail;
 
     v->hp_prune_thresh = spfy_vcf_f32(&v->vcf, "HALFPHONE_CAND_PRUNE_THRESH",
                                       0.8f);
@@ -256,6 +264,7 @@ void spfy_voice_free(spfy_voice_t *v)
     free(v->bucket_cap);
     free(v->voicing_buf);
     free(v->ctx4_buf);
+    free(v->av.unit_bias);
     spfy_cart_free(&v->durt_cart);
     spfy_cart_free(&v->f0tr_cart);
     spfy_chunk_tables_free(&v->chunks);
