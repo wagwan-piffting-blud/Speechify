@@ -1,8 +1,16 @@
 # Speechify/spfy Changelog
 
+## 2026-10-20
+
+- **Yet another edge-case fix for the spfy engine.** Apparently rate tags were causing some trouble with certain phrases, so the engine was producing 65535 ms of silence in the middle of a word/phrase because of a buffer overflow inside a certain unit of speech for Tom specifically. This has been fixed, and the engine now produces correct output for all tested phrases with rate tags. A regression test has been added to ensure that this issue does not occur again in the future.
+
+---
+
 ## 2026-10-15
 
 - **Fix more edge-cases and wrong behavior in the spfy engine.** More edge-cases were found where the spfy engine would produce incorrect/no output or unexpected behavior. These have been fixed alongside the previous fixes.
+
+---
 
 ## 2026-09-29
 

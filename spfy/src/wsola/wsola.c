@@ -681,10 +681,11 @@ static int emit_body_tscale_plan(spfy_wsola_streamer_t *s,
      * already consumed -- FUN_08ee3560 passes (0x35d4 - 0x35d0) >> shift.
      * Its TARGET is not reduced, so unit 0 legitimately scales harder. */
     size_t in_base = in_base0;
-    size_t next_base = pre + (size_t)pl[0].nat_ms * sps;      /* 0x35d4 */
+    size_t next_base = (size_t)((ptrdiff_t)pre
+                                + (ptrdiff_t)pl[0].nat_ms * (ptrdiff_t)sps); /* 0x35d4 */
     size_t nat_smp = (next_base > in_base) ? next_base - in_base : 1u;
-    uint32_t nat_ms = (uint32_t)(nat_smp / sps);
-    if (nat_ms == 0u) nat_ms = 1u;
+    int32_t nat_ms = (int32_t)(nat_smp / sps);
+    if (nat_ms == 0) nat_ms = 1;
 
     size_t rp = *io_pos;
     size_t out_pos = hop;          /* FUN_08ee33f0(this, ..., hop) */
@@ -711,8 +712,9 @@ static int emit_body_tscale_plan(spfy_wsola_streamer_t *s,
             if (++ui >= n) goto done;
             out_base   = out_end;
             in_base    = next_base;
-            next_base += (size_t)pl[ui].nat_ms * sps;
-            nat_ms     = pl[ui].nat_ms ? pl[ui].nat_ms : 1u;
+            next_base  = (size_t)((ptrdiff_t)next_base
+                                  + (ptrdiff_t)pl[ui].nat_ms * (ptrdiff_t)sps);
+            nat_ms     = pl[ui].nat_ms ? pl[ui].nat_ms : 1;
             SPFY_UNIT_STEP(ui, nat_ms);
         }
         /* ⚠ WHOLE frames only, and the advance test is

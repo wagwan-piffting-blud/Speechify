@@ -988,6 +988,34 @@ static int tgt_override_ms(const char *lab, float *io_tgt)
     return 1;
 }
 
+/* A unit's natural length as FUN_08ee2960 hands it to the rate plan: the lp
+ * step to the next unit inside a run, and for a run's last unit dur_like read
+ * as a SIGNED int16. Measured 2670/2670 against the engine's wsola_in over
+ * corpus_rate; plain dur_like matched 2668.
+ *
+ * The two misses are tom uids 14730/14731 ("twenty", email4_082): dur 7 against
+ * an lp step of 8, then dur_like 0xFFFF, which the engine takes as -1 ms. Read
+ * as 65535 ms, the plan stretched the zero padding past the recording's end
+ * over 65535 * 100/N ms -- 77.089 s of digital silence inside "twentieth" at
+ * \!rp85.
+ *
+ * SPFY_RATE_NAT_LEGACY=1 restores the unsigned dur_like. */
+static int32_t plan_nat_ms(const spfy_voice_t *v, const uint32_t *path_uids,
+                           uint32_t k, uint32_t run_end,
+                           const spfy_unit_record_t *rk)
+{
+    static int legacy = -1;
+    if (legacy < 0) legacy = (spfy_env("SPFY_RATE_NAT_LEGACY") != NULL);
+    if (legacy) return (int32_t)rk->dur_like;
+    if (k + 1u < run_end && path_uids[k + 1u] == path_uids[k] + 1u) {
+        spfy_unit_record_t rn;
+        if (spfy_unit_record_get(&v->units, path_uids[k + 1u], &rn) == SPFY_OK
+            && rn.file_idx == rk->file_idx && rn.local_pos >= rk->local_pos)
+            return (int32_t)rn.local_pos - (int32_t)rk->local_pos;
+    }
+    return (int32_t)(int16_t)rk->dur_like;
+}
+
 static size_t build_unit_plan(const spfy_voice_t *v,
                               const uint32_t (*ctx)[5],
                               const uint32_t *hp_to_post,
@@ -1016,8 +1044,8 @@ static size_t build_unit_plan(const spfy_voice_t *v,
          * pause: armed, FUN_08ee2960 skips the pau resizer FUN_08ee1ee0
          * entirely, so the decode hands WSOLA the full recorded pause and
          * the stretch does the shortening. */
-        uint32_t nat_ms = rk.dur_like;
-        if (nat_ms == 0u) return 0;
+        int32_t nat_ms = plan_nat_ms(v, path_uids, k, s0 + run_n, &rk);
+        if (nat_ms == 0) return 0;
 
         /* this+0x361c: rewritten only by a unit that carries a rate level of
          * its own, so it persists over the pad and pau slots between words. */
@@ -1045,7 +1073,7 @@ static size_t build_unit_plan(const spfy_voice_t *v,
         else
             tgt = (float)nat_ms * factor;
 
-        if (!(tgt > 0.0f)) tgt = (float)nat_ms;
+        if (nat_ms > 0 && !(tgt > 0.0f)) tgt = (float)nat_ms;
         tgt_override_ms(lab, &tgt);
 
         out[n].nat_ms = nat_ms;
@@ -1062,7 +1090,7 @@ static size_t build_unit_plan(const spfy_voice_t *v,
         if (spfy_env("SPFY_RATE_DUMP")) {
             fprintf(stderr,
                     "{\"rate_unit\":1,\"slot\":%u,\"uid\":%u,\"lab\":\"%s\","
-                    "\"rate_n\":%d,\"factor\":%.9g,\"nat\":%u,\"tgt\":%.9g}\n",
+                    "\"rate_n\":%d,\"factor\":%.9g,\"nat\":%d,\"tgt\":%.9g}\n",
                     k, path_uids[k], lab ? lab : "?",
                     (int)hp_rate_n[k], (double)factor, nat_ms, (double)tgt);
         }
@@ -1087,7 +1115,7 @@ static float run_time_scale(const spfy_voice_t *v,
         if (path_uids[k] == 0xFFFFFFFFu) continue;
         if (spfy_unit_record_get(&v->units, path_uids[k], &rk) != SPFY_OK)
             continue;
-        double nat = (double)rk.dur_like;
+        double nat = (double)plan_nat_ms(v, path_uids, k, s0 + run_n, &rk);
         if (!(nat > 0.0)) continue;
         const char *lab = NULL;
         uint32_t kp = hp_to_post[k];

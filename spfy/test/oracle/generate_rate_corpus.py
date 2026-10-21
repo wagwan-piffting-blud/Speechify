@@ -111,6 +111,16 @@ def build():
             out.append({"id": f"rate_{tk}_rp{n}", "mode": "text",
                         "text": f"\\!rp{n} {TEXTS[tk]}",
                         "tags": ["rate", "breadth"]})
+
+    # 9. tom uid 14731 ("twen-ty" iy, email4_082) has dur_like 0xFFFF with
+    #    72 samples left in its recording. Armed, its plan natural was the
+    #    raw 65535 ms: 77.089 s of zeros inside "twentieth" at \!rp85.
+    octo = ("Here is the 11 a.m. Mountain Standard Time observation for "
+            "Phoenix on Tuesday, October 20th. At Sky Harbor, it was fair.")
+    out.append({"id": "rate_oct_base", "mode": "text", "text": octo,
+                "tags": ["rate", "baseline", "ffff"]})
+    out.append({"id": "rate_oct_rp85", "mode": "text",
+                "text": f"\\!rp85 {octo}", "tags": ["rate", "ffff"]})
     return out
 
 

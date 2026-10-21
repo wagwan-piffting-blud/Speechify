@@ -227,13 +227,14 @@ typedef struct {
  * against the output cursor every frame -- an off-by-one there changes the
  * frame COUNT, not just a rounding.
  *
- *   nat_ms  natural duration as decoded
+ *   nat_ms  natural duration as decoded -- SIGNED, because the engine reads
+ *           dur_like as an int16 and a 0xFFFF unit steps the bases back 1 ms
  *   tgt_ms  what it must come out as -- already carrying the rate factor and
  *           the plosive pass-through (see spfy_wsola_unit_scale)
  *
  * scale for the unit is nat_ms / tgt_ms, which is FUN_08ee1640's ratio. */
 typedef struct spfy_wsola_unit {
-    uint32_t nat_ms;
+    int32_t  nat_ms;
     float    tgt_ms;
     /* Eligible for FUN_08ee1640's pass-through guard: a stop or affricate
      * that is not "pau" (spfy_wsola_label_is_plosive).
